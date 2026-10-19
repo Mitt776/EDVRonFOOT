@@ -3020,6 +3020,8 @@ REM EDVRonFOOT: build gate for the native-VR-on-foot probe (src\d3d11\native_vr_
 REM native_vr_probe_core.h: the mode mapping, the ring, the limiter and every line's text. Part B compiles the REAL glue with the real
 REM CodeHook and hooks synthetic functions that begin with the game's prologue: arguments forwarded unchanged, recording only while on,
 REM an unreadable field survived, a wrong prologue refused with one line and its bytes untouched, then hooked once corrected.
+REM Part C: the view pipeline rebuild/teardown on synthetic copies -- decision lines only on change, and experimental.native_vr_block_cinema
+REM (5 seen as 3, 6 as 4, the field restored, other modes and a mid-call write left alone, activate/deactivate still the game's).
 if not exist "%OBJ%\nativevrprobe" mkdir "%OBJ%\nativevrprobe"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^

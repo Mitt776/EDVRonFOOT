@@ -6,6 +6,10 @@
 // game's prologue: each hook forwards its arguments unchanged, records only while recording is on, reads the game's fields (and
 // survives an unreadable one), and a point with the wrong prologue is refused with one line and left untouched, then hooked on a
 // later call once its bytes are right.
+// Part C hooks synthetic copies of the view pipeline's rebuild and teardown (their own prologues, then a jump into C++ that acts as the
+// game does on a fake pipeline): the decision line is written only when it changes, and experimental.native_vr_block_cinema's
+// substitution -- the rebuild sees 3 for 5 and 4 for 6, the field is the game's again after, anything else is left alone, a value the
+// game writes during the call is kept, activate and deactivate still reach the game -- with its line, limited like the rest.
 #include "../../src/d3d11/native_vr_probe.h"
 #include "../../src/d3d11/native_vr_probe_core.h"
 #include <windows.h>
@@ -17,6 +21,8 @@
 
 namespace edvr {
 void breadcrumb(const char*) {}  // production guard.cpp's crash-channel dependency (proxy.cpp), as the other rigs stub it
+bool journalOnFootKnown() { return false; }  // journal_watch.cpp's, for the frame boundary the rig never calls
+bool journalOnFoot() { return false; }
 }
 
 using namespace edvr;
@@ -128,11 +134,129 @@ void partA() {
         nvp::formatEvent(e, base, size, line, sizeof(line));
         check(std::strstr(line, "cinema feature OFF") && std::strstr(line, "active flag before 1"), "text: the cinema off line");
     }
+    check(nvp::cinemaModeSubstitute(5) == 3 && nvp::cinemaModeSubstitute(6) == 4, "block: cinema 5 and 6 become headset stereo 3 and 4");
+    check(nvp::cinemaModeSubstitute(0) == 0 && nvp::cinemaModeSubstitute(3) == 0 && nvp::cinemaModeSubstitute(4) == 0 &&
+              nvp::cinemaModeSubstitute(7) == 0 && nvp::cinemaModeSubstitute(-1) == 0,
+          "block: every other mode is left alone");
+    {
+        char line[700];
+        nvp::Event e;
+        e.point = nvp::kPointBuild;
+        e.readOk = 1;
+        e.self = 0xAB0;
+        e.mode = 5;
+        e.built = 3;
+        e.cinema = 3;
+        nvp::formatEvent(e, 0, 0, line, sizeof(line));
+        check(std::strstr(line, "cinema decision (rebuild): view pipeline 0xAB0, stereo mode 5 (cinema); result: sub-pipelines built 0,1, "
+                                "with cinema 0,1") != nullptr,
+              "text: the rebuild decision line");
+        e.mode = 3;
+        e.cinema = 0;
+        nvp::formatEvent(e, 0, 0, line, sizeof(line));
+        check(std::strstr(line, "stereo mode 3 (headset stereo)") && std::strstr(line, "with cinema none"), "text: a stereo rebuild");
+        e.mode = 5;
+        e.substituted = 3;
+        nvp::formatEvent(e, 0, 0, line, sizeof(line), 1);
+        check(std::strstr(line, "native-vr-block-cinema: cinema blocked on a rebuild: view pipeline 0xAB0, stereo mode 5 -> 3 for this "
+                                "rebuild (back to 5 after)") &&
+                  std::strstr(line, "on foot (journal): yes"),
+              "text: the block line, with the journal's answer");
+        nvp::formatEvent(e, 0, 0, line, sizeof(line), -1);
+        check(std::strstr(line, "on foot (journal): unknown") != nullptr, "text: the block line when the journal does not know");
+        e.point = nvp::kPointTeardown;
+        e.substituted = 0;
+        e.built = 3;
+        e.cinema = 3;
+        nvp::formatEvent(e, 0, 0, line, sizeof(line));
+        check(std::strstr(line, "cinema decision (teardown): view pipeline 0xAB0, stereo mode 5; tearing down sub-pipelines built 0,1, "
+                                "with cinema 0,1") != nullptr,
+              "text: the teardown line");
+        e.readOk = 0;
+        nvp::formatEvent(e, 0, 0, line, sizeof(line));
+        check(std::strstr(line, "view pipeline 0xAB0 could not be read") != nullptr, "text: an unreadable pipeline says so");
+        nvp::formatInstalled(nvp::kPointCount, line, sizeof(line));
+        check(std::strcmp(line, "native-vr-probe: installed on 5 of 5 points (build 332841)") == 0, "text: the install line, all points");
+        nvp::formatInstalled(3, line, sizeof(line));
+        check(std::strstr(line, "installed on 3 of 5 points") && std::strstr(line, "say why the rest"), "text: the install line, some refused");
+    }
+    {
+        nvp::ChangeFilter changes;
+        nvp::Event e;
+        e.point = nvp::kPointBuild;
+        e.readOk = 1;
+        e.self = 0x10;
+        e.mode = 5;
+        int written = 0;
+        for (int i = 0; i < 1000; ++i) written += changes.admit(e) ? 1 : 0;
+        check(written == 1, "changes: a thousand identical rebuilds give one line");
+        e.mode = 3;
+        check(changes.admit(e), "changes: a different mode gives another");
+        e.self = 0x20;
+        check(changes.admit(e), "changes: another pipeline is its own");
+        e.self = 0x10;
+        e.point = nvp::kPointTeardown;
+        check(changes.admit(e), "changes: the teardown is apart from the rebuild");
+    }
 }
 
 // ---- Part B: the real glue on synthetic functions -------------------------------------------------------------------------------
 
-volatile uint64_t g_modeSelf = 0, g_onSelf = 0, g_onArg = 0, g_offSelf = 0;
+volatile uint64_t g_modeSelf = 0, g_onSelf = 0, g_onArg = 0, g_offSelf = 0, g_teardownSelf = 0;
+volatile int32_t g_buildSaw = -1;
+volatile int32_t g_buildWrites = 0;  // when not 0, the fake rebuild writes it into the mode, as the game might mid-call
+
+// A fake view pipeline: P+0x28 the settings (mode at +0x9D4), P+0x90.. four sub-pipelines with +0x329 built and +0x330 cinema.
+uint8_t g_config[0xA00];
+uint8_t g_subs[nvp::kSubPipelines][0x340];
+uint8_t g_pipeline[0xB0];
+int32_t& pipelineMode() { return *reinterpret_cast<int32_t*>(g_config + nvp::kConfigStereoMode); }
+
+// What the game's rebuild does with the mode it reads (docs: "Решение о кинотеатре").
+void fakeBuild(uint8_t* pipeline) {
+    const uint8_t* config = *reinterpret_cast<uint8_t**>(pipeline + nvp::kPipelineConfig);
+    const int32_t mode = *reinterpret_cast<const int32_t*>(config + nvp::kConfigStereoMode);
+    g_buildSaw = mode;
+    const bool cinema = mode == 5 || mode == 6;
+    for (int i = 0; i < 2; ++i) {
+        if (i == 1 && mode == 0) break;
+        uint8_t* sub = *reinterpret_cast<uint8_t**>(pipeline + nvp::kPipelineSubs + 8 * i);
+        sub[nvp::kSubBuilt] = 1;
+        sub[nvp::kSubCinema] = cinema ? 1 : 0;
+    }
+    if (g_buildWrites) pipelineMode() = g_buildWrites;
+}
+void fakeTeardown(uint8_t* pipeline) {
+    g_teardownSelf = reinterpret_cast<uint64_t>(pipeline);
+    for (int i = 0; i < nvp::kSubPipelines; ++i) {
+        uint8_t* sub = *reinterpret_cast<uint8_t**>(pipeline + nvp::kPipelineSubs + 8 * i);
+        if (!sub) continue;
+        sub[nvp::kSubBuilt] = 0;
+        sub[nvp::kSubCinema] = 0;
+    }
+}
+
+// The game's prologue, then (rebuild) pop what it pushed, and mov rax, imm64; jmp rax into the C++ stand-in with rcx and the return
+// address as the caller left them.
+size_t writeJumpFunction(uint8_t* at, int point, void (*target)(uint8_t*)) {
+    size_t n = 0, bytes = 0;
+    const uint8_t* prologue = nvp::prologueOf(point, &bytes);
+    std::memcpy(at, prologue, bytes);
+    n += bytes;
+    if (point == nvp::kPointBuild) {
+        const uint8_t pops[] = {0x41, 0x5C, 0x5F, 0x5E, 0x5B, 0x5D};  // pop r12; pop rdi; pop rsi; pop rbx; pop rbp
+        std::memcpy(at + n, pops, sizeof(pops));
+        n += sizeof(pops);
+    }
+    at[n++] = 0x48;
+    at[n++] = 0xB8;
+    const uint64_t address = reinterpret_cast<uint64_t>(target);
+    std::memcpy(at + n, &address, 8);
+    n += 8;
+    at[n++] = 0xFF;
+    at[n++] = 0xE0;  // jmp rax
+    return n;
+}
 
 // prologue; mov rax, imm64; mov [rax], rcx; [mov rax, imm64; mov [rax], rdx;] add rsp,20h; pop rbx; ret
 size_t writeFunction(uint8_t* at, volatile uint64_t* first, volatile uint64_t* second) {
@@ -164,6 +288,117 @@ struct FakeActivity {
     uint64_t data = 0;
 };
 
+void partC(void (*callBuild)(void*), void (*callTeardown)(void*), void (*callOn)(void*, void*), void (*callOff)(void*), uint64_t now) {
+    *reinterpret_cast<uint8_t**>(g_pipeline + nvp::kPipelineConfig) = g_config;
+    for (int i = 0; i < nvp::kSubPipelines; ++i) *reinterpret_cast<uint8_t**>(g_pipeline + nvp::kPipelineSubs + 8 * i) = g_subs[i];
+
+    // Probe and block off: the rebuild is the game's, nothing is recorded.
+    nativeVrProbeSetRecording(false);
+    nativeVrProbeSetBlockCinema(false);
+    pipelineMode() = 5;
+    g_lines.clear();
+    callBuild(g_pipeline);
+    nativeVrProbeDrain(now, -1, &sink, nullptr);
+    check(g_buildSaw == 5 && g_subs[0][nvp::kSubCinema] == 1 && g_lines.empty(), "pipeline: both off, the rebuild sees 5 and builds cinema; no line");
+
+    // Probe on: the decision lines, once per change.
+    nativeVrProbeSetRecording(true);
+    now += 2000;
+    g_lines.clear();
+    callTeardown(g_pipeline);
+    check(g_teardownSelf == reinterpret_cast<uint64_t>(g_pipeline), "pipeline: the teardown forwards its argument");
+    callBuild(g_pipeline);
+    nativeVrProbeDrain(now, -1, &sink, nullptr);
+    check(countLines("cinema decision (teardown)") == 1 && anyLine("tearing down sub-pipelines built 0,1, with cinema 0,1"),
+          "pipeline: the teardown line shows what is torn down");
+    check(countLines("cinema decision (rebuild)") == 1 && anyLine("stereo mode 5 (cinema); result: sub-pipelines built 0,1, with cinema 0,1"),
+          "pipeline: the rebuild line shows the mode and the cinema result");
+    check(!anyLine("called from (no stack)"), "pipeline: the caller was captured");
+
+    now += 2000;
+    g_lines.clear();
+    for (int i = 0; i < 1000; ++i) callBuild(g_pipeline);
+    nativeVrProbeDrain(now, -1, &sink, nullptr);
+    check(countLines("cinema decision (rebuild)") == 0, "pipeline: a thousand more identical rebuilds add nothing");
+    pipelineMode() = 3;
+    callBuild(g_pipeline);
+    nativeVrProbeDrain(now, -1, &sink, nullptr);
+    check(countLines("cinema decision (rebuild)") == 1 && anyLine("stereo mode 3 (headset stereo)") && anyLine("with cinema none"),
+          "pipeline: a changed mode is written at once");
+    check(!anyLine("native-vr-block-cinema"), "pipeline: no block line while the block is off");
+
+    // Block on, probe off: the substitution and its line, nothing else.
+    nativeVrProbeSetRecording(false);
+    nativeVrProbeSetBlockCinema(true);
+    now += 2000;
+    g_lines.clear();
+    pipelineMode() = 5;
+    callBuild(g_pipeline);
+    nativeVrProbeDrain(now, 1, &sink, nullptr);
+    check(g_buildSaw == 3 && pipelineMode() == 5, "block: the rebuild sees 3 for 5, and the field is 5 again after");
+    check(g_subs[0][nvp::kSubCinema] == 0 && g_subs[1][nvp::kSubCinema] == 0 && g_subs[1][nvp::kSubBuilt] == 1,
+          "block: so both eyes are built, without cinema");
+    check(countLines("cinema blocked on a rebuild") == 1 && anyLine("stereo mode 5 -> 3 for this rebuild (back to 5 after)") &&
+              anyLine("with cinema none") && anyLine("on foot (journal): yes"),
+          "block: its line, with the result and the journal's answer");
+    check(!anyLine("cinema decision"), "block: with the probe off no decision line is written");
+    pipelineMode() = 6;
+    callBuild(g_pipeline);
+    check(g_buildSaw == 4 && pipelineMode() == 6, "block: 6 is seen as 4, and is 6 again after");
+    pipelineMode() = 3;
+    callBuild(g_pipeline);
+    check(g_buildSaw == 3 && pipelineMode() == 3, "block: a stereo mode is left alone");
+    pipelineMode() = 0;
+    callBuild(g_pipeline);
+    check(g_buildSaw == 0 && pipelineMode() == 0, "block: mono is left alone");
+    pipelineMode() = 5;
+    g_buildWrites = 7;
+    callBuild(g_pipeline);
+    g_buildWrites = 0;
+    check(g_buildSaw == 3 && pipelineMode() == 7, "block: a value the game writes during the rebuild is kept, not overwritten with 5");
+
+    now += 2000;
+    nativeVrProbeDrain(now, 1, &sink, nullptr);
+    now += 2000;
+    g_lines.clear();
+    pipelineMode() = 5;
+    for (int i = 0; i < 100; ++i) callBuild(g_pipeline);
+    nativeVrProbeDrain(now, 1, &sink, nullptr);
+    check(countLines("cinema blocked on a rebuild") == 1, "block: a hundred blocked rebuilds in a frame write one line");
+    nativeVrProbeDrain(now + 1500, 1, &sink, nullptr);
+    check(anyLine("99 repeat(s) were not written"), "block: and the summary counts the other 99");
+
+    // Activate and deactivate are the game's even with the block on.
+    uint8_t feature[0x40] = {};
+    uint64_t view = 0x77;
+    g_onSelf = g_onArg = g_offSelf = 0;
+    callOn(feature, &view);
+    callOff(feature);
+    check(g_onSelf == reinterpret_cast<uint64_t>(feature) && g_onArg == reinterpret_cast<uint64_t>(&view) &&
+              g_offSelf == reinterpret_cast<uint64_t>(feature),
+          "block: activate and deactivate still reach the game, unchanged");
+
+    // Off again: the next rebuild is the game's own.
+    nativeVrProbeSetBlockCinema(false);
+    pipelineMode() = 5;
+    callBuild(g_pipeline);
+    check(g_buildSaw == 5 && g_subs[0][nvp::kSubCinema] == 1, "block: off again, the rebuild sees 5 and builds cinema");
+
+    // An unreadable pipeline is forwarded and, with the probe on, said so.
+    nativeVrProbeSetRecording(true);
+    nativeVrProbeSetBlockCinema(true);
+    uint8_t broken[0xB0] = {};
+    *reinterpret_cast<uint64_t*>(broken + nvp::kPipelineConfig) = 0x10;
+    now += 4000;
+    g_lines.clear();
+    callTeardown(broken);
+    nativeVrProbeDrain(now, -1, &sink, nullptr);
+    check(g_teardownSelf == reinterpret_cast<uint64_t>(broken) && countLines("could not be read") == 1,
+          "pipeline: an unreadable pipeline is said so and still forwarded");
+    nativeVrProbeSetBlockCinema(false);
+    nativeVrProbeSetRecording(false);
+}
+
 void partB() {
     auto* page = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
     if (!page) {
@@ -173,13 +408,18 @@ void partB() {
     uint8_t* fnMode = page;
     uint8_t* fnOn = page + 0x100;
     uint8_t* fnOff = page + 0x200;
+    uint8_t* fnBuild = page + 0x300;
+    uint8_t* fnTeardown = page + 0x400;
     writeFunction(fnMode, &g_modeSelf, nullptr);
     writeFunction(fnOn, &g_onSelf, &g_onArg);
     writeFunction(fnOff, &g_offSelf, nullptr);
+    writeJumpFunction(fnBuild, nvp::kPointBuild, &fakeBuild);
+    writeJumpFunction(fnTeardown, nvp::kPointTeardown, &fakeTeardown);
     fnOff[0] = 0x41;  // not the game's prologue: the point must be refused
     FlushInstructionCache(GetCurrentProcess(), page, 4096);
     const uintptr_t targets[nvp::kPointCount] = {reinterpret_cast<uintptr_t>(fnMode), reinterpret_cast<uintptr_t>(fnOn),
-                                                 reinterpret_cast<uintptr_t>(fnOff)};
+                                                 reinterpret_cast<uintptr_t>(fnOff), reinterpret_cast<uintptr_t>(fnBuild),
+                                                 reinterpret_cast<uintptr_t>(fnTeardown)};
     using Fn1 = void (*)(void*);
     using Fn2 = void (*)(void*, void*);
     auto callMode = reinterpret_cast<Fn1>(fnMode);
@@ -188,18 +428,23 @@ void partB() {
 
     g_lines.clear();
     int armed = nativeVrProbeInstall(0x140000000ull, targets, false, &sink, nullptr);
-    check(armed == 2, "glue: two good prologues are hooked, the bad one is not");
+    check(armed == 4, "glue: four good prologues are hooked, the bad one is not");
     check(countLines("CinemaPipelineFeature deactivate at EliteDangerous64.exe+0x28AB150 NOT hooked") == 1,
           "glue: the refused point is named once, by its RVA");
     check(fnOff[0] == 0x41 && std::memcmp(fnOff + 1, nvp::kPrologue + 1, nvp::kPrologueBytes - 1) == 0,
           "glue: the refused point's bytes are untouched");
-    check(fnMode[0] == 0xE9 && fnOn[0] == 0xE9, "glue: the two hooked points now begin with the jump");
+    check(fnMode[0] == 0xE9 && fnOn[0] == 0xE9 && fnBuild[0] == 0xE9 && fnTeardown[0] == 0xE9,
+          "glue: the four hooked points now begin with the jump");
+    check(anyLine("view pipeline rebuild hooked") && anyLine("7 prologue bytes verified, 5 moved") &&
+              anyLine("only experimental.native_vr_block_cinema changes what it sees") && anyLine("view pipeline teardown hooked") &&
+              anyLine("10 prologue bytes verified, 5 moved"),
+          "glue: the rebuild and the teardown, each with its own prologue");
 
     fnOff[0] = 0x40;
     FlushInstructionCache(GetCurrentProcess(), fnOff, 1);
     g_lines.clear();
     armed = nativeVrProbeInstall(0x140000000ull, targets, false, &sink, nullptr);
-    check(armed == 3 && countLines("hooked at") == 1 && anyLine("CinemaPipelineFeature deactivate hooked"),
+    check(armed == 5 && countLines("hooked at") == 1 && anyLine("CinemaPipelineFeature deactivate hooked"),
           "glue: a later call hooks the corrected point and leaves the armed ones alone");
 
     uint64_t now = 100000;
@@ -219,7 +464,7 @@ void partB() {
     g_lines.clear();
     g_modeSelf = 0;
     callMode(&activity);
-    nativeVrProbeDrain(now, &sink, nullptr);
+    nativeVrProbeDrain(now, -1, &sink, nullptr);
     check(g_modeSelf == reinterpret_cast<uint64_t>(&activity), "glue: recording, the original still gets the activity");
     check(countLines("stereo mode: requested 2 -> applied 2") == 1 && anyLine("owner 0x5555"), "glue: the mode line, with the owner");
     check(!anyLine("called from (no stack)"), "glue: the caller was captured");
@@ -228,7 +473,7 @@ void partB() {
     modeData[2] = 5;
     g_lines.clear();
     callMode(&activity);
-    nativeVrProbeDrain(now, &sink, nullptr);
+    nativeVrProbeDrain(now, -1, &sink, nullptr);
     check(countLines("requested 5 -> applied 1") == 1, "glue: a mode >= 3 is shown as the 1 the view gets");
 
     now += 2000;
@@ -237,7 +482,7 @@ void partB() {
     g_lines.clear();
     g_modeSelf = 0;
     callMode(&broken);
-    nativeVrProbeDrain(now, &sink, nullptr);
+    nativeVrProbeDrain(now, -1, &sink, nullptr);
     check(g_modeSelf == reinterpret_cast<uint64_t>(&broken) && countLines("could not be read") == 1,
           "glue: an unreadable activity is said so and still forwarded");
 
@@ -250,7 +495,7 @@ void partB() {
     feature[0x20] = 1;  // what the real activate would have done
     g_offSelf = 0;
     callOff(feature);
-    nativeVrProbeDrain(now, &sink, nullptr);
+    nativeVrProbeDrain(now, -1, &sink, nullptr);
     check(g_onSelf == reinterpret_cast<uint64_t>(feature) && g_onArg == reinterpret_cast<uint64_t>(&view),
           "glue: activate forwards both arguments unchanged");
     check(g_offSelf == reinterpret_cast<uint64_t>(feature), "glue: deactivate forwards its argument unchanged");
@@ -261,12 +506,13 @@ void partB() {
     modeData[2] = 0;
     g_lines.clear();
     for (int i = 0; i < 100; ++i) callMode(&activity);
-    nativeVrProbeDrain(now, &sink, nullptr);
+    nativeVrProbeDrain(now, -1, &sink, nullptr);
     check(countLines("requested 0 -> applied 0") == 1, "glue: a hundred identical calls in a frame write one line");
-    nativeVrProbeDrain(now + 1500, &sink, nullptr);
+    nativeVrProbeDrain(now + 1500, -1, &sink, nullptr);
     check(anyLine("99 repeat(s) were not written"), "glue: and the next window's summary counts the other 99");
 
     nativeVrProbeSetRecording(false);
+    partC(reinterpret_cast<void (*)(void*)>(fnBuild), reinterpret_cast<void (*)(void*)>(fnTeardown), callOn, callOff, now + 5000);
 }
 }  // namespace
 
