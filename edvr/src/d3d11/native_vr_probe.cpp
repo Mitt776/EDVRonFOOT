@@ -17,10 +17,22 @@ namespace {
 
 using Fn1 = void (*)(void*);
 using Fn2 = void (*)(void*, void*);
+using FnSource = uint64_t (*)(void*, void*, void*, void*);
+using FnCamera = void* (*)(void*, void*);
 
 std::atomic<uintptr_t> g_original[nvp::kPointCount];
 std::atomic<bool> g_recording{false};
 std::atomic<bool> g_block{false};
+std::atomic<bool> g_onFoot{false};
+// The hold (nvp::holdStep). The source hook steps it on the game's render thread; the frame thread only ends it by the journal.
+std::atomic<bool> g_holding{false};
+std::atomic<int32_t> g_holdValue{0};
+std::atomic<uint64_t> g_holdRepeats{0};
+// What X+0x20 holds after the source hook (the camera line's mode), and the game's mode the probe last wrote a line for.
+constexpr int32_t kNotSeen = INT32_MIN;
+constexpr int32_t kUnreadable = INT32_MIN + 1;
+std::atomic<int32_t> g_sourceMode{kNotSeen};
+std::atomic<int32_t> g_sourceSaid{kNotSeen};
 std::atomic<uint64_t> g_recorded{0};
 nvp::Ring<1024> g_ring;
 std::atomic<uintptr_t> g_base{0};
@@ -85,6 +97,42 @@ __declspec(noinline) bool sehSwapMode(int32_t* field, int32_t from, int32_t to) 
     }
 }
 
+// The source's mode field X+0x20 (X = *(this+0x7F8)) and the renderer S = *(this+0x50), whose view settings the line names.
+__declspec(noinline) uint8_t sehReadSource(const uint8_t* self, int32_t** field, int32_t* mode, uint64_t* x, uint64_t* renderer) noexcept {
+    __try {
+        const uint8_t* object = *reinterpret_cast<const uint8_t* const*>(self + nvp::kSourceObject);
+        *x = reinterpret_cast<uint64_t>(object);
+        *renderer = *reinterpret_cast<const uint64_t*>(self + nvp::kSourceRenderer);
+        *field = reinterpret_cast<int32_t*>(const_cast<uint8_t*>(object) + nvp::kSourceStereoMode);
+        *mode = **field;
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+// The name the camera choice just made at *out: up to kNameBytes - 1 characters, anything unprintable as '?'. No string: "(none)".
+__declspec(noinline) uint8_t sehReadName(void* const* out, char* name) noexcept {
+    __try {
+        const uint8_t* str = static_cast<const uint8_t*>(*out);
+        if (!str) {
+            std::memcpy(name, "(none)", 7);
+            return 1;
+        }
+        const uint64_t length = *reinterpret_cast<const uint64_t*>(str);
+        const size_t n = length < nvp::kNameBytes - 1 ? static_cast<size_t>(length) : nvp::kNameBytes - 1;
+        for (size_t i = 0; i < n; ++i) {
+            const char c = static_cast<char>(str[nvp::kNameChars + i]);
+            name[i] = c >= 32 && c < 127 ? c : '?';
+        }
+        name[n] = 0;
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        name[0] = 0;
+        return 0;
+    }
+}
+
 // Inlined into each hook so frame 1 of the capture is the game's caller (frame 0 is the hook itself, skipped).
 __forceinline void captureStack(nvp::Event& e) {
     void* frames[nvp::kStackFrames] = {};
@@ -144,6 +192,7 @@ __declspec(noinline) void buildHook(void* self) {
     nvp::Event e;
     int32_t* field = nullptr;
     if (recording || block) e.readOk = sehReadPipelineMode(static_cast<const uint8_t*>(self), &field, &e.mode);
+    if (e.readOk) e.other = reinterpret_cast<uint64_t>(field) - nvp::kConfigStereoMode;
     if (block && e.readOk) {
         const int32_t stereo = nvp::cinemaModeSubstitute(e.mode);
         if (stereo && sehSwapMode(field, e.mode, stereo)) e.substituted = stereo;
@@ -168,7 +217,10 @@ __declspec(noinline) void teardownHook(void* self) {
         e.self = reinterpret_cast<uint64_t>(self);
         int32_t* field = nullptr;
         e.readOk = sehReadPipelineMode(static_cast<const uint8_t*>(self), &field, &e.mode);
-        if (e.readOk) sehReadSubs(static_cast<const uint8_t*>(self), &e.built, &e.cinema);
+        if (e.readOk) {
+            e.other = reinterpret_cast<uint64_t>(field) - nvp::kConfigStereoMode;
+            sehReadSubs(static_cast<const uint8_t*>(self), &e.built, &e.cinema);
+        }
         e.thread = GetCurrentThreadId();
         captureStack(e);
         g_ring.push(e);
@@ -177,12 +229,74 @@ __declspec(noinline) void teardownHook(void* self) {
     reinterpret_cast<Fn1>(g_original[nvp::kPointTeardown].load(std::memory_order_acquire))(self);
 }
 
+// The stereo mode source, once a frame on the game's render thread, BEFORE the original copies X+0x20 into the renderer's request and
+// decides whether to compute the headset eyes' projections. With experimental.native_vr_on_foot on, a cinema mode there becomes the
+// headset stereo mode (nvp::holdStep), so the request, the projections, the pipeline and the camera all see stereo; the game never
+// rebuilds for cinema. The write is a compare-and-swap of the value just read, never a cinema mode. With the probe on, a mode the game
+// changed is one event (not one a frame).
+__declspec(noinline) uint64_t sourceHook(void* self, void* a, void* b, void* c) {
+    const bool recording = g_recording.load(std::memory_order_relaxed);
+    const bool key = g_onFoot.load(std::memory_order_relaxed);
+    if (recording || key || g_holding.load(std::memory_order_relaxed)) {
+        nvp::Event e;
+        e.point = nvp::kPointSource;
+        e.self = reinterpret_cast<uint64_t>(self);
+        int32_t* field = nullptr;
+        e.readOk = sehReadSource(static_cast<const uint8_t*>(self), &field, &e.mode, &e.other, &e.aux);
+        bool push = false;
+        if (e.readOk) {
+            nvp::HoldState s;
+            s.holding = g_holding.load(std::memory_order_acquire);
+            s.value = g_holdValue.load(std::memory_order_relaxed);
+            const nvp::HoldStep step = nvp::holdStep(s, key, e.mode);
+            if (!step.write || sehSwapMode(field, e.mode, step.write)) {
+                g_holdValue.store(s.value, std::memory_order_relaxed);
+                g_holding.store(s.holding, std::memory_order_release);
+                g_sourceMode.store(step.write ? step.write : e.mode, std::memory_order_relaxed);
+                if (step.kind == nvp::kHoldStart) g_holdRepeats.store(0, std::memory_order_relaxed);
+                if (step.kind == nvp::kHoldAgain) e.aux = g_holdRepeats.fetch_add(1, std::memory_order_relaxed) + 1;
+                e.kind = step.kind;
+                e.substituted = step.write;
+                push = step.kind != nvp::kHoldNone;
+            }
+            if (recording && g_sourceSaid.exchange(e.mode, std::memory_order_relaxed) != e.mode) push = true;
+        } else if (recording && g_sourceSaid.exchange(kUnreadable, std::memory_order_relaxed) != kUnreadable) {
+            push = true;
+        }
+        if (push) {
+            e.thread = GetCurrentThreadId();
+            g_ring.push(e);
+            g_recorded.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    return reinterpret_cast<FnSource>(g_original[nvp::kPointSource].load(std::memory_order_acquire))(self, a, b, c);
+}
+
+// The camera choice makes its name only on the way out: the original first, then the name is copied out of the new string.
+__declspec(noinline) void* cameraHook(void* self, void* out) {
+    void* result = reinterpret_cast<FnCamera>(g_original[nvp::kPointCamera].load(std::memory_order_acquire))(self, out);
+    if (g_recording.load(std::memory_order_relaxed)) {
+        nvp::Event e;
+        e.point = nvp::kPointCamera;
+        e.self = reinterpret_cast<uint64_t>(self);
+        e.readOk = sehReadName(static_cast<void* const*>(out), e.name);
+        e.mode = g_sourceMode.load(std::memory_order_relaxed);
+        if (g_holding.load(std::memory_order_acquire)) e.substituted = g_holdValue.load(std::memory_order_relaxed);
+        e.thread = GetCurrentThreadId();
+        g_ring.push(e);
+        g_recorded.fetch_add(1, std::memory_order_relaxed);
+    }
+    return result;
+}
+
 const void* hookFor(int point) {
     switch (point) {
         case nvp::kPointMode: return reinterpret_cast<const void*>(&modeHook);
         case nvp::kPointCinemaOn: return reinterpret_cast<const void*>(&cinemaOnHook);
         case nvp::kPointCinemaOff: return reinterpret_cast<const void*>(&cinemaOffHook);
         case nvp::kPointBuild: return reinterpret_cast<const void*>(&buildHook);
+        case nvp::kPointSource: return reinterpret_cast<const void*>(&sourceHook);
+        case nvp::kPointCamera: return reinterpret_cast<const void*>(&cameraHook);
         default: return reinterpret_cast<const void*>(&teardownHook);
     }
 }
@@ -333,7 +447,9 @@ int nativeVrProbeInstall(uintptr_t base, const uintptr_t* targetsOverride, bool 
                        "it records and then calls the original unchanged%s",
             nvp::kPointName[point], static_cast<unsigned long long>(nvp::kPointRva[point]), static_cast<unsigned long long>(target),
             prologueBytes, slot.hook.stolenBytes(),
-            point == nvp::kPointBuild ? " (only experimental.native_vr_block_cinema changes what it sees)" : "");
+            point == nvp::kPointBuild    ? " (only experimental.native_vr_block_cinema changes what it sees)"
+            : point == nvp::kPointSource ? " (only experimental.native_vr_on_foot changes what it sees)"
+                                         : "");
         // Process lifetime: the relay and trampoline are never freed, so a call already inside them can finish.
     }
     return armed;
@@ -341,6 +457,17 @@ int nativeVrProbeInstall(uintptr_t base, const uintptr_t* targetsOverride, bool 
 
 void nativeVrProbeSetRecording(bool on) { g_recording.store(on, std::memory_order_relaxed); }
 void nativeVrProbeSetBlockCinema(bool on) { g_block.store(on, std::memory_order_relaxed); }
+void nativeVrProbeSetOnFoot(bool on) { g_onFoot.store(on, std::memory_order_relaxed); }
+bool nativeVrProbeHolding() { return g_holding.load(std::memory_order_acquire); }
+
+void nativeVrOnFootJournal(int onFoot, NativeVrProbeSink sink, void* ctx) {
+    static int last = -1;
+    if (last == 1 && onFoot == 0 && g_holding.exchange(false, std::memory_order_acq_rel))
+        say(sink, ctx, "native-vr-on-foot: hold end: back in the ship (journal: on foot yes -> no) after %llu repeat(s); the mode is the "
+                       "game's again",
+            static_cast<unsigned long long>(g_holdRepeats.load(std::memory_order_relaxed)));
+    last = onFoot;
+}
 bool nativeVrProbeArmed(int point) { return point >= 0 && point < nvp::kPointCount && g_slots[point].armed; }
 uint64_t nativeVrProbeRecorded() { return g_recorded.load(std::memory_order_relaxed); }
 uint64_t nativeVrProbeDropped() { return g_ring.dropped(); }
@@ -354,8 +481,9 @@ void nativeVrProbeDrain(uint64_t nowMs, int onFoot, NativeVrProbeSink sink, void
     char line[700];
     while (g_ring.pop(&e)) {
         const bool pipeline = e.point == nvp::kPointBuild || e.point == nvp::kPointTeardown;
-        // A decision line only when it changed; a block line every time, through the limiter, so repeats are counted.
-        if (pipeline && !e.substituted ? !changes.admit(e) : !limiter.admit(e, nowMs)) continue;
+        // A decision or camera line only when it changed; a block or hold line every time, through the limiter, so repeats are counted.
+        const bool changeOnly = (pipeline && !e.substituted) || e.point == nvp::kPointCamera;
+        if (changeOnly ? !changes.admit(e) : !limiter.admit(e, nowMs)) continue;
         if (pipeline && e.substituted) changes.admit(e);
         if (nvp::formatEvent(e, base, size, line, sizeof(line), onFoot) > 0) sink(ctx, line);
     }
@@ -365,6 +493,7 @@ void nativeVrProbeDrain(uint64_t nowMs, int onFoot, NativeVrProbeSink sink, void
 void nativeVrProbeFrameBoundary() {
     static uint32_t generation = ~0u;
     static bool on = false, block = false, said = false, saidBlock = false, tried = false, saidBlockUnarmed = false;
+    static bool onFootKey = false, saidOnFoot = false, saidOnFootUnarmed = false;
     static int armed = 0;
     const Config& cfg = Config::get();
     const uint32_t now = cfg.generation();
@@ -387,14 +516,29 @@ void nativeVrProbeFrameBoundary() {
             saidBlock = true;
         }
         block = wantBlock;
+        const bool wantOnFoot = cfg.getBool("experimental.native_vr_on_foot", false);
+        if (!saidOnFoot || wantOnFoot != onFootKey) {
+            char line[200];
+            nvp::formatOnFootKey(wantOnFoot, saidOnFoot, line, sizeof(line));
+            Log::get().note("%s", line);
+            saidOnFoot = true;
+        }
+        onFootKey = wantOnFoot;
     }
-    if ((on || block) && !tried) {
+    if ((on || block || onFootKey) && !tried) {
         tried = true;
         armed = nativeVrProbeInstall(reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)), nullptr, true, &logSink, nullptr);
-        char line[160];
-        nvp::formatInstalled(armed, line, sizeof(line));
+        char line[260];
+        nvp::formatInstalled(armed, nativeVrProbeArmed(nvp::kPointCamera), line, sizeof(line));
         Log::get().note("%s", line);
     }
+    const bool sourceArmed = nativeVrProbeArmed(nvp::kPointSource);
+    if (onFootKey && tried && !sourceArmed && !saidOnFootUnarmed) {
+        Log::get().note("native-vr-on-foot: cannot work: the stereo mode source is not hooked (see the lines above); the game keeps its "
+                        "cinema");
+        saidOnFootUnarmed = true;
+    }
+    nativeVrProbeSetOnFoot(onFootKey && sourceArmed);
     const bool blockArmed = nativeVrProbeArmed(nvp::kPointBuild);
     if (block && tried && !blockArmed && !saidBlockUnarmed) {
         Log::get().note("native-vr-block-cinema: cannot work: the view pipeline rebuild is not hooked (see the lines above); the game "
@@ -406,6 +550,7 @@ void nativeVrProbeFrameBoundary() {
     if (armed > 0) {
         const int onFoot = journalOnFootKnown() ? (journalOnFoot() ? 1 : 0) : -1;
         nativeVrProbeDrain(GetTickCount64(), onFoot, &logSink, nullptr);
+        nativeVrOnFootJournal(onFoot, &logSink, nullptr);
     }
 }
 

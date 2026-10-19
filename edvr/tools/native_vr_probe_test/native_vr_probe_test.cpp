@@ -10,6 +10,10 @@
 // game does on a fake pipeline): the decision line is written only when it changes, and experimental.native_vr_block_cinema's
 // substitution -- the rebuild sees 3 for 5 and 4 for 6, the field is the game's again after, anything else is left alone, a value the
 // game writes during the call is kept, activate and deactivate still reach the game -- with its line, limited like the rest.
+// Part D hooks synthetic copies of the stereo mode source and the camera choice: experimental.native_vr_on_foot's hold -- 5 becomes 3
+// and 6 becomes 4 before the game's copy, and stays so between calls; a mode the game sets itself (3, 0) is left alone and ends the
+// hold; nothing with the key off; a cinema mode is never written -- its start, repeat (limited, with the summary) and end lines, the
+// end by the journal, and the camera line written only when the name or the mode changes.
 #include "../../src/d3d11/native_vr_probe.h"
 #include "../../src/d3d11/native_vr_probe_core.h"
 #include <windows.h>
@@ -175,10 +179,96 @@ void partA() {
         e.readOk = 0;
         nvp::formatEvent(e, 0, 0, line, sizeof(line));
         check(std::strstr(line, "view pipeline 0xAB0 could not be read") != nullptr, "text: an unreadable pipeline says so");
-        nvp::formatInstalled(nvp::kPointCount, line, sizeof(line));
-        check(std::strcmp(line, "native-vr-probe: installed on 5 of 5 points (build 332841)") == 0, "text: the install line, all points");
-        nvp::formatInstalled(3, line, sizeof(line));
-        check(std::strstr(line, "installed on 3 of 5 points") && std::strstr(line, "say why the rest"), "text: the install line, some refused");
+        nvp::formatInstalled(nvp::kPointCount, true, line, sizeof(line));
+        check(std::strcmp(line, "native-vr-probe: installed on 7 of 7 points (build 332841)") == 0, "text: the install line, all points");
+        nvp::formatInstalled(3, true, line, sizeof(line));
+        check(std::strstr(line, "installed on 3 of 7 points") && std::strstr(line, "say why the rest") && !std::strstr(line, "camera"),
+              "text: the install line, some refused");
+        nvp::formatOnFootKey(false, false, line, sizeof(line));
+        check(std::strcmp(line, "native-vr-on-foot: off (experimental.native_vr_on_foot = 0)") == 0, "text: the key's first line, off");
+        nvp::formatOnFootKey(true, true, line, sizeof(line));
+        check(std::strstr(line, "native-vr-on-foot: on: a cinema mode the game sets is replaced by headset stereo") &&
+                  std::strstr(line, "native_vr_on_foot = 1)"),
+              "text: the key's line, on");
+        nvp::formatOnFootKey(false, true, line, sizeof(line));
+        check(std::strstr(line, "native-vr-on-foot: off: no new hold starts") != nullptr, "text: the key's line, off again");
+        nvp::formatInstalled(6, false, line, sizeof(line));
+        check(std::strstr(line, "installed on 6 of 7 points") && std::strstr(line, "camera: skipped (its point is not hooked"),
+              "text: the install line says when the camera is skipped");
+    }
+    {
+        nvp::HoldState s;
+        nvp::HoldStep r = nvp::holdStep(s, false, 5);
+        check(!r.write && r.kind == nvp::kHoldNone && !s.holding, "hold: key off, cinema is left alone");
+        r = nvp::holdStep(s, true, 5);
+        check(r.write == 3 && r.kind == nvp::kHoldStart && s.holding && s.value == 3, "hold: key on, 5 becomes 3 and the hold starts");
+        r = nvp::holdStep(s, true, 3);
+        check(!r.write && r.kind == nvp::kHoldNone && s.holding, "hold: ours in place, nothing to do");
+        r = nvp::holdStep(s, true, 5);
+        check(r.write == 3 && r.kind == nvp::kHoldAgain, "hold: the game sets 5 again over ours: a repeat");
+        r = nvp::holdStep(s, true, 6);
+        check(r.write == 4 && r.kind == nvp::kHoldAgain && s.value == 4, "hold: 6 becomes 4");
+        r = nvp::holdStep(s, true, 0);
+        check(!r.write && r.kind == nvp::kHoldEnd && !s.holding, "hold: a mode of the game's own ends it, unwritten");
+        r = nvp::holdStep(s, true, 3);
+        check(!r.write && r.kind == nvp::kHoldNone, "hold: the game's own stereo is left alone");
+        nvp::holdStep(s, true, 5);
+        r = nvp::holdStep(s, false, 5);
+        check(!r.write && r.kind == nvp::kHoldEnd && !s.holding, "hold: key off and the game sets 5: the hold ends, 5 stays the game's");
+        bool neverCinema = true;
+        for (int key = 0; key < 2; ++key)
+            for (int32_t m = -2; m < 10; ++m)
+                for (int h = 0; h < 2; ++h) {
+                    nvp::HoldState t;
+                    t.holding = h != 0;
+                    t.value = 3;
+                    const int32_t w = nvp::holdStep(t, key != 0, m).write;
+                    neverCinema = neverCinema && w != 5 && w != 6 && (w == 0 || m == 5 || m == 6);
+                }
+        check(neverCinema, "hold: in no case is 5 or 6 written, and nothing but a cinema mode is written over");
+    }
+    {
+        char line[700];
+        nvp::Event e;
+        e.point = nvp::kPointSource;
+        e.readOk = 1;
+        e.self = 0x100;
+        e.other = 0x200;
+        e.aux = 0x10000;
+        e.mode = 5;
+        e.substituted = 3;
+        e.kind = nvp::kHoldStart;
+        nvp::formatEvent(e, 0, 0, line, sizeof(line), 0);
+        check(std::strstr(line, "native-vr-on-foot: hold start: the game set stereo mode 5 (cinema), put back to 3 (headset stereo)") &&
+                  std::strstr(line, "on foot (journal): no") && std::strstr(line, "renderer 0x10000 (its view settings 0x12CC0"),
+              "text: the hold start line, with the renderer's view settings to compare");
+        e.kind = nvp::kHoldAgain;
+        e.aux = 7;
+        nvp::formatEvent(e, 0, 0, line, sizeof(line), 1);
+        check(std::strstr(line, "hold again: the game set stereo mode 5 over ours, put back to 3 (7 time(s)") != nullptr,
+              "text: the repeat line counts the repeats");
+        e.kind = nvp::kHoldEnd;
+        e.mode = 0;
+        nvp::formatEvent(e, 0, 0, line, sizeof(line), 1);
+        check(std::strstr(line, "native-vr-on-foot: hold end: game set mode 0 itself") != nullptr, "text: the end line");
+        e.kind = nvp::kHoldNone;
+        e.mode = 3;
+        e.aux = 0x10000;
+        nvp::formatEvent(e, 0, 0, line, sizeof(line));
+        check(std::strstr(line, "native-vr-probe: stereo mode source: the game wants stereo mode 3 (headset stereo)") &&
+                  std::strstr(line, "its view settings 0x12CC0"),
+              "text: the probe's source line");
+        e.point = nvp::kPointCamera;
+        std::strcpy(e.name, "HMD First Person Camera");
+        e.mode = 3;
+        e.substituted = 3;
+        nvp::formatEvent(e, 0, 0, line, sizeof(line));
+        check(std::strstr(line, "native-vr-probe: camera \"HMD First Person Camera\" at stereo mode 3, held by native_vr_on_foot") != nullptr,
+              "text: the camera line, held");
+        e.substituted = 0;
+        e.readOk = 0;
+        nvp::formatEvent(e, 0, 0, line, sizeof(line));
+        check(std::strstr(line, "camera: the name could not be read, at stereo mode 3;") != nullptr, "text: an unreadable camera name");
     }
     {
         nvp::ChangeFilter changes;
@@ -197,6 +287,21 @@ void partA() {
         e.self = 0x10;
         e.point = nvp::kPointTeardown;
         check(changes.admit(e), "changes: the teardown is apart from the rebuild");
+        nvp::Event c;
+        c.point = nvp::kPointCamera;
+        c.readOk = 1;
+        c.mode = 5;
+        std::strcpy(c.name, "First Person Camera");
+        written = 0;
+        for (int i = 0; i < 1000; ++i) {
+            c.self = 0x1000 + i;  // the camera object is not part of it
+            written += changes.admit(c) ? 1 : 0;
+        }
+        check(written == 1, "changes: a thousand identical camera choices give one line");
+        std::strcpy(c.name, "HMD First Person Camera");
+        check(changes.admit(c), "changes: a changed camera name gives another");
+        c.mode = 3;
+        check(changes.admit(c), "changes: a changed mode with the same name gives another");
     }
 }
 
@@ -236,15 +341,55 @@ void fakeTeardown(uint8_t* pipeline) {
     }
 }
 
-// The game's prologue, then (rebuild) pop what it pushed, and mov rax, imm64; jmp rax into the C++ stand-in with rcx and the return
-// address as the caller left them.
-size_t writeJumpFunction(uint8_t* at, int point, void (*target)(uint8_t*)) {
+// The stereo mode source's stand-in: this+0x7F8 the object X (mode at +0x20), this+0x50 the renderer S (request at +0x3698).
+uint8_t g_sourceObject[0x40];
+uint8_t g_renderer[0x3700];
+uint8_t g_sourceThis[0x800];
+volatile int32_t g_sourceSaw = -1;
+int32_t& sourceMode() { return *reinterpret_cast<int32_t*>(g_sourceObject + nvp::kSourceStereoMode); }
+int32_t& rendererRequest() { return *reinterpret_cast<int32_t*>(g_renderer + 0x3698); }
+
+// What the game's source task does with the mode (docs: "Читатели и писатели режима"): copies it into the request.
+uint64_t fakeSource(uint8_t* self, void*, void*, void*) {
+    const uint8_t* x = *reinterpret_cast<uint8_t**>(self + nvp::kSourceObject);
+    uint8_t* s = *reinterpret_cast<uint8_t**>(self + nvp::kSourceRenderer);
+    if (reinterpret_cast<uintptr_t>(x) < 0x10000 || !s) return 0xC0FFEE;  // the rig's broken source: only the hook is under test
+    const int32_t mode = *reinterpret_cast<const int32_t*>(x + nvp::kSourceStereoMode);
+    g_sourceSaw = mode;
+    *reinterpret_cast<int32_t*>(s + 0x3698) = mode;
+    return 0xC0FFEE;
+}
+
+// The camera choice's stand-in: a new string at *out, as the game makes it (length at +0, characters from +0x14).
+uint8_t g_cameraString[0x80];
+volatile uint64_t g_cameraSelf = 0;
+bool g_cameraNone = false;
+void setCameraName(const char* name) {
+    const uint64_t n = std::strlen(name);
+    std::memcpy(g_cameraString, &n, 8);
+    std::memcpy(g_cameraString + 8, &n, 8);
+    std::memcpy(g_cameraString + nvp::kNameChars, name, n + 1);
+}
+void** fakeCamera(void* cam, void** out) {
+    g_cameraSelf = reinterpret_cast<uint64_t>(cam);
+    *out = g_cameraNone ? nullptr : g_cameraString;
+    return out;
+}
+
+// The game's prologue, then pop what it pushed (rebuild, source), and mov rax, imm64; jmp rax into the C++ stand-in with the arguments
+// and the return address as the caller left them.
+size_t writeJumpFunction(uint8_t* at, int point, const void* target) {
     size_t n = 0, bytes = 0;
     const uint8_t* prologue = nvp::prologueOf(point, &bytes);
     std::memcpy(at, prologue, bytes);
     n += bytes;
     if (point == nvp::kPointBuild) {
         const uint8_t pops[] = {0x41, 0x5C, 0x5F, 0x5E, 0x5B, 0x5D};  // pop r12; pop rdi; pop rsi; pop rbx; pop rbp
+        std::memcpy(at + n, pops, sizeof(pops));
+        n += sizeof(pops);
+    }
+    if (point == nvp::kPointSource) {
+        const uint8_t pops[] = {0x41, 0x5E, 0x5F, 0x5E, 0x5B, 0x5D};  // pop r14; pop rdi; pop rsi; pop rbx; pop rbp
         std::memcpy(at + n, pops, sizeof(pops));
         n += sizeof(pops);
     }
@@ -399,6 +544,149 @@ void partC(void (*callBuild)(void*), void (*callTeardown)(void*), void (*callOn)
     nativeVrProbeSetRecording(false);
 }
 
+using FnSourceCall = uint64_t (*)(void*, void*, void*, void*);
+using FnCameraCall = void** (*)(void*, void**);
+
+void partD(FnSourceCall callSource, FnCameraCall callCamera, uint64_t now) {
+    *reinterpret_cast<uint8_t**>(g_sourceThis + nvp::kSourceObject) = g_sourceObject;
+    *reinterpret_cast<uint8_t**>(g_sourceThis + nvp::kSourceRenderer) = g_renderer;
+    auto frame = [&](int32_t gameSets) {  // the game sets the mode (or not: -1), then the source task runs
+        if (gameSets >= 0) sourceMode() = gameSets;
+        return callSource(g_sourceThis, nullptr, nullptr, nullptr);
+    };
+
+    // Key off, probe off: the game's own.
+    nativeVrProbeSetRecording(false);
+    nativeVrProbeSetOnFoot(false);
+    g_lines.clear();
+    const uint64_t result = frame(5);
+    nativeVrProbeDrain(now, -1, &sink, nullptr);
+    check(result == 0xC0FFEE, "source: the original's result is returned");
+    check(g_sourceSaw == 5 && sourceMode() == 5 && rendererRequest() == 5 && g_lines.empty() && !nativeVrProbeHolding(),
+          "source: key off, the game copies its 5; no line, no hold");
+
+    // Key on, probe off: 5 -> 3 before the game's copy, and held between calls.
+    nativeVrProbeSetOnFoot(true);
+    now += 2000;
+    g_lines.clear();
+    frame(-1);
+    nativeVrProbeDrain(now, 0, &sink, nullptr);
+    check(g_sourceSaw == 3 && sourceMode() == 3 && rendererRequest() == 3 && nativeVrProbeHolding(),
+          "source: key on, the game copies 3 for its 5 and the hold runs");
+    check(countLines("native-vr-on-foot: hold start: the game set stereo mode 5 (cinema), put back to 3") == 1 &&
+              anyLine("on foot (journal): no") && anyLine("its view settings 0x"),
+          "source: one hold start line, with the journal and the view settings");
+    check(!anyLine("native-vr-probe:"), "source: with the probe off no probe line");
+    for (int i = 0; i < 10; ++i) frame(-1);
+    nativeVrProbeDrain(now, 0, &sink, nullptr);
+    check(g_sourceSaw == 3 && sourceMode() == 3 && countLines("native-vr-on-foot") == 1, "source: ten more frames: still 3, no more lines");
+
+    // The game sets 5 again every frame: a hundred repeats, one line, then the summary.
+    now += 2000;
+    nativeVrProbeDrain(now, 0, &sink, nullptr);
+    now += 2000;
+    g_lines.clear();
+    bool held = true;
+    for (int i = 0; i < 100; ++i) {
+        frame(5);
+        held = held && g_sourceSaw == 3 && sourceMode() == 3;
+    }
+    nativeVrProbeDrain(now, 1, &sink, nullptr);
+    check(held, "source: every repeat is put back to 3 before the game's copy");
+    check(countLines("hold again") == 1 && anyLine("(1 time(s) since the hold started)") && countLines("hold start:") == 0,
+          "source: a hundred repeats in a frame write one line");
+    nativeVrProbeDrain(now + 1500, 1, &sink, nullptr);
+    check(anyLine("99 repeat(s) were not written"), "source: and the summary counts the other 99");
+
+    // 6 is held as 4; a mode of the game's own ends the hold and is not touched.
+    now += 4000;
+    g_lines.clear();
+    frame(6);
+    check(g_sourceSaw == 4 && sourceMode() == 4, "source: 6 is put back to 4");
+    frame(0);
+    nativeVrProbeDrain(now, 1, &sink, nullptr);
+    check(g_sourceSaw == 0 && sourceMode() == 0 && !nativeVrProbeHolding() && countLines("hold end: game set mode 0 itself") == 1,
+          "source: the game's 0 ends the hold, untouched, with one line");
+    frame(3);
+    check(g_sourceSaw == 3 && sourceMode() == 3 && !nativeVrProbeHolding(), "source: the game's own 3 is left alone, no hold");
+
+    // Boarding: the game's 3 looks like ours; the journal's yes -> no ends the hold.
+    now += 2000;
+    g_lines.clear();
+    frame(5);
+    check(nativeVrProbeHolding(), "journal: a hold runs");
+    nativeVrOnFootJournal(1, &sink, nullptr);
+    frame(3);
+    nativeVrOnFootJournal(0, &sink, nullptr);
+    check(!nativeVrProbeHolding() && countLines("hold end: back in the ship (journal: on foot yes -> no)") == 1,
+          "journal: on foot yes -> no ends the hold with one line");
+    nativeVrOnFootJournal(0, &sink, nullptr);
+    check(countLines("back in the ship") == 1, "journal: said once");
+
+    // Key off while held: nothing new holds, the game's 5 stays 5 -- the hold never writes cinema itself.
+    now += 2000;
+    frame(5);
+    check(nativeVrProbeHolding() && sourceMode() == 3, "key off: a hold runs before");
+    nativeVrProbeSetOnFoot(false);
+    g_lines.clear();
+    frame(-1);
+    check(sourceMode() == 3 && g_sourceSaw == 3, "key off: ours stays until the game writes, nothing is put back");
+    frame(5);
+    nativeVrProbeDrain(now, 1, &sink, nullptr);
+    check(g_sourceSaw == 5 && sourceMode() == 5 && !nativeVrProbeHolding() && countLines("hold end: game set mode 5 itself") == 1,
+          "key off: the game's next 5 is its own and ends the hold");
+
+    // Probe on: the source's mode is a line when it changes, not every frame; an unreadable source is said once and forwarded.
+    nativeVrProbeSetRecording(true);
+    now += 2000;
+    g_lines.clear();
+    for (int i = 0; i < 50; ++i) frame(3);
+    frame(5);
+    nativeVrProbeDrain(now, 1, &sink, nullptr);
+    check(countLines("stereo mode source: the game wants stereo mode 3 (headset stereo)") == 1 &&
+              countLines("the game wants stereo mode 5 (cinema)") == 1,
+          "probe: one source line per change of the game's mode");
+    uint8_t broken[0x800] = {};
+    *reinterpret_cast<uint64_t*>(broken + nvp::kSourceObject) = 0x10;
+    now += 2000;
+    g_lines.clear();
+    nativeVrProbeSetOnFoot(true);
+    callSource(broken, nullptr, nullptr, nullptr);
+    callSource(broken, nullptr, nullptr, nullptr);
+    nativeVrProbeDrain(now, 1, &sink, nullptr);
+    check(countLines("stereo mode source 0x") == 1 && anyLine("could not be read"), "probe: an unreadable source is said once, forwarded");
+
+    // The camera: its name after the original made it, a line only when the name or the mode changes.
+    now += 2000;
+    g_lines.clear();
+    frame(5);  // held: 3
+    setCameraName("HMD First Person Camera");
+    uint8_t cam[16] = {};
+    void* out = nullptr;
+    void** r = callCamera(cam, &out);
+    check(r == &out && out == g_cameraString && g_cameraSelf == reinterpret_cast<uint64_t>(cam),
+          "camera: the original gets the camera and makes its string; its result is returned");
+    for (int i = 0; i < 1000; ++i) callCamera(cam, &out);
+    nativeVrProbeDrain(now, 1, &sink, nullptr);
+    check(countLines("native-vr-probe: camera \"HMD First Person Camera\" at stereo mode 3, held by native_vr_on_foot") == 1,
+          "camera: a thousand identical choices give one line, with the held mode");
+    setCameraName("First Person Camera");
+    callCamera(cam, &out);
+    g_cameraNone = true;
+    callCamera(cam, &out);
+    g_cameraNone = false;
+    nativeVrProbeDrain(now, 1, &sink, nullptr);
+    check(countLines("camera \"First Person Camera\"") == 1 && countLines("camera \"(none)\"") == 1, "camera: each changed name is a line");
+    nativeVrProbeSetRecording(false);
+    g_lines.clear();
+    setCameraName("Cockpit Cam");
+    callCamera(cam, &out);
+    nativeVrProbeDrain(now + 5000, 1, &sink, nullptr);
+    check(out == g_cameraString && !anyLine("camera"), "camera: probe off, forwarded and not written");
+    nativeVrProbeSetOnFoot(false);
+    frame(0);
+}
+
 void partB() {
     auto* page = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
     if (!page) {
@@ -410,16 +698,21 @@ void partB() {
     uint8_t* fnOff = page + 0x200;
     uint8_t* fnBuild = page + 0x300;
     uint8_t* fnTeardown = page + 0x400;
+    uint8_t* fnSource = page + 0x500;
+    uint8_t* fnCamera = page + 0x600;
     writeFunction(fnMode, &g_modeSelf, nullptr);
     writeFunction(fnOn, &g_onSelf, &g_onArg);
     writeFunction(fnOff, &g_offSelf, nullptr);
-    writeJumpFunction(fnBuild, nvp::kPointBuild, &fakeBuild);
-    writeJumpFunction(fnTeardown, nvp::kPointTeardown, &fakeTeardown);
+    writeJumpFunction(fnBuild, nvp::kPointBuild, reinterpret_cast<const void*>(&fakeBuild));
+    writeJumpFunction(fnTeardown, nvp::kPointTeardown, reinterpret_cast<const void*>(&fakeTeardown));
+    writeJumpFunction(fnSource, nvp::kPointSource, reinterpret_cast<const void*>(&fakeSource));
+    writeJumpFunction(fnCamera, nvp::kPointCamera, reinterpret_cast<const void*>(&fakeCamera));
     fnOff[0] = 0x41;  // not the game's prologue: the point must be refused
     FlushInstructionCache(GetCurrentProcess(), page, 4096);
-    const uintptr_t targets[nvp::kPointCount] = {reinterpret_cast<uintptr_t>(fnMode), reinterpret_cast<uintptr_t>(fnOn),
-                                                 reinterpret_cast<uintptr_t>(fnOff), reinterpret_cast<uintptr_t>(fnBuild),
-                                                 reinterpret_cast<uintptr_t>(fnTeardown)};
+    const uintptr_t targets[nvp::kPointCount] = {reinterpret_cast<uintptr_t>(fnMode),     reinterpret_cast<uintptr_t>(fnOn),
+                                                 reinterpret_cast<uintptr_t>(fnOff),      reinterpret_cast<uintptr_t>(fnBuild),
+                                                 reinterpret_cast<uintptr_t>(fnTeardown), reinterpret_cast<uintptr_t>(fnSource),
+                                                 reinterpret_cast<uintptr_t>(fnCamera)};
     using Fn1 = void (*)(void*);
     using Fn2 = void (*)(void*, void*);
     auto callMode = reinterpret_cast<Fn1>(fnMode);
@@ -428,23 +721,27 @@ void partB() {
 
     g_lines.clear();
     int armed = nativeVrProbeInstall(0x140000000ull, targets, false, &sink, nullptr);
-    check(armed == 4, "glue: four good prologues are hooked, the bad one is not");
+    check(armed == 6, "glue: six good prologues are hooked, the bad one is not");
     check(countLines("CinemaPipelineFeature deactivate at EliteDangerous64.exe+0x28AB150 NOT hooked") == 1,
           "glue: the refused point is named once, by its RVA");
     check(fnOff[0] == 0x41 && std::memcmp(fnOff + 1, nvp::kPrologue + 1, nvp::kPrologueBytes - 1) == 0,
           "glue: the refused point's bytes are untouched");
-    check(fnMode[0] == 0xE9 && fnOn[0] == 0xE9 && fnBuild[0] == 0xE9 && fnTeardown[0] == 0xE9,
-          "glue: the four hooked points now begin with the jump");
+    check(fnMode[0] == 0xE9 && fnOn[0] == 0xE9 && fnBuild[0] == 0xE9 && fnTeardown[0] == 0xE9 && fnSource[0] == 0xE9 && fnCamera[0] == 0xE9,
+          "glue: the six hooked points now begin with the jump");
     check(anyLine("view pipeline rebuild hooked") && anyLine("7 prologue bytes verified, 5 moved") &&
               anyLine("only experimental.native_vr_block_cinema changes what it sees") && anyLine("view pipeline teardown hooked") &&
               anyLine("10 prologue bytes verified, 5 moved"),
           "glue: the rebuild and the teardown, each with its own prologue");
+    check(anyLine("stereo mode source hooked at EliteDangerous64.exe+0x281AC10") &&
+              anyLine("only experimental.native_vr_on_foot changes what it sees") &&
+              anyLine("camera choice hooked at EliteDangerous64.exe+0x2DFC7A0"),
+          "glue: the source and the camera, by their RVAs");
 
     fnOff[0] = 0x40;
     FlushInstructionCache(GetCurrentProcess(), fnOff, 1);
     g_lines.clear();
     armed = nativeVrProbeInstall(0x140000000ull, targets, false, &sink, nullptr);
-    check(armed == 5 && countLines("hooked at") == 1 && anyLine("CinemaPipelineFeature deactivate hooked"),
+    check(armed == 7 && countLines("hooked at") == 1 && anyLine("CinemaPipelineFeature deactivate hooked"),
           "glue: a later call hooks the corrected point and leaves the armed ones alone");
 
     uint64_t now = 100000;
@@ -513,6 +810,7 @@ void partB() {
 
     nativeVrProbeSetRecording(false);
     partC(reinterpret_cast<void (*)(void*)>(fnBuild), reinterpret_cast<void (*)(void*)>(fnTeardown), callOn, callOff, now + 5000);
+    partD(reinterpret_cast<FnSourceCall>(fnSource), reinterpret_cast<FnCameraCall>(fnCamera), now + 100000);
 }
 }  // namespace
 
