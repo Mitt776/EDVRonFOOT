@@ -13,7 +13,9 @@
 // And under experimental.native_vr_on_foot (off by default; the next experiment): the rebuild's mode is only the last copy of the
 // mode the game wants, X+0x20, which a render task copies into the renderer's request once a frame and by which it decides whether to
 // compute the headset eyes' projections. The source hook puts headset stereo in place of a cinema mode found there and keeps it there
-// until the game sets a mode of its own or the journal says the commander boarded. It never writes a cinema mode.
+// until the game sets a mode of its own or the journal says the commander boarded. It never writes a cinema mode. The same key also
+// turns off the game's own cinema-on-foot switch (+0x5E82B3E, 1 -> 0; nativeVrCinemaSwitchStep), so the game itself keeps headset
+// stereo and its headset camera on foot and the hold has nothing to do; the hold stays as the fallback.
 //
 // THREADS. The hooks run on whichever game thread calls them. They take no lock, allocate nothing and write no log line: they read
 // the game's fields under SEH, capture a short stack and push one event into a lock-free ring, then call the original with the same
@@ -92,5 +94,10 @@ void nativeVrWriterWatchStep(uint64_t nowMs, bool recording, NativeVrProbeSink s
 // unknown, 0, 1) and says it when the key or the answer changes. edvrNativeVrSwapEyes (exported) returns the answer. Frame thread.
 void nativeVrSwapEyesStep(bool key, int onFoot, NativeVrProbeSink sink, void* ctx);
 int nativeVrSwapEyesNow();
+
+// experimental.native_vr_on_foot's head camera (nvp::cinemaSwitchStep): once a frame, the game's cinema-on-foot switch at `address`
+// (null: not build 332841) is turned 1 -> 0 while the key is on, and our 0 back to 1 when it goes off, with a line on each change and
+// when the journal's on-foot answer changes while the switch is ours. Frame thread.
+void nativeVrCinemaSwitchStep(uint8_t* address, bool key, int onFoot, NativeVrProbeSink sink, void* ctx);
 
 }  // namespace edvr

@@ -49,6 +49,8 @@ std::atomic<uintptr_t> g_ownLo{0}, g_ownHi{0};
 nvp::WriterTable g_writers;
 // experimental.native_vr_swap_eyes as the frame thread last decided it (edvrNativeVrSwapEyes).
 std::atomic<int> g_swapEyes{0};
+// The install found build 332841 (the cinema-on-foot switch's address is known only then).
+std::atomic<bool> g_identityOk{false};
 
 // ---- the hook side: no lock, no allocation, no log -------------------------------------------------------------------------------
 
@@ -120,6 +122,24 @@ __declspec(noinline) uint8_t sehReadSource(const uint8_t* self, int32_t** field,
         return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return 0;
+    }
+}
+
+// The cinema-on-foot switch (nvp::cinemaSwitchStep): its value, -1 if unreadable; and a compare-and-swap, so a value the game put
+// there between the read and the write is never overwritten.
+__declspec(noinline) int sehReadByte(const uint8_t* p) noexcept {
+    __try {
+        return *reinterpret_cast<const volatile uint8_t*>(p);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+__declspec(noinline) bool sehSwapByte(uint8_t* p, uint8_t from, uint8_t to) noexcept {
+    __try {
+        return static_cast<uint8_t>(_InterlockedCompareExchange8(reinterpret_cast<volatile char*>(p), static_cast<char>(to),
+                                                                 static_cast<char>(from))) == from;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
     }
 }
 
@@ -726,6 +746,36 @@ void nativeVrSwapEyesStep(bool key, int onFoot, NativeVrProbeSink sink, void* ct
 
 int nativeVrSwapEyesNow() { return g_swapEyes.load(std::memory_order_acquire); }
 
+void nativeVrCinemaSwitchStep(uint8_t* address, bool key, int onFoot, NativeVrProbeSink sink, void* ctx) {
+    static nvp::SwitchState state;
+    static bool saidNoAddress = false;
+    static int lastOnFoot = -1;
+    char line[400];
+    if (!address) {
+        if (key && !saidNoAddress)
+            sink(ctx, "native-vr-on-foot: head camera cannot work (the game is not build 332841, see the install line); nothing written; "
+                      "the game keeps its cinema");
+        saidNoAddress = key;
+        return;
+    }
+    const int value = sehReadByte(address);
+    nvp::SwitchStep step = nvp::cinemaSwitchStep(state, key, value);
+    if (step.write >= 0 && !sehSwapByte(address, static_cast<uint8_t>(value), static_cast<uint8_t>(step.write))) {
+        // The game changed it between the read and the write: next frame decides again on what it holds then.
+        if (step.kind == nvp::kSwitchSet) state.ours = false;
+        if (step.kind == nvp::kSwitchAgain) --state.again;
+        return;
+    }
+    if (step.kind != nvp::kSwitchAgain || nvp::switchAgainSaid(state.again)) {
+        if (nvp::formatSwitch(step, state, value, onFoot, line, sizeof(line)) > 0) sink(ctx, line);
+    }
+    if (state.ours && onFoot >= 0 && onFoot != lastOnFoot && lastOnFoot >= 0) {
+        nvp::formatHeadCameraJournal(onFoot, line, sizeof(line));
+        sink(ctx, line);
+    }
+    lastOnFoot = onFoot;
+}
+
 int nativeVrProbeInstall(uintptr_t base, const uintptr_t* targetsOverride, bool checkIdentity, NativeVrProbeSink sink, void* ctx) {
     if (checkIdentity) {
         uint32_t timestamp = 0, imageSize = 0;
@@ -739,6 +789,7 @@ int nativeVrProbeInstall(uintptr_t base, const uintptr_t* targetsOverride, bool 
             return armed;
         }
         g_imageSize.store(imageSize, std::memory_order_relaxed);
+        g_identityOk.store(true, std::memory_order_relaxed);
     }
     g_base.store(base, std::memory_order_relaxed);
     int armed = 0;
@@ -880,6 +931,12 @@ void nativeVrProbeFrameBoundary() {
         saidOnFootUnarmed = true;
     }
     nativeVrProbeSetOnFoot(onFootKey && sourceArmed);
+    // The switch is data, not a hook: it needs only the build, which the install checked.
+    if (tried)
+        nativeVrCinemaSwitchStep(g_identityOk.load(std::memory_order_relaxed)
+                                     ? reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr)) + nvp::kCinemaSwitchRva
+                                     : nullptr,
+                                 onFootKey, onFoot, &logSink, nullptr);
     const bool blockArmed = nativeVrProbeArmed(nvp::kPointBuild);
     if (block && tried && !blockArmed && !saidBlockUnarmed) {
         Log::get().note("native-vr-block-cinema: cannot work: the view pipeline rebuild is not hooked (see the lines above); the game "

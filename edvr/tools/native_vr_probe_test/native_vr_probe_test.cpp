@@ -18,6 +18,9 @@
 // change), debug register slots other than 0, the writer table and the watch's verdict, a REAL hardware write watch on this rig's own
 // variable (two writing instructions on two threads written once each, the rig's own write counted apart, nothing traps once it is off),
 // and experimental.native_vr_swap_eyes' answer and lines.
+// Part F: experimental.native_vr_on_foot's cinema-on-foot switch -- only 1 -> 0 with the key on and our 0 -> 1 with it off, nothing
+// over any other value, a 0 that was not ours never restored, the game putting 1 back counted and said at 1, 10, 100, ... -- its lines,
+// and the glue on a byte of the rig's own (another build: one line, nothing written).
 #include "../../src/d3d11/native_vr_probe.h"
 #include "../../src/d3d11/native_vr_probe_core.h"
 #include "../../src/d3d11/debug_register_core.h"
@@ -1022,6 +1025,117 @@ void partB() {
     partE(reinterpret_cast<FnCall4>(fnByName), reinterpret_cast<FnCall4>(fnDefault), reinterpret_cast<FnCall4>(fnByName2),
           reinterpret_cast<FnWrite>(fnWriteA), reinterpret_cast<FnWrite>(fnWriteB), now + 200000);
 }
+void partF() {
+    {
+        nvp::SwitchState s;
+        nvp::SwitchStep r = nvp::cinemaSwitchStep(s, false, 1);
+        check(r.write < 0 && r.kind == nvp::kSwitchNone && !s.ours, "switch: key off, the game's 1 is left alone");
+        r = nvp::cinemaSwitchStep(s, true, 1);
+        check(r.write == 0 && r.kind == nvp::kSwitchSet && s.ours, "switch: key on, 1 becomes 0 and is ours");
+        r = nvp::cinemaSwitchStep(s, true, 0);
+        check(r.write < 0 && r.kind == nvp::kSwitchNone, "switch: our 0 in place, nothing to do");
+        r = nvp::cinemaSwitchStep(s, true, 1);
+        check(r.write == 0 && r.kind == nvp::kSwitchAgain && s.again == 1, "switch: the game puts 1 back: 0 again, counted");
+        r = nvp::cinemaSwitchStep(s, false, 0);
+        check(r.write == 1 && r.kind == nvp::kSwitchRestored && !s.ours, "switch: key off, our 0 goes back to the game's 1");
+        r = nvp::cinemaSwitchStep(s, false, 1);
+        check(r.write < 0 && r.kind == nvp::kSwitchNone, "switch: key off and restored, nothing more");
+
+        nvp::SwitchState g;
+        r = nvp::cinemaSwitchStep(g, true, 0);
+        check(r.write < 0 && r.kind == nvp::kSwitchGameOff && !g.ours, "switch: a 0 before us is the game's own, not ours");
+        r = nvp::cinemaSwitchStep(g, true, 0);
+        check(r.kind == nvp::kSwitchNone, "switch: and said once");
+        r = nvp::cinemaSwitchStep(g, false, 0);
+        check(r.write < 0 && r.kind == nvp::kSwitchNone, "switch: key off never writes over a 0 that was not ours");
+
+        nvp::SwitchState x;
+        r = nvp::cinemaSwitchStep(x, true, 7);
+        check(r.write < 0 && r.kind == nvp::kSwitchStrange, "switch: a value neither 1 nor 0 is refused, unwritten");
+        r = nvp::cinemaSwitchStep(x, true, 1);
+        check(r.write < 0 && r.kind == nvp::kSwitchNone, "switch: refused stays refused while the key is on");
+        r = nvp::cinemaSwitchStep(x, false, 1);
+        r = nvp::cinemaSwitchStep(x, true, 1);
+        check(r.write == 0 && r.kind == nvp::kSwitchSet, "switch: key off and on again tries afresh");
+        r = nvp::cinemaSwitchStep(x, true, -1);
+        check(r.write < 0 && r.kind == nvp::kSwitchStrange && !x.ours, "switch: unreadable while ours: refused, no longer ours");
+        r = nvp::cinemaSwitchStep(x, false, 0);
+        check(r.write < 0 && r.kind == nvp::kSwitchNone, "switch: and key off restores nothing then");
+
+        nvp::SwitchState w;
+        r = nvp::cinemaSwitchStep(w, true, 0);
+        r = nvp::cinemaSwitchStep(w, true, 1);
+        check(r.write == 0 && r.kind == nvp::kSwitchSet, "switch: the game's own 0 turned 1 later is taken");
+
+        nvp::SwitchState t;
+        r = nvp::cinemaSwitchStep(t, false, 0);
+        check(r.kind == nvp::kSwitchNone, "switch: key off from the start does nothing");
+        bool onlyOneOrZero = true;
+        for (int key = 0; key < 2; ++key)
+            for (int v = -1; v < 8; ++v) {
+                nvp::SwitchState a, b;
+                b.ours = true;
+                const nvp::SwitchStep ra = nvp::cinemaSwitchStep(a, key != 0, v);
+                const nvp::SwitchStep rb = nvp::cinemaSwitchStep(b, key != 0, v);
+                for (const nvp::SwitchStep& q : {ra, rb})
+                    if (q.write >= 0 && !((q.write == 0 && v == 1) || (q.write == 1 && v == 0))) onlyOneOrZero = false;
+            }
+        check(onlyOneOrZero, "switch: in no case is anything written but 1 -> 0 or 0 -> 1");
+        check(nvp::switchAgainSaid(1) && nvp::switchAgainSaid(10) && nvp::switchAgainSaid(1000) && !nvp::switchAgainSaid(2) &&
+                  !nvp::switchAgainSaid(11) && !nvp::switchAgainSaid(0),
+              "switch: a repeat is said at 1, 10, 100, ...");
+    }
+    {
+        char line[400];
+        nvp::SwitchState s;
+        nvp::SwitchStep r = nvp::cinemaSwitchStep(s, true, 1);
+        nvp::formatSwitch(r, s, 1, 0, line, sizeof(line));
+        check(std::strstr(line, "native-vr-on-foot: head camera on: the game's cinema-on-foot switch (EliteDangerous64.exe+0x5E82B3E) 1 -> 0") &&
+                  std::strstr(line, "on foot (journal): no"),
+              "text: the switch's on line, by its RVA");
+        nvp::SwitchStep strange;
+        strange.kind = nvp::kSwitchStrange;
+        nvp::formatSwitch(strange, s, 7, 0, line, sizeof(line));
+        check(std::strstr(line, "head camera cannot work (the cinema-on-foot switch holds 7") && std::strstr(line, "the hold works as before"),
+              "text: the refusal says the value and that the hold goes on");
+        nvp::formatHeadCameraJournal(1, line, sizeof(line));
+        check(std::strstr(line, "native-vr-on-foot: head camera: on foot (journal)") != nullptr, "text: the head camera's on-foot line");
+    }
+
+    // The glue on a byte of the rig's own, as the frame thread drives it.
+    uint8_t game = 1;
+    g_lines.clear();
+    nativeVrCinemaSwitchStep(&game, false, 0, &sink, nullptr);
+    check(game == 1 && g_lines.empty(), "glue switch: key off, the byte and the log are untouched");
+    nativeVrCinemaSwitchStep(&game, true, 0, &sink, nullptr);
+    check(game == 0 && countLines("head camera on:") == 1, "glue switch: key on, the byte is 0, one line");
+    nativeVrCinemaSwitchStep(&game, true, 0, &sink, nullptr);
+    check(game == 0 && g_lines.size() == 1, "glue switch: next frame, nothing more");
+    nativeVrCinemaSwitchStep(&game, true, 1, &sink, nullptr);
+    check(game == 0 && countLines("head camera: on foot (journal)") == 1, "glue switch: on foot by the journal, one line");
+    for (int i = 0; i < 1000; ++i) {
+        game = 1;
+        nativeVrCinemaSwitchStep(&game, true, 1, &sink, nullptr);
+    }
+    check(game == 0 && countLines("back to 1; 0 again") == 4 && anyLine("(1000 time(s))"),
+          "glue switch: the game puts 1 back a thousand times: 0 each time, said at 1, 10, 100, 1000");
+    nativeVrCinemaSwitchStep(&game, true, 0, &sink, nullptr);
+    check(countLines("back in the ship (journal)") == 1 && game == 0, "glue switch: back in the ship, said, the byte stays 0");
+    nativeVrCinemaSwitchStep(&game, false, 0, &sink, nullptr);
+    check(game == 1 && countLines("head camera off: the cinema-on-foot switch is the game's 1 again") == 1,
+          "glue switch: key off, the game's 1 is back");
+    uint8_t odd = 7;
+    g_lines.clear();
+    nativeVrCinemaSwitchStep(&odd, true, 0, &sink, nullptr);
+    nativeVrCinemaSwitchStep(&odd, true, 0, &sink, nullptr);
+    check(odd == 7 && countLines("head camera cannot work") == 1, "glue switch: an unexpected value is left alone, said once");
+    nativeVrCinemaSwitchStep(&odd, false, 0, &sink, nullptr);
+    g_lines.clear();
+    nativeVrCinemaSwitchStep(nullptr, true, 0, &sink, nullptr);
+    nativeVrCinemaSwitchStep(nullptr, true, 0, &sink, nullptr);
+    check(countLines("head camera cannot work (the game is not build 332841") == 1, "glue switch: another build, said once");
+    nativeVrCinemaSwitchStep(nullptr, false, 0, &sink, nullptr);
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1031,6 +1145,7 @@ int main(int argc, char** argv) {
     }
     partA();
     partB();
+    partF();
     std::printf("%s: native_vr_probe_test, %d checks, %d failed\n", g_failures ? "FAIL" : "PASS", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

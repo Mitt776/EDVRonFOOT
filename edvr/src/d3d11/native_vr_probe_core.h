@@ -7,8 +7,8 @@
 //
 // OBSERVATION ONLY, with two exceptions: experimental.native_vr_block_cinema makes the rebuild hook substitute the stereo mode for the
 // cinema mode for the duration of one call (cinemaModeSubstitute), and experimental.native_vr_on_foot makes the stereo mode source hook
-// put the headset stereo mode in place of a cinema mode the game set there, and keep it there (holdStep). Nothing else changes a value
-// the game passes or returns.
+// put the headset stereo mode in place of a cinema mode the game set there, and keep it there (holdStep), and turns the game's own
+// cinema-on-foot switch off while it is on (cinemaSwitchStep). Nothing else changes a value the game passes or returns.
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -555,6 +555,114 @@ inline int formatSwapActive(bool active, int onFoot, char* out, size_t cap) {
                          active ? "active on foot: the left eye sees the right frame and the right eye the left"
                                 : "inactive: each eye sees its own frame",
                          onFootText(onFoot));
+}
+
+// experimental.native_vr_on_foot's head camera: the game's own cinema-on-foot switch, a byte in its render settings block. The
+// per-frame update 0x28873C0 turns headset stereo (3/4) into cinema (5/6) only while this byte is not 0 AND the view says first
+// person on foot; it is the byte's one reader in build 332841 (0x2887AF9), and in the ship that second condition is never met, so the
+// byte changes nothing there. With the byte 0 the game itself keeps headset stereo on foot -- the source, +0xC8 and the camera all
+// at once, as in the ship -- where the hold put back only the source. The exe's value is 1; the switch writes only 1 -> 0 (key on)
+// and 0 -> 1 (key off, and only a 0 it wrote), and nothing over any other value.
+constexpr uintptr_t kCinemaSwitchRva = 0x5E82B3Eu;
+constexpr uint8_t kCinemaSwitchGame = 1;
+enum : uint8_t {
+    kSwitchNone = 0,
+    kSwitchSet = 1,       // 1 -> 0: ours from now on
+    kSwitchAgain = 2,     // the game put 1 back over ours: 0 again
+    kSwitchRestored = 3,  // key off: our 0 -> the game's 1
+    kSwitchLeft = 4,      // key off, but the byte is no longer our 0: left as it is
+    kSwitchStrange = 5,   // neither 1 nor 0 (or unreadable): never written, said once until the key goes off
+    kSwitchGameOff = 6,   // already 0 before us: the game's own, not ours, never restored
+};
+struct SwitchState {
+    bool ours = false;         // the byte holds a 0 the switch wrote
+    bool refused = false;      // kSwitchStrange said: nothing is written until the key goes off
+    bool saidGameOff = false;  // kSwitchGameOff said
+    uint32_t again = 0;        // kSwitchAgain count since kSwitchSet
+};
+struct SwitchStep {
+    int write = -1;  // the value to write (-1: none)
+    uint8_t kind = kSwitchNone;
+};
+// `value` is the byte as read this frame, -1 if it could not be read.
+inline SwitchStep cinemaSwitchStep(SwitchState& s, bool key, int value) {
+    SwitchStep r;
+    if (key) {
+        if (s.refused) return r;
+        if (value == kCinemaSwitchGame) {
+            r.write = 0;
+            r.kind = s.ours ? kSwitchAgain : kSwitchSet;
+            s.again = s.ours ? s.again + 1 : 0;
+            s.ours = true;
+        } else if (value == 0) {
+            if (!s.ours && !s.saidGameOff) {
+                r.kind = kSwitchGameOff;
+                s.saidGameOff = true;
+            }
+        } else {
+            r.kind = kSwitchStrange;
+            s.ours = false;
+            s.refused = true;
+        }
+    } else {
+        if (s.ours) {
+            if (value == 0) {
+                r.write = kCinemaSwitchGame;
+                r.kind = kSwitchRestored;
+            } else {
+                r.kind = kSwitchLeft;
+            }
+        }
+        s.ours = false;
+        s.refused = false;
+        s.saidGameOff = false;
+        s.again = 0;
+    }
+    return r;
+}
+// A repeat is said at 1, 10, 100, ... so a game that puts 1 back every frame is visible without flooding the log.
+inline bool switchAgainSaid(uint32_t again) {
+    while (again >= 10 && again % 10 == 0) again /= 10;
+    return again == 1;
+}
+inline int formatSwitch(const SwitchStep& step, const SwitchState& s, int value, int onFoot, char* out, size_t cap) {
+    switch (step.kind) {
+        case kSwitchSet:
+            return std::snprintf(out, cap,
+                                 "native-vr-on-foot: head camera on: the game's cinema-on-foot switch (EliteDangerous64.exe+0x%llX) 1 -> 0; "
+                                 "on foot the game keeps headset stereo and its headset camera itself, as in the ship (on foot (journal): %s)",
+                                 static_cast<unsigned long long>(kCinemaSwitchRva), onFootText(onFoot));
+        case kSwitchAgain:
+            return std::snprintf(out, cap, "native-vr-on-foot: head camera: the game put its cinema-on-foot switch back to 1; 0 again (%u time(s))",
+                                 s.again);
+        case kSwitchRestored:
+            return std::snprintf(out, cap,
+                                 "native-vr-on-foot: head camera off: the cinema-on-foot switch is the game's 1 again; the next disembark is "
+                                 "the game's cinema");
+        case kSwitchLeft:
+            return std::snprintf(out, cap, "native-vr-on-foot: head camera off: the cinema-on-foot switch holds %d, not our 0; left as it is",
+                                 value);
+        case kSwitchStrange:
+            if (value < 0)
+                return std::snprintf(out, cap,
+                                     "native-vr-on-foot: head camera cannot work (the cinema-on-foot switch could not be read); nothing "
+                                     "written there; the hold works as before");
+            return std::snprintf(out, cap,
+                                 "native-vr-on-foot: head camera cannot work (the cinema-on-foot switch holds %d, not build 332841's 1); "
+                                 "nothing written there; the hold works as before",
+                                 value);
+        case kSwitchGameOff:
+            return std::snprintf(out, cap,
+                                 "native-vr-on-foot: head camera: the cinema-on-foot switch is already 0, the game's own; nothing written");
+        default:
+            return 0;
+    }
+}
+// The journal's on-foot answer changed while the switch is ours: the line a flight log is read by.
+inline int formatHeadCameraJournal(int onFoot, char* out, size_t cap) {
+    return std::snprintf(out, cap, "native-vr-on-foot: head camera: %s",
+                         onFoot == 1 ? "on foot (journal) with the cinema-on-foot switch 0: the game's own headset stereo"
+                                     : "back in the ship (journal); the switch stays 0 while the key is on (it acts only on foot)");
 }
 
 // "EliteDangerous64.exe+0x283AFB0" for an address inside the image, the bare address otherwise.
