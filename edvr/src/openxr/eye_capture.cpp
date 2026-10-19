@@ -1,7 +1,6 @@
 #include "eye_capture.h"
 #include "shared_texture_transfer.h"
 #include "gpu_work_observer.h"
-#include <atomic>
 #include <cmath>
 #include <exception>
 #include <new>
@@ -14,7 +13,6 @@ using Microsoft::WRL::ComPtr;
 
 bool validEye(vr::EVREye e) { return e == vr::Eye_Left || e == vr::Eye_Right; }
 unsigned eyeIndex(vr::EVREye e) { return static_cast<unsigned>(e); }
-std::atomic<EyeSwapQuery> g_eyeSwapQuery{nullptr};
 
 bool sameDevice(ID3D11Device* expected, ID3D11Texture2D* source) {
   if (!expected || !source) return false;
@@ -50,18 +48,6 @@ bool validBounds(const vr::VRTextureBounds_t& b) {
   return b.uMin != b.uMax && b.vMin != b.vMax;
 }
 
-}
-
-void setEyeSwapQuery(EyeSwapQuery query) { g_eyeSwapQuery.store(query, std::memory_order_release); }
-
-vr::EVREye EyeCapture::swapEye(vr::EVREye eye) {
-  if (!validEye(eye)) return eye;
-  if (eye == vr::Eye_Left) {
-    const EyeSwapQuery query = g_eyeSwapQuery.load(std::memory_order_acquire);
-    swapLatched_ = query && query() != 0;
-  }
-  if (!swapLatched_) return eye;
-  return eye == vr::Eye_Left ? vr::Eye_Right : vr::Eye_Left;
 }
 
 EyeCapture::EyeCapture() = default;
@@ -247,7 +233,6 @@ vr::EVRCompositorError EyeCapture::capture(vr::EVREye eye, const vr::Texture_t* 
                                             vr::EVRSubmitFlags flags, bool copyPixels,
                                             GpuWorkObserver* observer, bool deferConsumer,
                                             TransferWallTimes* times, ProducerGpuTiming* producerTiming) {
-  eye = swapEye(eye);
   if (sharedInitialized_) return captureShared(eye, texture, bounds, flags, copyPixels, observer, deferConsumer, times, producerTiming);
   if (deferConsumer) return vr::VRCompositorError_InvalidTexture;
   if (!initialized_ || !device_ || !context_) return vr::VRCompositorError_InvalidTexture;

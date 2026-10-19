@@ -6,11 +6,7 @@
 // second eye without the scene, for 5/6. This probe hooks the rebuild, the teardown, the CinemaPipelineFeature's activate and
 // deactivate and SetIdentStereoRenderModeActivity, and WRITES DOWN what passes through them. It changes nothing the game sees --
 //
-// except under experimental.native_vr_block_cinema (off by default; the EXPERIMENT the probe was built for): the rebuild hook puts the
-// headset stereo mode (5 -> 3, 6 -> 4) in place of a cinema mode for the one call, then takes it back. Activate and deactivate stay
-// the game's: a cinema node never activated is never in the list the teardown deactivates.
-//
-// And under experimental.native_vr_on_foot (off by default; the next experiment): the rebuild's mode is only the last copy of the
+// except under experimental.native_vr_on_foot (ON by default; native VR on foot): the rebuild's mode is only the last copy of the
 // mode the game wants, X+0x20, which a render task copies into the renderer's request once a frame and by which it decides whether to
 // compute the headset eyes' projections. The source hook puts headset stereo in place of a cinema mode found there and keeps it there
 // until the game sets a mode of its own or the journal says the commander boarded. It never writes a cinema mode. The same key also
@@ -22,11 +18,11 @@
 // arguments. The frame thread drains the ring into the log (nativeVrProbeFrameBoundary), with a limiter.
 //
 // THE HOOKS (build 332841 only; a PE or prologue mismatch leaves that point unhooked with one line saying why). They are installed
-// the first time any of the three keys is on and stay until the game exits; while the probe is off they record nothing.
+// the first time either key is on and stay until the game exits; while the probe is off they record nothing.
 //   +0x283AFB0  SetIdentStereoRenderModeActivity's execute
 //   +0x28A9690  CinemaPipelineFeature's activate
 //   +0x28AB150  CinemaPipelineFeature's deactivate
-//   +0x2854FA0  the view pipeline's rebuild (the cinema decision; the block's one write)
+//   +0x2854FA0  the view pipeline's rebuild (the cinema decision)
 //   +0x288BF20  the view pipeline's teardown
 //   +0x281AC10  the stereo mode source (the hold's one write)
 //   +0x2DFC7A0  the default camera's name (written after the original made it)
@@ -35,8 +31,7 @@
 //   +0x1D203B0  the director's other switch by name
 //
 // With the probe on, a hold start also puts a hardware write watch on the stereo mode source for a while (nativeVrWriterWatch*): who
-// in the game writes cinema there. And experimental.native_vr_swap_eyes (any build, no hook) swaps the eye frames on foot in the
-// OpenXR runtime, through the exported edvrNativeVrSwapEyes.
+// in the game writes cinema there.
 #include <cstddef>
 #include <cstdint>
 
@@ -44,10 +39,10 @@ namespace edvr {
 
 using NativeVrProbeSink = void (*)(void* ctx, const char* line);
 
-// Once a frame at the Present boundary (device_hook.cpp's tkNativeVrProbe). Reads experimental.native_vr_probe,
-// experimental.native_vr_block_cinema and experimental.native_vr_on_foot; the first time any is on, installs the hooks; while the
-// probe is on, the hooks record; while the block is on, the rebuild substitutes; while native_vr_on_foot is on, the source holds;
-// drains the ring into the log and ends a hold by the journal. Render thread only.
+// Once a frame at the Present boundary (device_hook.cpp's tkNativeVrProbe). Reads experimental.native_vr_probe and
+// experimental.native_vr_on_foot (on when missing); the first time either is on, installs the hooks; while the probe is on, the hooks
+// record; while native_vr_on_foot is on, the cinema-on-foot switch is off and the source holds; drains the ring into the log and ends
+// a hold by the journal. Render thread only.
 void nativeVrProbeFrameBoundary();
 
 // The pieces the frame boundary is made of, exposed for the rig.
@@ -58,8 +53,6 @@ void nativeVrProbeFrameBoundary();
 int nativeVrProbeInstall(uintptr_t base, const uintptr_t* targetsOverride, bool checkIdentity, NativeVrProbeSink sink, void* ctx);
 // While false the hooks only forward. Any thread.
 void nativeVrProbeSetRecording(bool on);
-// While true the rebuild hook substitutes the headset stereo mode for a cinema mode. Any thread.
-void nativeVrProbeSetBlockCinema(bool on);
 // While true the stereo mode source hook replaces a cinema mode with headset stereo and holds it (experimental.native_vr_on_foot).
 // Any thread.
 void nativeVrProbeSetOnFoot(bool on);
@@ -71,7 +64,7 @@ void nativeVrOnFootJournal(int onFoot, NativeVrProbeSink sink, void* ctx);
 // Whether a point (nvp::kPoint*) is hooked.
 bool nativeVrProbeArmed(int point);
 // Write the ring's events through `sink` -- pipeline decisions when they change, the rest limited -- plus the window's summary.
-// `onFoot` is the journal's answer (-1 unknown, 0, 1) for the block's line. Frame thread.
+// `onFoot` is the journal's answer (-1 unknown, 0, 1) for the hold's lines. Frame thread.
 void nativeVrProbeDrain(uint64_t nowMs, int onFoot, NativeVrProbeSink sink, void* ctx);
 // Events recorded since launch (proof the hooks are alive), and lost to a full ring.
 uint64_t nativeVrProbeRecorded();
@@ -89,11 +82,6 @@ void nativeVrWriterWatchDrain(NativeVrProbeSink sink, void* ctx);
 void nativeVrWriterWatchDisarm(uint8_t verdict, uint64_t nowMs, NativeVrProbeSink sink, void* ctx);
 //   Once a frame: arm on a hold start's request, drain, and take it off by nvp::watchVerdict.
 void nativeVrWriterWatchStep(uint64_t nowMs, bool recording, NativeVrProbeSink sink, void* ctx);
-
-// experimental.native_vr_swap_eyes: decides once a frame whether the eye frames are swapped (the key, and on foot by the journal: -1
-// unknown, 0, 1) and says it when the key or the answer changes. edvrNativeVrSwapEyes (exported) returns the answer. Frame thread.
-void nativeVrSwapEyesStep(bool key, int onFoot, NativeVrProbeSink sink, void* ctx);
-int nativeVrSwapEyesNow();
 
 // experimental.native_vr_on_foot's head camera (nvp::cinemaSwitchStep): once a frame, the game's cinema-on-foot switch at `address`
 // (null: not build 332841) is turned 1 -> 0 while the key is on, and our 0 back to 1 when it goes off, with a line on each change and

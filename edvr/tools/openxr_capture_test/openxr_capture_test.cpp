@@ -9,7 +9,6 @@
 #include <limits>
 using Microsoft::WRL::ComPtr;
 using edvr::openxr::EyeCapture;
-using edvr::openxr::setEyeSwapQuery;
 namespace {
 unsigned checks=0,failures=0;
 void check(bool value,const char* name) {++checks;if(!value){++failures;std::printf("FAIL: %s\n",name);}}
@@ -146,22 +145,6 @@ void run() {
   check(d.pixels(previous.texture(vr::Eye_Left),firstColor)&&d.pixels(previous.texture(vr::Eye_Right),secondColor),"next incomplete capture and mutable game texture cannot corrupt saved pair");
   cap.capture(vr::Eye_Right,&texture);
   check(cap.exchangeBuffers(previous)&&d.pixels(previous.texture(vr::Eye_Left),0xFF000000)&&d.pixels(cap.texture(vr::Eye_Right),secondColor),"second completed pair rotates both buffers");
-  // EDVRonFOOT, experimental.native_vr_swap_eyes: the graphics DLL's answer swaps where each eye's frame is stored. It is asked at the
-  // left eye and kept for the right, so an answer that changes between them never splits a pair.
-  static int swapAnswer=0;
-  setEyeSwapQuery([]{return swapAnswer;});
-  swapAnswer=1;
-  d.fill(source.Get(),firstColor);cap.capture(vr::Eye_Left,&texture);
-  swapAnswer=0;
-  d.fill(source.Get(),secondColor);cap.capture(vr::Eye_Right,&texture);
-  check(d.pixels(cap.texture(vr::Eye_Right),firstColor)&&d.pixels(cap.texture(vr::Eye_Left),secondColor),
-    "swap: the left frame is stored as the right eye's and the right as the left's, kept for the whole pair");
-  d.fill(source.Get(),firstColor);cap.capture(vr::Eye_Left,&texture);
-  d.fill(source.Get(),secondColor);cap.capture(vr::Eye_Right,&texture);
-  check(d.pixels(cap.texture(vr::Eye_Left),firstColor)&&d.pixels(cap.texture(vr::Eye_Right),secondColor),"swap: answer 0, each eye its own frame");
-  setEyeSwapQuery(nullptr);swapAnswer=1;
-  d.fill(source.Get(),secondColor);cap.capture(vr::Eye_Left,&texture);
-  check(d.pixels(cap.texture(vr::Eye_Left),secondColor),"swap: no query, nothing swapped");
 }
 }
 int main(int argc,char** argv) {

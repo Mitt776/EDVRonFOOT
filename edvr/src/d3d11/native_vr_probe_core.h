@@ -5,10 +5,9 @@
 // thread, the limiter that keeps a per-frame call from flooding the log, the filter that writes a pipeline decision only when it
 // changes, the cinema-to-stereo mode substitution, and the text of every line.
 //
-// OBSERVATION ONLY, with two exceptions: experimental.native_vr_block_cinema makes the rebuild hook substitute the stereo mode for the
-// cinema mode for the duration of one call (cinemaModeSubstitute), and experimental.native_vr_on_foot makes the stereo mode source hook
-// put the headset stereo mode in place of a cinema mode the game set there, and keep it there (holdStep), and turns the game's own
-// cinema-on-foot switch off while it is on (cinemaSwitchStep). Nothing else changes a value the game passes or returns.
+// OBSERVATION ONLY, with one exception: experimental.native_vr_on_foot (on by default) turns the game's own cinema-on-foot switch off
+// while it is on (cinemaSwitchStep), and makes the stereo mode source hook put the headset stereo mode in place of a cinema mode the
+// game still sets there, and keep it there (holdStep). Nothing else changes a value the game passes or returns.
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -139,11 +138,11 @@ constexpr uintptr_t kRendererViewSettings = 0x2CC0;  // S+0x2CC0: what the rebui
 constexpr uintptr_t kNameChars = 0x14;
 constexpr size_t kNameBytes = 48;  // with the terminator: longer names are cut
 
-// The headset stereo mode the block puts in place of a cinema mode for one rebuild: 5 -> 3, 6 -> 4; 0 for any mode it leaves alone.
+// The headset stereo mode the hold puts in place of a cinema mode: 5 -> 3, 6 -> 4; 0 for any mode it leaves alone.
 constexpr int32_t cinemaModeSubstitute(int32_t mode) { return mode == 5 || mode == 6 ? mode - 2 : 0; }
 
 // experimental.native_vr_on_foot, what the source hook does with the mode it finds at X+0x20. A cinema mode with the key on is
-// replaced by the headset stereo mode (the same substitute as the block) and the hold starts, or, when one is running, the game has
+// replaced by the headset stereo mode (cinemaModeSubstitute) and the hold starts, or, when one is running, the game has
 // set cinema again over ours: a repeat. A mode that is not what the hold put there ends the hold -- the game set a mode of its own.
 // The game's own 3 on boarding cannot be told from ours by value; the frame thread ends that hold by the journal.
 // The hold NEVER writes a cinema mode: it writes only a substitute, and only over a cinema mode.
@@ -186,8 +185,7 @@ struct Event {
     uint64_t self = 0;          // the activity (mode) or the feature (cinema)
     uint64_t other = 0;         // mode: *(this+8), the activity's owner; activate: *arg; deactivate: 0
     uint64_t stack[kStackFrames] = {};  // return addresses, the game's caller first
-    // Pipeline points (rebuild, teardown): the view's stereo mode as the game holds it, the mode the block put in its place for this
-    // rebuild (0: none), and per sub-pipeline bit i: built (+0x329) and with cinema (+0x330) -- after a rebuild, before a teardown.
+    // Pipeline points (rebuild, teardown): the view's stereo mode as the game holds it, and per sub-pipeline bit i: built (+0x329) and with cinema (+0x330) -- after a rebuild, before a teardown.
     int32_t mode = 0;
     int32_t substituted = 0;
     uint8_t built = 0;
@@ -288,7 +286,7 @@ inline uint64_t nameHash(const Event& e) {
     return h;
 }
 
-// Frame thread only. A pipeline event is written when its point and pipeline show a mode, a substitution or a result not seen there
+// Frame thread only. A pipeline event is written when its point and pipeline show a mode or a result not seen there
 // last time -- a rebuild that repeats itself says nothing new. The camera is one: its line when the name or the mode changed.
 class ChangeFilter {
 public:
@@ -536,25 +534,10 @@ inline const char* onFootText(int onFoot) { return onFoot < 0 ? "unknown" : (onF
 // experimental.native_vr_on_foot's line when it is first read and whenever it changes (`again`: it was said before).
 inline int formatOnFootKey(bool on, bool again, char* out, size_t cap) {
     return std::snprintf(out, cap, "native-vr-on-foot: %s (experimental.native_vr_on_foot = %d)",
-                         on ? "on: a cinema mode the game sets is replaced by headset stereo and held there"
+                         on ? "on: on foot the game keeps headset stereo (its cinema-on-foot switch off); a cinema mode it still sets is "
+                              "replaced by headset stereo and held there"
                             : (again ? "off: no new hold starts; the next disembark after boarding is the game's cinema again" : "off"),
                          on ? 1 : 0);
-}
-
-// experimental.native_vr_swap_eyes: the left and right frames the game submits are swapped in the headset, only while the journal
-// says the commander is on foot. The OpenXR runtime asks for it once a frame pair (edvrNativeVrSwapEyes); nothing in the game changes.
-inline bool swapEyesActive(bool key, int onFoot) { return key && onFoot == 1; }
-inline int formatSwapKey(bool on, bool again, char* out, size_t cap) {
-    return std::snprintf(out, cap, "native-vr-swap-eyes: %s (experimental.native_vr_swap_eyes = %d)",
-                         on ? "on: on foot the left and right eye frames are swapped in the headset"
-                            : (again ? "off: the eye frames go to their own eyes again" : "off"),
-                         on ? 1 : 0);
-}
-inline int formatSwapActive(bool active, int onFoot, char* out, size_t cap) {
-    return std::snprintf(out, cap, "native-vr-swap-eyes: %s (on foot (journal): %s)",
-                         active ? "active on foot: the left eye sees the right frame and the right eye the left"
-                                : "inactive: each eye sees its own frame",
-                         onFootText(onFoot));
 }
 
 // experimental.native_vr_on_foot's head camera: the game's own cinema-on-foot switch, a byte in its render settings block. The
@@ -672,8 +655,7 @@ inline int formatAddress(uint64_t address, uint64_t base, uint64_t imageSize, ch
     return std::snprintf(out, cap, "0x%llX", static_cast<unsigned long long>(address));
 }
 
-// The event's log line. `onFoot` (-1 unknown, 0, 1) is the journal's answer when the line is written; the block's and the hold's lines
-// show it.
+// The event's log line. `onFoot` (-1 unknown, 0, 1) is the journal's answer when the line is written; the hold's lines show it.
 inline int formatEvent(const Event& e, uint64_t base, uint64_t imageSize, char* out, size_t cap, int onFoot = -1) {
     if (e.point == kPointSource) {
         const unsigned long long self = e.self, x = e.other;
@@ -751,13 +733,6 @@ inline int formatEvent(const Event& e, uint64_t base, uint64_t imageSize, char* 
                                  "built %s, with cinema %s; thread %u; called from %s; view settings 0x%llX",
                                  static_cast<unsigned long long>(e.self), e.mode, built, cinema, e.thread, caller,
                                  static_cast<unsigned long long>(e.other));
-        if (e.substituted)
-            return std::snprintf(out, cap,
-                                 "native-vr-block-cinema: cinema blocked on a rebuild: view pipeline 0x%llX, stereo mode %d -> %d for this "
-                                 "rebuild (back to %d after); result: sub-pipelines built %s, with cinema %s; on foot (journal): %s; thread %u; "
-                                 "called from %s",
-                                 static_cast<unsigned long long>(e.self), e.mode, e.substituted, e.mode, built, cinema, onFootText(onFoot),
-                                 e.thread, caller);
         return std::snprintf(out, cap,
                              "native-vr-probe: cinema decision (rebuild): view pipeline 0x%llX, stereo mode %d (%s); result: sub-pipelines "
                              "built %s, with cinema %s; thread %u; called from %s; view settings 0x%llX",

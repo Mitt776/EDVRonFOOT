@@ -25,7 +25,6 @@ using FnCall4 = uint64_t (*)(void*, void*, void*, void*);  // the camera directo
 
 std::atomic<uintptr_t> g_original[nvp::kPointCount];
 std::atomic<bool> g_recording{false};
-std::atomic<bool> g_block{false};
 std::atomic<bool> g_onFoot{false};
 // The hold (nvp::holdStep). The source hook steps it on the game's render thread; the frame thread only ends it by the journal.
 std::atomic<bool> g_holding{false};
@@ -47,8 +46,6 @@ std::atomic<uintptr_t> g_watchAddress{0}, g_watchPrevious{0};
 std::atomic<bool> g_watchActive{false};  // between arming and the end of disarming: a hit is recorded, otherwise only taken off
 std::atomic<uintptr_t> g_ownLo{0}, g_ownHi{0};
 nvp::WriterTable g_writers;
-// experimental.native_vr_swap_eyes as the frame thread last decided it (edvrNativeVrSwapEyes).
-std::atomic<int> g_swapEyes{0};
 // The install found build 332841 (the cinema-on-foot switch's address is known only then).
 std::atomic<bool> g_identityOk{false};
 
@@ -233,23 +230,15 @@ __declspec(noinline) void cinemaOffHook(void* self) {
     reinterpret_cast<Fn1>(g_original[nvp::kPointCinemaOff].load(std::memory_order_acquire))(self);
 }
 
-// The rebuild decides cinema or stereo from the view's stereo mode. With the block on and a cinema mode (5, 6) there, the hook puts
-// the headset stereo mode (3, 4) in its place for this one call and takes it back after: the pipeline is built for stereo -- both
-// eyes draw the scene, no cinema node -- while the field keeps the value the game holds. Same thread as the game's own reads.
+// The rebuild decides cinema or stereo from the view's stereo mode: the mode before the call, the sub-pipelines it built after.
 __declspec(noinline) void buildHook(void* self) {
     const bool recording = g_recording.load(std::memory_order_relaxed);
-    const bool block = g_block.load(std::memory_order_relaxed);
     nvp::Event e;
     int32_t* field = nullptr;
-    if (recording || block) e.readOk = sehReadPipelineMode(static_cast<const uint8_t*>(self), &field, &e.mode);
+    if (recording) e.readOk = sehReadPipelineMode(static_cast<const uint8_t*>(self), &field, &e.mode);
     if (e.readOk) e.other = reinterpret_cast<uint64_t>(field) - nvp::kConfigStereoMode;
-    if (block && e.readOk) {
-        const int32_t stereo = nvp::cinemaModeSubstitute(e.mode);
-        if (stereo && sehSwapMode(field, e.mode, stereo)) e.substituted = stereo;
-    }
     reinterpret_cast<Fn1>(g_original[nvp::kPointBuild].load(std::memory_order_acquire))(self);
-    if (e.substituted) sehSwapMode(field, e.substituted, e.mode);
-    if (recording || e.substituted) {
+    if (recording) {
         e.point = nvp::kPointBuild;
         e.self = reinterpret_cast<uint64_t>(self);
         if (e.readOk) sehReadSubs(static_cast<const uint8_t*>(self), &e.built, &e.cinema);
@@ -724,28 +713,6 @@ void nativeVrWriterWatchStep(uint64_t nowMs, bool recording, NativeVrProbeSink s
     if (verdict != nvp::kWatchKeep) nativeVrWriterWatchDisarm(verdict, nowMs, sink, ctx);
 }
 
-void nativeVrSwapEyesStep(bool key, int onFoot, NativeVrProbeSink sink, void* ctx) {
-    static bool said = false, lastKey = false;
-    static int lastActive = -1;  // -1: no active/inactive line yet
-    char line[200];
-    if (!said || key != lastKey) {
-        nvp::formatSwapKey(key, said, line, sizeof(line));
-        sink(ctx, line);
-        said = true;
-        lastKey = key;
-    }
-    const bool active = nvp::swapEyesActive(key, onFoot);
-    // The active/inactive line on every change, once the key has been on: with the key never on it says nothing.
-    if ((key || lastActive == 1) && static_cast<int>(active) != lastActive) {
-        nvp::formatSwapActive(active, onFoot, line, sizeof(line));
-        sink(ctx, line);
-        lastActive = active ? 1 : 0;
-    }
-    g_swapEyes.store(active ? 1 : 0, std::memory_order_release);
-}
-
-int nativeVrSwapEyesNow() { return g_swapEyes.load(std::memory_order_acquire); }
-
 void nativeVrCinemaSwitchStep(uint8_t* address, bool key, int onFoot, NativeVrProbeSink sink, void* ctx) {
     static nvp::SwitchState state;
     static bool saidNoAddress = false;
@@ -833,16 +800,13 @@ int nativeVrProbeInstall(uintptr_t base, const uintptr_t* targetsOverride, bool 
                        "it records and then calls the original unchanged%s",
             nvp::kPointName[point], static_cast<unsigned long long>(nvp::kPointRva[point]), static_cast<unsigned long long>(target),
             prologueBytes, slot.hook.stolenBytes(),
-            point == nvp::kPointBuild    ? " (only experimental.native_vr_block_cinema changes what it sees)"
-            : point == nvp::kPointSource ? " (only experimental.native_vr_on_foot changes what it sees)"
-                                         : "");
+            point == nvp::kPointSource ? " (only experimental.native_vr_on_foot changes what it sees)" : "");
         // Process lifetime: the relay and trampoline are never freed, so a call already inside them can finish.
     }
     return armed;
 }
 
 void nativeVrProbeSetRecording(bool on) { g_recording.store(on, std::memory_order_relaxed); }
-void nativeVrProbeSetBlockCinema(bool on) { g_block.store(on, std::memory_order_relaxed); }
 void nativeVrProbeSetOnFoot(bool on) { g_onFoot.store(on, std::memory_order_relaxed); }
 bool nativeVrProbeHolding() { return g_holding.load(std::memory_order_acquire); }
 
@@ -867,10 +831,9 @@ void nativeVrProbeDrain(uint64_t nowMs, int onFoot, NativeVrProbeSink sink, void
     char line[700];
     while (g_ring.pop(&e)) {
         const bool pipeline = e.point == nvp::kPointBuild || e.point == nvp::kPointTeardown;
-        // A decision or camera line only when it changed; a block or hold line every time, through the limiter, so repeats are counted.
-        const bool changeOnly = (pipeline && !e.substituted) || nvp::isCameraPoint(e.point);
+        // A decision or camera line only when it changed; a hold line every time, through the limiter, so repeats are counted.
+        const bool changeOnly = pipeline || nvp::isCameraPoint(e.point);
         if (changeOnly ? !changes.admit(e) : !limiter.admit(e, nowMs)) continue;
-        if (pipeline && e.substituted) changes.admit(e);
         if (nvp::formatEvent(e, base, size, line, sizeof(line), onFoot) > 0) sink(ctx, line);
     }
     if (limiter.summary(nowMs, g_ring.dropped(), line, sizeof(line)) > 0) sink(ctx, line);
@@ -878,8 +841,8 @@ void nativeVrProbeDrain(uint64_t nowMs, int onFoot, NativeVrProbeSink sink, void
 
 void nativeVrProbeFrameBoundary() {
     static uint32_t generation = ~0u;
-    static bool on = false, block = false, said = false, saidBlock = false, tried = false, saidBlockUnarmed = false;
-    static bool onFootKey = false, saidOnFoot = false, saidOnFootUnarmed = false, swapKey = false;
+    static bool on = false, said = false, tried = false;
+    static bool onFootKey = false, saidOnFoot = false, saidOnFootUnarmed = false;
     static int armed = 0;
     const Config& cfg = Config::get();
     const uint32_t now = cfg.generation();
@@ -893,16 +856,8 @@ void nativeVrProbeFrameBoundary() {
             said = true;
         }
         on = want;
-        const bool wantBlock = cfg.getBool("experimental.native_vr_block_cinema", false);
-        if (!saidBlock || wantBlock != block) {
-            Log::get().note("native-vr-block-cinema: %s (experimental.native_vr_block_cinema = %d)",
-                            wantBlock ? "on: the next view pipeline rebuild in a cinema mode is built for headset stereo instead"
-                                      : (saidBlock ? "off: the next rebuild is the game's own again" : "off"),
-                            wantBlock ? 1 : 0);
-            saidBlock = true;
-        }
-        block = wantBlock;
-        const bool wantOnFoot = cfg.getBool("experimental.native_vr_on_foot", false);
+        // Native VR on foot is the default: a missing key means on.
+        const bool wantOnFoot = cfg.getBool("experimental.native_vr_on_foot", true);
         if (!saidOnFoot || wantOnFoot != onFootKey) {
             char line[200];
             nvp::formatOnFootKey(wantOnFoot, saidOnFoot, line, sizeof(line));
@@ -910,12 +865,9 @@ void nativeVrProbeFrameBoundary() {
             saidOnFoot = true;
         }
         onFootKey = wantOnFoot;
-        swapKey = cfg.getBool("experimental.native_vr_swap_eyes", false);
     }
     const int onFoot = journalOnFootKnown() ? (journalOnFoot() ? 1 : 0) : -1;
-    // Swapping the eye frames patches nothing in the game: it needs no hook and works on any build.
-    nativeVrSwapEyesStep(swapKey, onFoot, &logSink, nullptr);
-    if ((on || block || onFootKey) && !tried) {
+    if ((on || onFootKey) && !tried) {
         tried = true;
         armed = nativeVrProbeInstall(reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)), nullptr, true, &logSink, nullptr);
         int cameraArmed = 0;
@@ -937,14 +889,7 @@ void nativeVrProbeFrameBoundary() {
                                      ? reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr)) + nvp::kCinemaSwitchRva
                                      : nullptr,
                                  onFootKey, onFoot, &logSink, nullptr);
-    const bool blockArmed = nativeVrProbeArmed(nvp::kPointBuild);
-    if (block && tried && !blockArmed && !saidBlockUnarmed) {
-        Log::get().note("native-vr-block-cinema: cannot work: the view pipeline rebuild is not hooked (see the lines above); the game "
-                        "keeps its cinema");
-        saidBlockUnarmed = true;
-    }
     nativeVrProbeSetRecording(on && armed > 0);
-    nativeVrProbeSetBlockCinema(block && blockArmed);
     if (armed > 0) {
         const uint64_t nowMs = GetTickCount64();
         nativeVrProbeDrain(nowMs, onFoot, &logSink, nullptr);
@@ -955,10 +900,3 @@ void nativeVrProbeFrameBoundary() {
 
 }  // namespace edvr
 
-// The OpenXR runtime (openvr_api.dll) asks once a frame pair whether the eye frames are swapped (experimental.native_vr_swap_eyes).
-// Optional: a runtime that does not find it swaps nothing.
-extern "C" __declspec(dllexport) int edvrNativeVrSwapEyes() { return edvr::nativeVrSwapEyesNow(); }
-
-namespace edvr {
-
-}  // namespace edvr

@@ -7,17 +7,15 @@
 // survives an unreadable one), and a point with the wrong prologue is refused with one line and left untouched, then hooked on a
 // later call once its bytes are right.
 // Part C hooks synthetic copies of the view pipeline's rebuild and teardown (their own prologues, then a jump into C++ that acts as the
-// game does on a fake pipeline): the decision line is written only when it changes, and experimental.native_vr_block_cinema's
-// substitution -- the rebuild sees 3 for 5 and 4 for 6, the field is the game's again after, anything else is left alone, a value the
-// game writes during the call is kept, activate and deactivate still reach the game -- with its line, limited like the rest.
+// game does on a fake pipeline): the decision line is written only when it changes, the rebuild sees the game's own mode and keeps a
+// value the game writes during the call, and activate and deactivate reach the game unchanged.
 // Part D hooks synthetic copies of the stereo mode source and the camera choice: experimental.native_vr_on_foot's hold -- 5 becomes 3
 // and 6 becomes 4 before the game's copy, and stays so between calls; a mode the game sets itself (3, 0) is left alone and ends the
 // hold; nothing with the key off; a cinema mode is never written -- its start, repeat (limited, with the summary) and end lines, the
 // end by the journal, and the camera line written only when the name or the mode changes.
 // Part E: the camera director's three points (the name asked for, read before the original; every argument forwarded; a line per
 // change), debug register slots other than 0, the writer table and the watch's verdict, a REAL hardware write watch on this rig's own
-// variable (two writing instructions on two threads written once each, the rig's own write counted apart, nothing traps once it is off),
-// and experimental.native_vr_swap_eyes' answer and lines.
+// variable (two writing instructions on two threads written once each, the rig's own write counted apart, nothing traps once it is off).
 // Part F: experimental.native_vr_on_foot's cinema-on-foot switch -- only 1 -> 0 with the key on and our 0 -> 1 with it off, nothing
 // over any other value, a 0 that was not ours never restored, the game putting 1 back counted and said at 1, 10, 100, ... -- its lines,
 // and the glue on a byte of the rig's own (another build: one line, nothing written).
@@ -36,7 +34,6 @@ void breadcrumb(const char*) {}  // production guard.cpp's crash-channel depende
 bool journalOnFootKnown() { return false; }  // journal_watch.cpp's, for the frame boundary the rig never calls
 bool journalOnFoot() { return false; }
 }
-extern "C" int edvrNativeVrSwapEyes();
 
 using namespace edvr;
 
@@ -147,10 +144,10 @@ void partA() {
         nvp::formatEvent(e, base, size, line, sizeof(line));
         check(std::strstr(line, "cinema feature OFF") && std::strstr(line, "active flag before 1"), "text: the cinema off line");
     }
-    check(nvp::cinemaModeSubstitute(5) == 3 && nvp::cinemaModeSubstitute(6) == 4, "block: cinema 5 and 6 become headset stereo 3 and 4");
+    check(nvp::cinemaModeSubstitute(5) == 3 && nvp::cinemaModeSubstitute(6) == 4, "hold: cinema 5 and 6 become headset stereo 3 and 4");
     check(nvp::cinemaModeSubstitute(0) == 0 && nvp::cinemaModeSubstitute(3) == 0 && nvp::cinemaModeSubstitute(4) == 0 &&
               nvp::cinemaModeSubstitute(7) == 0 && nvp::cinemaModeSubstitute(-1) == 0,
-          "block: every other mode is left alone");
+          "hold: every other mode is left alone");
     {
         char line[700];
         nvp::Event e;
@@ -169,16 +166,7 @@ void partA() {
         nvp::formatEvent(e, 0, 0, line, sizeof(line));
         check(std::strstr(line, "stereo mode 3 (headset stereo)") && std::strstr(line, "with cinema none"), "text: a stereo rebuild");
         e.mode = 5;
-        e.substituted = 3;
-        nvp::formatEvent(e, 0, 0, line, sizeof(line), 1);
-        check(std::strstr(line, "native-vr-block-cinema: cinema blocked on a rebuild: view pipeline 0xAB0, stereo mode 5 -> 3 for this "
-                                "rebuild (back to 5 after)") &&
-                  std::strstr(line, "on foot (journal): yes"),
-              "text: the block line, with the journal's answer");
-        nvp::formatEvent(e, 0, 0, line, sizeof(line), -1);
-        check(std::strstr(line, "on foot (journal): unknown") != nullptr, "text: the block line when the journal does not know");
         e.point = nvp::kPointTeardown;
-        e.substituted = 0;
         e.built = 3;
         e.cinema = 3;
         nvp::formatEvent(e, 0, 0, line, sizeof(line));
@@ -196,7 +184,7 @@ void partA() {
         nvp::formatOnFootKey(false, false, line, sizeof(line));
         check(std::strcmp(line, "native-vr-on-foot: off (experimental.native_vr_on_foot = 0)") == 0, "text: the key's first line, off");
         nvp::formatOnFootKey(true, true, line, sizeof(line));
-        check(std::strstr(line, "native-vr-on-foot: on: a cinema mode the game sets is replaced by headset stereo") &&
+        check(std::strstr(line, "native-vr-on-foot: on: on foot the game keeps headset stereo (its cinema-on-foot switch off)") &&
                   std::strstr(line, "native_vr_on_foot = 1)"),
               "text: the key's line, on");
         nvp::formatOnFootKey(false, true, line, sizeof(line));
@@ -459,14 +447,13 @@ void partC(void (*callBuild)(void*), void (*callTeardown)(void*), void (*callOn)
     *reinterpret_cast<uint8_t**>(g_pipeline + nvp::kPipelineConfig) = g_config;
     for (int i = 0; i < nvp::kSubPipelines; ++i) *reinterpret_cast<uint8_t**>(g_pipeline + nvp::kPipelineSubs + 8 * i) = g_subs[i];
 
-    // Probe and block off: the rebuild is the game's, nothing is recorded.
+    // Probe off: the rebuild is the game's, nothing is recorded.
     nativeVrProbeSetRecording(false);
-    nativeVrProbeSetBlockCinema(false);
     pipelineMode() = 5;
     g_lines.clear();
     callBuild(g_pipeline);
     nativeVrProbeDrain(now, -1, &sink, nullptr);
-    check(g_buildSaw == 5 && g_subs[0][nvp::kSubCinema] == 1 && g_lines.empty(), "pipeline: both off, the rebuild sees 5 and builds cinema; no line");
+    check(g_buildSaw == 5 && g_subs[0][nvp::kSubCinema] == 1 && g_lines.empty(), "pipeline: probe off, the rebuild sees 5 and builds cinema; no line");
 
     // Probe on: the decision lines, once per change.
     nativeVrProbeSetRecording(true);
@@ -492,50 +479,13 @@ void partC(void (*callBuild)(void*), void (*callTeardown)(void*), void (*callOn)
     nativeVrProbeDrain(now, -1, &sink, nullptr);
     check(countLines("cinema decision (rebuild)") == 1 && anyLine("stereo mode 3 (headset stereo)") && anyLine("with cinema none"),
           "pipeline: a changed mode is written at once");
-    check(!anyLine("native-vr-block-cinema"), "pipeline: no block line while the block is off");
-
-    // Block on, probe off: the substitution and its line, nothing else.
-    nativeVrProbeSetRecording(false);
-    nativeVrProbeSetBlockCinema(true);
-    now += 2000;
-    g_lines.clear();
-    pipelineMode() = 5;
-    callBuild(g_pipeline);
-    nativeVrProbeDrain(now, 1, &sink, nullptr);
-    check(g_buildSaw == 3 && pipelineMode() == 5, "block: the rebuild sees 3 for 5, and the field is 5 again after");
-    check(g_subs[0][nvp::kSubCinema] == 0 && g_subs[1][nvp::kSubCinema] == 0 && g_subs[1][nvp::kSubBuilt] == 1,
-          "block: so both eyes are built, without cinema");
-    check(countLines("cinema blocked on a rebuild") == 1 && anyLine("stereo mode 5 -> 3 for this rebuild (back to 5 after)") &&
-              anyLine("with cinema none") && anyLine("on foot (journal): yes"),
-          "block: its line, with the result and the journal's answer");
-    check(!anyLine("cinema decision"), "block: with the probe off no decision line is written");
-    pipelineMode() = 6;
-    callBuild(g_pipeline);
-    check(g_buildSaw == 4 && pipelineMode() == 6, "block: 6 is seen as 4, and is 6 again after");
-    pipelineMode() = 3;
-    callBuild(g_pipeline);
-    check(g_buildSaw == 3 && pipelineMode() == 3, "block: a stereo mode is left alone");
-    pipelineMode() = 0;
-    callBuild(g_pipeline);
-    check(g_buildSaw == 0 && pipelineMode() == 0, "block: mono is left alone");
     pipelineMode() = 5;
     g_buildWrites = 7;
     callBuild(g_pipeline);
     g_buildWrites = 0;
-    check(g_buildSaw == 3 && pipelineMode() == 7, "block: a value the game writes during the rebuild is kept, not overwritten with 5");
+    check(g_buildSaw == 5 && pipelineMode() == 7, "pipeline: recording, the rebuild sees the game's 5 and a value it writes is kept");
 
-    now += 2000;
-    nativeVrProbeDrain(now, 1, &sink, nullptr);
-    now += 2000;
-    g_lines.clear();
-    pipelineMode() = 5;
-    for (int i = 0; i < 100; ++i) callBuild(g_pipeline);
-    nativeVrProbeDrain(now, 1, &sink, nullptr);
-    check(countLines("cinema blocked on a rebuild") == 1, "block: a hundred blocked rebuilds in a frame write one line");
-    nativeVrProbeDrain(now + 1500, 1, &sink, nullptr);
-    check(anyLine("99 repeat(s) were not written"), "block: and the summary counts the other 99");
-
-    // Activate and deactivate are the game's even with the block on.
+    // Activate and deactivate always reach the game.
     uint8_t feature[0x40] = {};
     uint64_t view = 0x77;
     g_onSelf = g_onArg = g_offSelf = 0;
@@ -543,17 +493,10 @@ void partC(void (*callBuild)(void*), void (*callTeardown)(void*), void (*callOn)
     callOff(feature);
     check(g_onSelf == reinterpret_cast<uint64_t>(feature) && g_onArg == reinterpret_cast<uint64_t>(&view) &&
               g_offSelf == reinterpret_cast<uint64_t>(feature),
-          "block: activate and deactivate still reach the game, unchanged");
-
-    // Off again: the next rebuild is the game's own.
-    nativeVrProbeSetBlockCinema(false);
-    pipelineMode() = 5;
-    callBuild(g_pipeline);
-    check(g_buildSaw == 5 && g_subs[0][nvp::kSubCinema] == 1, "block: off again, the rebuild sees 5 and builds cinema");
+          "pipeline: activate and deactivate reach the game, unchanged");
 
     // An unreadable pipeline is forwarded and, with the probe on, said so.
     nativeVrProbeSetRecording(true);
-    nativeVrProbeSetBlockCinema(true);
     uint8_t broken[0xB0] = {};
     *reinterpret_cast<uint64_t*>(broken + nvp::kPipelineConfig) = 0x10;
     now += 4000;
@@ -562,7 +505,6 @@ void partC(void (*callBuild)(void*), void (*callTeardown)(void*), void (*callOn)
     nativeVrProbeDrain(now, -1, &sink, nullptr);
     check(g_teardownSelf == reinterpret_cast<uint64_t>(broken) && countLines("could not be read") == 1,
           "pipeline: an unreadable pipeline is said so and still forwarded");
-    nativeVrProbeSetBlockCinema(false);
     nativeVrProbeSetRecording(false);
 }
 
@@ -709,7 +651,7 @@ void partD(FnSourceCall callSource, FnCameraCall callCamera, uint64_t now) {
     frame(0);
 }
 
-// ---- Part E: the camera director, the debug registers, the writer watch and the eye swap ------------------------------------------
+// ---- Part E: the camera director, the debug registers and the writer watch ---------------------------------------------------------
 
 using FnCall4 = uint64_t (*)(void*, const void*, uint64_t, uint64_t);
 using FnWrite = void (*)(volatile int32_t*, int32_t);
@@ -852,33 +794,6 @@ void partE(FnCall4 callByName, FnCall4 callDefault, FnCall4 callByName2, FnWrite
     nativeVrWriterWatchDrain(&sink, nullptr);
     check(g_lines.empty() && g_watched == 5, "watch: off, writes trap no more");
     CloseHandle(go);
-
-    // experimental.native_vr_swap_eyes: only with the key and on foot; a line when the key or the answer changes.
-    g_lines.clear();
-    nativeVrSwapEyesStep(false, 1, &sink, nullptr);
-    check(countLines("native-vr-swap-eyes: off (experimental.native_vr_swap_eyes = 0)") == 1 && g_lines.size() == 1 &&
-              edvrNativeVrSwapEyes() == 0,
-          "swap: key off, one line, nothing swapped even on foot");
-    nativeVrSwapEyesStep(false, 1, &sink, nullptr);
-    check(g_lines.size() == 1, "swap: key off, said once");
-    g_lines.clear();
-    nativeVrSwapEyesStep(true, 0, &sink, nullptr);
-    check(anyLine("native-vr-swap-eyes: on: on foot the left and right eye frames are swapped") && anyLine("inactive: each eye sees its own") &&
-              edvrNativeVrSwapEyes() == 0,
-          "swap: key on in the ship, not swapped");
-    g_lines.clear();
-    nativeVrSwapEyesStep(true, 1, &sink, nullptr);
-    nativeVrSwapEyesStep(true, 1, &sink, nullptr);
-    check(countLines("native-vr-swap-eyes: active on foot") == 1 && g_lines.size() == 1 && edvrNativeVrSwapEyes() == 1,
-          "swap: on foot, swapped, said once");
-    g_lines.clear();
-    nativeVrSwapEyesStep(true, -1, &sink, nullptr);
-    check(anyLine("inactive") && edvrNativeVrSwapEyes() == 0, "swap: an unknown journal swaps nothing");
-    nativeVrSwapEyesStep(true, 1, &sink, nullptr);
-    g_lines.clear();
-    nativeVrSwapEyesStep(false, 1, &sink, nullptr);
-    check(anyLine("off: the eye frames go to their own eyes again") && anyLine("inactive") && edvrNativeVrSwapEyes() == 0,
-          "swap: key off on foot, back at once");
 }
 
 void partB() {
@@ -940,7 +855,7 @@ void partB() {
               anyLine("camera by name (second path) hooked at EliteDangerous64.exe+0x1D203B0"),
           "glue: the three camera director points, by their RVAs");
     check(anyLine("view pipeline rebuild hooked") && anyLine("7 prologue bytes verified, 5 moved") &&
-              anyLine("only experimental.native_vr_block_cinema changes what it sees") && anyLine("view pipeline teardown hooked") &&
+              anyLine("view pipeline teardown hooked") &&
               anyLine("10 prologue bytes verified, 5 moved"),
           "glue: the rebuild and the teardown, each with its own prologue");
     check(anyLine("stereo mode source hooked at EliteDangerous64.exe+0x281AC10") &&
