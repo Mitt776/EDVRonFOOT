@@ -7,7 +7,7 @@
 ## 2. Документы, сборка, установка
 
 - [x] 2.1 README `edvr/README_EDVRONFOOT.md`: убрать разделы блокировки и перестановки, раздел `native_vr_on_foot` — «включено по умолчанию, как выключить»; исследование — ключи в `## Status`. Проверка: в README нет `native_vr_block_cinema` и `native_vr_swap_eyes`
-- [ ] 2.2 Полная сборка `edvr\build_edvronfoot.bat`, коммит, тег `v0.19.1-edvronfoot.7`, `--dll-only`, установка (игра закрыта), удалить строки `native_vr_block_cinema` и `native_vr_swap_eyes` из `edvr.ini` игры через Edit. Проверка: «Native OpenXR build and all gates passed», `edvronfoot_game.ps1 -Action Status` показывает `.7`
+- [x] 2.2 Полная сборка `edvr\build_edvronfoot.bat`, коммит, тег `v0.19.1-edvronfoot.7`, `--dll-only`, установка (игра закрыта), удалить строки `native_vr_block_cinema` и `native_vr_swap_eyes` из `edvr.ini` игры через Edit. Проверка: «Native OpenXR build and all gates passed», `edvronfoot_game.ps1 -Action Status` показывает `.7`
 
 ## 3. Проверка
 
