@@ -44,7 +44,7 @@ def judge(name, code, lines):
                       "its tolerance in build.bat can be removed" % name)
     if code == 1 and fails == known["fail"] and d3d == known["d3d"]:
         return True, ("[edvronfoot] KNOWN FAILURE tolerated: %s -- %s (see "
-                      "edvr/README.md, 'Известные сбои')" % (name, known["fail"][0]))
+                      "edvr/README_EDVRONFOOT.md, 'Известные сбои')" % (name, known["fail"][0]))
     return False, ("[edvronfoot] ERROR: %s failed differently from the known failure "
                    "(exit %d, %d FAIL line(s), %d D3D line(s))" % (name, code, len(fails), len(d3d)))
 
