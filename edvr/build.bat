@@ -532,6 +532,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\glitch_frame.cpp" ^
     "src\d3d11\transition_flash_eye_base.cpp" ^
     "src\d3d11\explorer_cam.cpp" ^
+    "src\d3d11\native_vr_probe.cpp" ^
     "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" "src\d3d11\vscreen_footprint.cpp" ^
     "src\d3d11\binding_shadow.cpp" ^
     "src\d3d11\vr_runtime.cpp" ^
@@ -3011,6 +3012,23 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: explorer cam test build failed & exit /b 1 )
 "%BUILD%\explorer_cam_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_native_vr_probe_test
+echo [edvr] === native_vr_probe_test.exe ===
+REM EDVRonFOOT: build gate for the native-VR-on-foot probe (src\d3d11\native_vr_probe.h, experimental.native_vr_probe). Part A drives
+REM native_vr_probe_core.h: the mode mapping, the ring, the limiter and every line's text. Part B compiles the REAL glue with the real
+REM CodeHook and hooks synthetic functions that begin with the game's prologue: arguments forwarded unchanged, recording only while on,
+REM an unreadable field survived, a wrong prologue refused with one line and its bytes untouched, then hooked once corrected.
+if not exist "%OBJ%\nativevrprobe" mkdir "%OBJ%\nativevrprobe"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^
+    /Fo"%OBJ%\nativevrprobe"\ /Fe"%BUILD%\native_vr_probe_test.exe" ^
+    "tools\native_vr_probe_test\native_vr_probe_test.cpp" "src\d3d11\native_vr_probe.cpp" ^
+    "src\common\code_hook.cpp" "src\common\guard.cpp" "src\common\log.cpp" "src\common\config.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: native vr probe test build failed & exit /b 1 )
+"%BUILD%\native_vr_probe_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_explorer_cam_fade_test
