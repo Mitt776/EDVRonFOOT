@@ -17,8 +17,8 @@
 
 ## 3. Сборка и установка
 
-- [ ] 3.1 Полная сборка `edvr\build_edvronfoot.bat`, коммит, тег `v0.19.1-edvronfoot.4`, `build.bat --dll-only`. Проверка: «Native OpenXR build and all gates passed», стенд PASS, smoke PASSED, ровно один «KNOWN FAILURE tolerated», версия DLL `.4`
-- [ ] 3.2 Установить `install_to_game.bat` (игра закрыта), дописать в `edvr.ini` игры `native_vr_on_foot = 0` после ключа блокировки (через Edit). Проверка: `edvronfoot_game.ps1 -Action Status` показывает `.4`, хвост `edvr.ini` содержит три ключа
+- [x] 3.1 Полная сборка `edvr\build_edvronfoot.bat`, коммит, тег `v0.19.1-edvronfoot.4`, `build.bat --dll-only`. Проверка: «Native OpenXR build and all gates passed», стенд PASS, smoke PASSED, ровно один «KNOWN FAILURE tolerated», версия DLL `.4`
+- [x] 3.2 Установить `install_to_game.bat` (игра закрыта), дописать в `edvr.ini` игры `native_vr_on_foot = 0` после ключа блокировки (через Edit). Проверка: `edvronfoot_game.ps1 -Action Status` показывает `.4`, хвост `edvr.ini` содержит три ключа
 
 ## 4. Эксперимент в игре
 
