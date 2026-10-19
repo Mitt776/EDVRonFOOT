@@ -572,16 +572,19 @@ int main(int argc, char** argv) {
             printf("  FAIL  edvrIntroSkipSelftest is not exported\n");
             rc = 1;
         } else {
+            // EDVRonFOOT: intro_skip.cpp's self-test reports only "1 predicate, 2 refusal"
+            // since the probe's watch cell was dropped there; this expectation still said
+            // 7 (4 watch), so smoke.exe failed on every machine. build.bat only compiles
+            // smoke.exe, which is why upstream never saw it.
             const unsigned bits = introSkip();
-            if (bits == 7u) {
+            if (bits == 3u) {
                 printf("  ok    intro skip: idents under Movies\\ are told apart from the "
                        "front end's loops and from everything else, in either separator "
                        "and case; an armed hook answers 'file not found', a disarmed "
-                       "one refuses nothing, and the probe's watch counts without "
-                       "refusing\n");
+                       "one refuses nothing\n");
             } else {
-                printf("  FAIL  intro skip self-test returned %u (want 7: 1 predicate, 2 "
-                       "refusal, 4 watch)\n", bits);
+                printf("  FAIL  intro skip self-test returned %u (want 3: 1 predicate, 2 "
+                       "refusal)\n", bits);
                 rc = 1;
             }
         }

@@ -362,7 +362,7 @@ struct Fixture {
             b[31] = vb[3].Get(); stride[31] = 64; offset[31] = 12;
             context->IASetVertexBuffers(0, 32, b, stride, offset);
         }
-        context->IASetIndexBuffer(ib[0].Get(), DXGI_FORMAT_R16_UINT, 6);
+        context->IASetIndexBuffer(ib[0].Get(), DXGI_FORMAT_R16_UINT, 8);  // EDVRonFOOT: 8, not 6 -- the R32 mutant below must stay 4-aligned for SDK 26100's debug layer
         bindStages(context, 0, 0);
         // CS UAVs: the game's slots, out to the last
         {
@@ -536,8 +536,8 @@ inline std::vector<Mutation> mutations() {
     m.push_back({"IA.vb[31].stride", [](Fixture& f) { ID3D11Buffer* b = f.vb[3].Get(); const UINT stride = 60, offset = 12; f.context->IASetVertexBuffers(31, 1, &b, &stride, &offset); }});
     m.push_back({"IA.vb[5].offset", [](Fixture& f) { ID3D11Buffer* b = f.vb[2].Get(); const UINT stride = 48, offset = 12; f.context->IASetVertexBuffers(5, 1, &b, &stride, &offset); }});
     m.push_back({"IA.vb[1].buf", [](Fixture& f) { ID3D11Buffer* b = f.vb[4].Get(); const UINT stride = 32, offset = 4; f.context->IASetVertexBuffers(1, 1, &b, &stride, &offset); }});
-    m.push_back({"IA.ib.format", [](Fixture& f) { f.context->IASetIndexBuffer(f.ib[0].Get(), DXGI_FORMAT_R32_UINT, 6); }});
-    m.push_back({"IA.ib.offset", [](Fixture& f) { f.context->IASetIndexBuffer(f.ib[0].Get(), DXGI_FORMAT_R16_UINT, 8); }});
+    m.push_back({"IA.ib.format", [](Fixture& f) { f.context->IASetIndexBuffer(f.ib[0].Get(), DXGI_FORMAT_R32_UINT, 8); }});
+    m.push_back({"IA.ib.offset", [](Fixture& f) { f.context->IASetIndexBuffer(f.ib[0].Get(), DXGI_FORMAT_R16_UINT, 12); }});
     // predication
     m.push_back({"PRED.obj", [](Fixture& f) { f.context->SetPredication(f.pred[1].Get(), TRUE); }});
     m.push_back({"PRED.value", [](Fixture& f) { f.context->SetPredication(f.pred[0].Get(), FALSE); }});

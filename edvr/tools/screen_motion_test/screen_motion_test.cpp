@@ -511,7 +511,10 @@ int main(int argc,char** argv){
         char self[MAX_PATH]{};GetModuleFileNameA(nullptr,self,MAX_PATH);
         for(int i=0;i<kScreenMutantCount;++i){
             _putenv_s("EDVR_SCREEN_MUTANT",std::to_string(i).c_str());
-            const intptr_t code=_spawnl(_P_WAIT,self,self,"--self-test",nullptr);
+            // EDVRonFOOT: _spawnl joins argv with spaces and does not quote, so a path with a space ("D:\Project VSC\...") split into two
+            // arguments and the child read the second half as a fixture path. Quote argv[0]; the file to run stays the unquoted path.
+            const std::string quotedSelf="\""+std::string(self)+"\"";
+            const intptr_t code=_spawnl(_P_WAIT,self,quotedSelf.c_str(),"--self-test",nullptr);
             _putenv_s("EDVR_SCREEN_MUTANT","");
             std::printf("screen motion character-rule mutation %d \"%s\": exit %d (%s)\n",i,kScreenMutants[i].name,int(code),i==0?"the control must pass":"the rig must fail it");
             check(i==0?code==0:code==1,i==0?"character-rule mutations: the control (the shipped source compiled here) passes the whole rig":"character-rule mutations: the mutant is caught by the rig");
