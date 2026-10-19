@@ -1,0 +1,501 @@
+#include "../../src/common/native_frame.h"
+#include "../../src/common/comfort_fade.h"
+#include "../../src/common/frame_flag.h"
+#include "../../src/common/config.h"
+#include "../../src/common/native_render_settings.h"
+#include "../../src/common/system_d3d11.h"
+#include "../../src/d3d11/journal_watch.h"
+
+#include <d3d11.h>
+#include <wrl/client.h>
+
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <limits>
+#include <string>
+#include <thread>
+
+// The journal watcher is stubbed so the on-foot signal is the rig's to set.
+static bool g_journalActive = false, g_onFootKnown = false, g_onFoot = false;
+namespace edvr {
+bool journalWatchActive() { return g_journalActive; }
+bool journalOnFootKnown() { return g_onFootKnown; }
+bool journalOnFoot() { return g_onFoot; }
+}
+
+using Microsoft::WRL::ComPtr;
+
+static EdvrNativeFrameInput input(uint64_t generation, uint64_t reference,
+                                  uint64_t sequence, bool valid = true) {
+    EdvrNativeFrameInput result{sizeof(result), EDVR_NATIVE_FRAME_VERSION_1};
+    result.generation = generation;
+    result.referenceGeneration = reference;
+    result.sequence = sequence;
+    result.valid = valid ? 1u : 0u;
+    const float identity[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+    std::memcpy(result.physicalHead, identity, sizeof(identity));
+    return result;
+}
+
+int wmain(int argc, wchar_t** argv) {
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX |
+                 SEM_NOOPENFILEERRORBOX);
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    if (argc != 2) return 2;
+    if (!std::wcscmp(argv[1], L"--dry-run")) {
+        std::puts("native_frame_test: dry-run (no provider calls)");
+        return 0;
+    }
+    if (std::wcscmp(argv[1], L"--self-test")) return 2;
+
+    unsigned checks = 0, failures = 0;
+    const auto check = [&](bool condition, const char* name) {
+        ++checks;
+        if (!condition) {
+            ++failures;
+            std::printf("FAIL: %s\n", name);
+        }
+    };
+
+    // System32's d3d11 through common/system_d3d11.h, never an import: EDVR's proxy sits beside this exe.
+    const auto createDevice = edvr::systemD3D11CreateDevice();
+    check(createDevice != nullptr, "system D3D11 factory");
+    std::puts("native_frame_test: factory ready");
+
+    ComPtr<ID3D11Device> device;
+    ComPtr<ID3D11DeviceContext> ignoredContext;
+    D3D_FEATURE_LEVEL featureLevel{};
+    check(createDevice && SUCCEEDED(createDevice(
+              nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
+              D3D11_SDK_VERSION, &device, &featureLevel, &ignoredContext)),
+          "WARP device");
+    if (!device) return 1;
+    std::puts("native_frame_test: device ready");
+
+    // Reset the process channel so every assertion below observes this
+    // provider's session rather than an earlier native-frame run.
+    edvr::clearGlitchFrame();
+    edvr::requestSubmitHold(0);
+    // Published after acquire; doing so also exercises the device identity
+    // check without making setup depend on a pre-existing channel mapping.
+
+    // The terrain guard's six keys (removed 2026-10-09), as an old ini still carries them: nothing reads them, whatever they say.
+    edvr::Config::get().set("fix.cull_guard", "PeRcEnT");
+    edvr::Config::get().set("fix.cull_guard_percent", "75");
+    edvr::Config::get().set("fix.cull_guard_fraction_h", "-1");
+    edvr::Config::get().set("fix.cull_guard_fraction_v", "nan");
+    edvr::Config::get().set("fix.cull_guard_headsets",
+                            "94x99, 120x130junk, 95X84, 10x20, 95x84 ");
+    edvr::Config::get().set("fix.transition_flash", "1");
+    edvr::Config::get().set("advanced.cull_guard_channel", "Matrix");
+    // The three field-of-view trims are per-headset lists keyed like
+    // fix.openxr_resolution, resolved against the headset the last v2
+    // render-settings query saw. Drive that query first, exactly as the host
+    // does (tools/native_render_settings_test drives the same export), so the
+    // labels the provider matches on are valid: "Oculus" + "Meta Quest 3"
+    // sanitise to oculus/meta-quest-3.
+    EdvrNativeRenderViewBounds renderBounds[2];
+    renderBounds[0] = {1824, 1968, 16384, 16384};
+    renderBounds[1] = {1824, 1968, 16384, 16384};
+    EdvrNativeRenderSettings renderSettings =
+        edvr::native_render::buildRenderSettingsRequest(renderBounds, "Oculus", "Meta Quest 3");
+    check(edvrQueryNativeRenderSettings(EDVR_NATIVE_RENDER_SETTINGS_VERSION_2,
+                                        sizeof(renderSettings), &renderSettings) == TRUE,
+          "the render settings query publishes this headset's labels");
+    // The keys live in [experimental] since 2026-09-29 (edvr.ini's
+    // `# moved-from: fix.fov_trim_*`; tools/config_test proves an old line is
+    // read as the new name and tools/installer_test that the merge carries it).
+    edvr::Config::get().set("experimental.fov_trim_outer", "oculus/meta-quest-3:7");
+    // 44 is outside 0..30, so the entry is refused rather than clamped, and
+    // a bare 5 (the form this key used to take) names no headset at all.
+    edvr::Config::get().set("experimental.fov_trim_nasal", "oculus/meta-quest-3:44");
+    edvr::Config::get().set("experimental.fov_trim_vertical", "5");
+
+    EdvrNativeFrameRequest request{
+        sizeof(request), EDVR_NATIVE_FRAME_VERSION_1, device.Get(), 41};
+    EdvrNativeFrameTable table{sizeof(table), EDVR_NATIVE_FRAME_VERSION_1};
+    std::puts("native_frame_test: acquiring");
+    check(edvrAcquireNativeFrame(&request, &table) == S_OK && table.context &&
+              table.beginFrame && table.reservedCall && table.latchSubmit &&
+              table.invalidate && table.close,
+          "acquire exports complete table");
+    EdvrNativeFrameTable blockedTable{sizeof(blockedTable),
+                                      EDVR_NATIVE_FRAME_VERSION_1};
+    check(edvrAcquireNativeFrame(&request, &blockedTable) == E_PENDING,
+          "only one active provider session");
+    edvr::publishGameDevice(device.Get());
+    edvr::announceSceneArrived();
+
+    // Acquire on this thread, then run the complete CPU callback sequence from
+    // a different XR-owner thread.  The provider must not use a producer-ID
+    // gate for callbacks.
+    EdvrNativeFrameOutput firstOutput{sizeof(firstOutput),
+                                      EDVR_NATIVE_FRAME_VERSION_5};
+    HRESULT workerBegin = E_FAIL;
+    HRESULT workerLatch = E_FAIL;
+    EdvrNativeFrameDecision firstDecision{
+        sizeof(firstDecision), EDVR_NATIVE_FRAME_VERSION_1};
+    std::thread owner([&] {
+        EdvrNativeFrameInput frame = input(41, 7, 1);
+        workerBegin = table.beginFrame(table.context, &frame, &firstOutput);
+        edvr::markGlitchFrame();
+        workerLatch = table.latchSubmit(table.context, 1, &firstDecision);
+    });
+    owner.join();
+    check(workerBegin == S_OK, "XR owner can begin after producer acquire");
+    check(workerLatch == S_OK, "XR owner can latch after producer acquire");
+    // The old Explorer Cam's headset offset is retired (2026-10-07): its slots stay in the
+    // struct for layout and are always zero, so a runtime that still reads them applies nothing.
+    check(firstOutput.reservedOffset[0] == 0.0f && firstOutput.reservedOffset[1] == 0.0f &&
+              firstOutput.reservedOffset[2] == 0.0f && firstOutput.reservedYaw == 0.0f &&
+              firstOutput.reservedOffsetEnabled == 0 && firstOutput.reservedOffsetGamePoses == 0,
+          "the retired offset slots are zero");
+    // The terrain guard's slots are retired (2026-10-09): always zero, whatever an old ini says.
+    const auto retiredGuardSlotsZero = [](const EdvrNativeFrameOutput& o) {
+        for (uint32_t word : o.reservedTerrainGuard) if (word != 0) return false;
+        return o.reservedProjectionChannel == 0;
+    };
+    check(retiredGuardSlotsZero(firstOutput),
+          "the terrain guard's retired slots are zero although the ini still carries all six of its old keys");
+    check(firstOutput.sceneReady && firstOutput.transitionEnabled &&
+              firstOutput.resubmitEnabled,
+          "scene and transition outputs");
+    check(firstOutput.version == EDVR_NATIVE_FRAME_VERSION_5 &&
+              firstOutput.size == sizeof(firstOutput),
+          "version 5 answered in kind");
+    check(firstOutput.trimOuterDeg == 7.0f &&
+              firstOutput.trimNasalDeg == 0.0f &&
+              firstOutput.trimVerticalDeg == 0.0f,
+          "the worn headset's trim entry applies; out of range and a bare number do not");
+    check(firstDecision.withhold && firstDecision.jumpOnly,
+          "marked frame is withheld as jump-only");
+
+    // The second latch for one sequence returns the first cached answer, even
+    // when the shared mark has changed since the first eye latched.
+    edvr::clearGlitchFrame();
+    EdvrNativeFrameDecision cached{
+        sizeof(cached), EDVR_NATIVE_FRAME_VERSION_1};
+    check(table.latchSubmit(table.context, 1, &cached) == S_OK &&
+              std::memcmp(&cached, &firstDecision, sizeof(cached)) == 0,
+          "second latch returns cached decision");
+    check(edvr::glitchConsumerPresent(), "valid latch announces consumer");
+
+    // Invalid physical tracking is a valid frame boundary but does not
+    // publish a new pose.
+    edvr::markGlitchFrame();
+    EdvrNativeFrameInput lost = input(41, 7, 2, false);
+    lost.physicalHead[0] = std::numeric_limits<float>::quiet_NaN();
+    EdvrNativeFrameOutput lostOutput{sizeof(lostOutput),
+                                     EDVR_NATIVE_FRAME_VERSION_5};
+    check(table.beginFrame(table.context, &lost, &lostOutput) == S_OK,
+          "lost pose succeeds");
+    EdvrNativeFrameDecision lostDecision{
+        sizeof(lostDecision), EDVR_NATIVE_FRAME_VERSION_1};
+    check(table.latchSubmit(table.context, 2, &lostDecision) == S_OK &&
+              !lostDecision.withhold,
+          "begin clears a mark from the previous frame");
+    EdvrNativeFrameInput bad = input(41, 7, 3);
+    bad.physicalHead[0] = 2.0f;
+    EdvrNativeFrameOutput badOutput{sizeof(badOutput),
+                                    EDVR_NATIVE_FRAME_VERSION_5};
+    check(table.beginFrame(table.context, &bad, &badOutput) == E_INVALIDARG,
+          "non-rigid physical pose rejected");
+
+    // The table's retired call slot (the terrain guard's state announcement): a runtime built before the removal still calls it,
+    // and it answers S_OK to anything and does nothing.
+    check(table.reservedCall(table.context, 1, 1.25f, 1.5f) == S_OK &&
+              table.reservedCall(table.context, 3, std::numeric_limits<float>::quiet_NaN(), 1.0f) == S_OK &&
+              table.reservedCall(nullptr, 0, 0.0f, 0.0f) == S_OK,
+          "the retired call slot answers S_OK and does nothing, whatever it is handed");
+
+    // Invalidation preserves the sequence floor and clears pending shared
+    // state.  The pose previously published remains available.
+    float publishedPose[12]{};
+    check(edvr::headPose(publishedPose) && publishedPose[0] == 1.0f,
+          "physical pose published before invalidation");
+    check(table.invalidate(table.context) == S_OK &&
+              table.beginFrame(table.context, &lost, &lostOutput) == E_INVALIDARG,
+          "invalidate refuses the old sequence");
+    EdvrNativeFrameInput next = input(41, 7, 4);
+    check(table.beginFrame(table.context, &next, &lostOutput) == S_OK,
+          "greater sequence recovers after invalidation");
+
+    // Explicit camera holds survive transition_flash being turned off, and a
+    // prepared frame that never reaches Submit does not consume the hold.
+    edvr::Config::get().set("fix.transition_flash", "0");
+    edvr::requestSubmitHold(1);
+    EdvrNativeFrameInput holdFrame = input(41, 7, 5);
+    check(table.beginFrame(table.context, &holdFrame, &lostOutput) == S_OK,
+          "begin prepared hold frame");
+    EdvrNativeFrameInput visibleHoldFrame = input(41, 7, 6);
+    check(table.beginFrame(table.context, &visibleHoldFrame, &lostOutput) == S_OK,
+          "begin visible hold frame after dropped frame");
+    EdvrNativeFrameDecision hold{
+        sizeof(hold), EDVR_NATIVE_FRAME_VERSION_1};
+    check(table.latchSubmit(table.context, 6, &hold) == S_OK && hold.withhold &&
+              !hold.jumpOnly,
+          "explicit hold survives transition setting");
+    EdvrNativeFrameInput afterHold = input(41, 7, 7);
+    check(table.beginFrame(table.context, &afterHold, &lostOutput) == S_OK,
+          "begin frame after consumed hold");
+    EdvrNativeFrameDecision noHold{
+        sizeof(noHold), EDVR_NATIVE_FRAME_VERSION_1};
+    check(table.latchSubmit(table.context, 7, &noHold) == S_OK &&
+              !noHold.withhold,
+          "hold is consumed once by visible pair");
+
+    // An openvr_api.dll from before the trim asks in version 1 and must be
+    // answered in version 1, in its own smaller struct, with nothing written
+    // past the end of it. A size that does not match its version is refused.
+    struct Guarded { EdvrNativeFrameOutput output; uint32_t sentinel; } guarded{};
+    guarded.output.size = EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
+    guarded.output.version = EDVR_NATIVE_FRAME_VERSION_1;
+    guarded.output.trimOuterDeg = guarded.output.trimNasalDeg =
+        guarded.output.trimVerticalDeg = -99.0f;
+    guarded.sentinel = 0xA5A5A5A5u;
+    EdvrNativeFrameInput legacyFrame = input(41, 7, 8);
+    check(table.beginFrame(table.context, &legacyFrame, &guarded.output) == S_OK &&
+              guarded.output.version == EDVR_NATIVE_FRAME_VERSION_1 &&
+              guarded.output.size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_1,
+          "version 1 caller answered in version 1");
+    check(guarded.output.sceneReady &&
+              guarded.output.trimOuterDeg == -99.0f &&
+              guarded.sentinel == 0xA5A5A5A5u,
+          "version 1 answer writes no trim and nothing past its struct");
+    EdvrNativeFrameOutput mismatched{EDVR_NATIVE_FRAME_OUTPUT_SIZE_1,
+                                     EDVR_NATIVE_FRAME_VERSION_2};
+    EdvrNativeFrameInput mismatchFrame = input(41, 7, 9);
+    check(table.beginFrame(table.context, &mismatchFrame, &mismatched) ==
+              E_INVALIDARG,
+          "a size that contradicts the version is refused");
+    check(EDVR_NATIVE_FRAME_OUTPUT_SIZE_1 + 3 * sizeof(float) ==
+              EDVR_NATIVE_FRAME_OUTPUT_SIZE_2,
+          "version 2 adds exactly the three trims");
+    check(EDVR_NATIVE_FRAME_OUTPUT_SIZE_2 + sizeof(uint32_t) ==
+              EDVR_NATIVE_FRAME_OUTPUT_SIZE_3,
+          "version 3 adds exactly the pacing flag");
+    check(EDVR_NATIVE_FRAME_OUTPUT_SIZE_3 + sizeof(uint32_t) ==
+              EDVR_NATIVE_FRAME_OUTPUT_SIZE_4,
+          "version 4 adds exactly the channel");
+    check(EDVR_NATIVE_FRAME_OUTPUT_SIZE_4 + sizeof(float) ==
+              sizeof(EdvrNativeFrameOutput),
+          "version 5 adds exactly the comfort fade level");
+
+    // A runtime-only entry applies to any headset on that runtime with no
+    // entry of its own; a key with no entry for the worn headset is no trim,
+    // including one keyed on a headset that is not being worn.
+    edvr::Config::get().set("experimental.fov_trim_vertical", "oculus:3");
+    edvr::Config::get().set("experimental.fov_trim_outer", "");
+    edvr::Config::get().set("experimental.fov_trim_nasal", "virtualdesktopxr/meta-quest-3:9");
+    EdvrNativeFrameOutput trimOutput{sizeof(trimOutput), EDVR_NATIVE_FRAME_VERSION_5};
+    EdvrNativeFrameInput trimFrame = input(41, 7, 10);
+    check(table.beginFrame(table.context, &trimFrame, &trimOutput) == S_OK &&
+              trimOutput.trimVerticalDeg == 3.0f && trimOutput.trimOuterDeg == 0.0f &&
+              trimOutput.trimNasalDeg == 0.0f,
+          "a runtime-only trim entry applies; an empty list and another headset's entry do not");
+
+    // fix.weapon_stability && the journal watcher's on-foot signal select
+    // EdvrNativeFrameOutput::deferredPacing (version 3 and later). The journal
+    // functions are stubbed above so this rig can drive that signal directly
+    // instead of needing a real journal file. This first ask is a version 3
+    // caller: answered in exactly its own shape, pacing and all, with the
+    // channel field never written into its (absent) tail.
+    EdvrNativeFrameOutput defaultOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_3, EDVR_NATIVE_FRAME_VERSION_3};
+    defaultOutput.reservedProjectionChannel = 0xA5A5A5A5u;
+    EdvrNativeFrameInput defaultFrame = input(41, 7, 11);
+    check(table.beginFrame(table.context, &defaultFrame, &defaultOutput) == S_OK &&
+              defaultOutput.version == EDVR_NATIVE_FRAME_VERSION_3 &&
+              defaultOutput.size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_3 &&
+              defaultOutput.deferredPacing == 0 &&
+              defaultOutput.reservedProjectionChannel == 0xA5A5A5A5u,
+          "a version 3 caller is answered in kind, its absent tail untouched");
+
+    g_journalActive = g_onFootKnown = g_onFoot = true;
+    EdvrNativeFrameOutput onFootOutput{sizeof(onFootOutput), EDVR_NATIVE_FRAME_VERSION_5};
+    EdvrNativeFrameInput onFootFrame = input(41, 7, 12);
+    check(table.beginFrame(table.context, &onFootFrame, &onFootOutput) == S_OK &&
+              onFootOutput.deferredPacing == 1,
+          "weapon stability on foot defers pacing");
+
+    g_onFoot = false;
+    EdvrNativeFrameOutput inShipOutput{sizeof(inShipOutput), EDVR_NATIVE_FRAME_VERSION_5};
+    EdvrNativeFrameInput inShipFrame = input(41, 7, 13);
+    check(table.beginFrame(table.context, &inShipFrame, &inShipOutput) == S_OK &&
+              inShipOutput.deferredPacing == 0,
+          "weapon stability in a ship keeps the wait in WaitGetPoses");
+
+    g_onFoot = true;
+    edvr::Config::get().set("fix.weapon_stability", "0");
+    EdvrNativeFrameOutput disabledOutput{sizeof(disabledOutput), EDVR_NATIVE_FRAME_VERSION_5};
+    EdvrNativeFrameInput disabledFrame = input(41, 7, 14);
+    check(table.beginFrame(table.context, &disabledFrame, &disabledOutput) == S_OK &&
+              disabledOutput.deferredPacing == 0,
+          "fix.weapon_stability = 0 never defers pacing");
+
+    edvr::Config::get().set("fix.weapon_stability", "1");
+    g_journalActive = g_onFootKnown = g_onFoot = false;
+
+    // A version 2 caller is still answered in exactly its own shape, trims
+    // and all, with the pacing field never written into its (absent) tail.
+    EdvrNativeFrameOutput v2Output{EDVR_NATIVE_FRAME_OUTPUT_SIZE_2, EDVR_NATIVE_FRAME_VERSION_2};
+    EdvrNativeFrameInput v2Frame = input(41, 7, 15);
+    check(table.beginFrame(table.context, &v2Frame, &v2Output) == S_OK &&
+              v2Output.version == EDVR_NATIVE_FRAME_VERSION_2 &&
+              v2Output.size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_2 &&
+              v2Output.trimVerticalDeg == 3.0f && v2Output.trimOuterDeg == 0.0f &&
+              v2Output.trimNasalDeg == 0.0f,
+          "a version 2 caller is still answered in its own kind");
+
+    // A struct sized for version 3 that claims version 2 names a shape that
+    // does not exist and is refused, exactly like the version 1/2 mismatch
+    // above, never silently downgraded to the version its label asks for.
+    EdvrNativeFrameOutput v3SizeV2Version{sizeof(EdvrNativeFrameOutput), EDVR_NATIVE_FRAME_VERSION_2};
+    EdvrNativeFrameInput v3MismatchFrame = input(41, 7, 16);
+    check(table.beginFrame(table.context, &v3MismatchFrame, &v3SizeV2Version) ==
+              E_INVALIDARG,
+          "a version 3 size claiming version 2 is refused");
+
+    // The trim reader asks for the [experimental] names and no others. First the
+    // positive half, so the control below can fail: a value under the new name
+    // reaches the output (vertical 3 is still set from the runtime-only case
+    // above). Then the retired [fix] names carry a value for the worn headset
+    // and the new ones carry none, and the game is told no trim: a reader that
+    // had kept reading the old keys would tell it 9 degrees. (An old-layout LINE
+    // in a file still works -- Config reads it as the new name through the
+    // moved-from map, which this rig does not register; tools/config_test does,
+    // with the shipped tables.)
+    EdvrNativeFrameOutput newNames{sizeof(newNames), EDVR_NATIVE_FRAME_VERSION_5};
+    EdvrNativeFrameInput newNamesFrame = input(41, 7, 18);
+    check(table.beginFrame(table.context, &newNamesFrame, &newNames) == S_OK &&
+              newNames.trimVerticalDeg == 3.0f,
+          "the trim reader reads experimental.fov_trim_vertical");
+    edvr::Config::get().set("experimental.fov_trim_vertical", "");
+    edvr::Config::get().set("experimental.fov_trim_outer", "");
+    edvr::Config::get().set("experimental.fov_trim_nasal", "");
+    edvr::Config::get().set("fix.fov_trim_vertical", "oculus/meta-quest-3:9");
+    edvr::Config::get().set("fix.fov_trim_outer", "oculus/meta-quest-3:9");
+    edvr::Config::get().set("fix.fov_trim_nasal", "oculus/meta-quest-3:9");
+    EdvrNativeFrameOutput retiredNames{sizeof(retiredNames), EDVR_NATIVE_FRAME_VERSION_5};
+    EdvrNativeFrameInput retiredFrame = input(41, 7, 19);
+    check(table.beginFrame(table.context, &retiredFrame, &retiredNames) == S_OK &&
+              retiredNames.trimVerticalDeg == 0.0f && retiredNames.trimOuterDeg == 0.0f &&
+              retiredNames.trimNasalDeg == 0.0f,
+          "control: the retired fix.fov_trim_* names are not read by the trim reader");
+
+    // ---- Explorer Cam's comfort fade (comfort_fade.h; EdvrNativeFrameOutput::fadeAlpha, version 5) --------------------------------------------------------------
+    {
+        uint64_t seq = 40;
+        auto ask5 = [&](float* fade) {
+            EdvrNativeFrameOutput o{sizeof(o), EDVR_NATIVE_FRAME_VERSION_5};
+            o.fadeAlpha = -77.0f;   // a sentinel the answer must overwrite
+            EdvrNativeFrameInput f = input(41, 7, ++seq);
+            const HRESULT r = table.beginFrame(table.context, &f, &o);
+            *fade = o.fadeAlpha;
+            return r;
+        };
+        float fade = -1.0f;
+        edvr::comfort::clear();
+        check(ask5(&fade) == S_OK && fade == 0.0f, "NOTHING PUBLISHED: a version 5 caller reads fadeAlpha 0 (and the sentinel is overwritten)");
+        edvr::comfort::publish(1.0f, GetTickCount64());
+        check(ask5(&fade) == S_OK && fade == 1.0f, "A FRESH LEVEL of 1: a version 5 caller reads 1");
+        edvr::comfort::publish(0.37f, GetTickCount64());
+        check(ask5(&fade) == S_OK && std::fabs(fade - 0.37f) < 1e-6f, "...a level of 0.37 reads 0.37");
+        edvr::comfort::publish(1.0f, GetTickCount64() - 250);
+        check(ask5(&fade) == S_OK && fade > 0.3f && fade < 0.7f, "A STALE LEVEL (published 250 ms ago) has half decayed: the d3d11 half going quiet is not black for ever");
+        edvr::comfort::publish(1.0f, GetTickCount64() - 5000);
+        check(ask5(&fade) == S_OK && fade == 0.0f, "...5 s old reads 0");
+        edvr::comfort::publish(std::numeric_limits<float>::quiet_NaN(), GetTickCount64());
+        check(ask5(&fade) == S_OK && fade == 0.0f, "NaN reads 0, never black");
+        edvr::comfort::publish(9.0f, GetTickCount64());
+        check(ask5(&fade) == S_OK && fade == 1.0f, "...above 1 reads 1");
+        // ---- the older shapes never learn of it ------------------------------------------------------------------------------------------------------------
+        edvr::comfort::publish(1.0f, GetTickCount64());
+        EdvrNativeFrameOutput v4{EDVR_NATIVE_FRAME_OUTPUT_SIZE_4, EDVR_NATIVE_FRAME_VERSION_4};
+        v4.fadeAlpha = -123.0f;
+        EdvrNativeFrameInput v4Frame = input(41, 7, ++seq);
+        check(table.beginFrame(table.context, &v4Frame, &v4) == S_OK && v4.version == EDVR_NATIVE_FRAME_VERSION_4 && v4.size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_4 && v4.fadeAlpha == -123.0f,
+              "A VERSION 4 CALLER is answered in its own shape and the fade slot past it is untouched (a runtime from before the fade cannot be blacked out)");
+        EdvrNativeFrameOutput v3{EDVR_NATIVE_FRAME_OUTPUT_SIZE_3, EDVR_NATIVE_FRAME_VERSION_3};
+        v3.reservedProjectionChannel = 0xA5A5A5A5u;
+        v3.fadeAlpha = -123.0f;
+        EdvrNativeFrameInput v3Frame = input(41, 7, ++seq);
+        check(table.beginFrame(table.context, &v3Frame, &v3) == S_OK && v3.reservedProjectionChannel == 0xA5A5A5A5u && v3.fadeAlpha == -123.0f, "...and a version 3 caller likewise");
+        EdvrNativeFrameOutput fullAsV4{sizeof(fullAsV4), EDVR_NATIVE_FRAME_VERSION_4};
+        EdvrNativeFrameInput fullMismatchFrame = input(41, 7, ++seq);
+        check(table.beginFrame(table.context, &fullMismatchFrame, &fullAsV4) == E_INVALIDARG, "A FULL-SIZE STRUCT CLAIMING VERSION 4 is refused (the size contradicts the version)");
+        EdvrNativeFrameOutput v4AsV5{EDVR_NATIVE_FRAME_OUTPUT_SIZE_4, EDVR_NATIVE_FRAME_VERSION_5};
+        EdvrNativeFrameInput mismatchFrame2 = input(41, 7, ++seq);
+        check(table.beginFrame(table.context, &mismatchFrame2, &v4AsV5) == E_INVALIDARG, "...and a version 4 sized struct claiming version 5 is refused: it is never half-answered");
+        edvr::comfort::clear();
+    }
+
+    check(table.close(table.context) == S_OK && !edvr::glitchConsumerPresent(),
+          "close retires announced consumer");
+    check(table.close(table.context) == S_FALSE, "close is idempotent");
+    check(table.beginFrame(table.context, &next, &lostOutput) == E_INVALIDARG,
+          "closed context rejects callbacks");
+
+    // advanced.slow_test_ms's end-frame hold (frame_flag.h, v36): d3d11 -> openvr, 0 is no hold, and the
+    // runtime never holds a frame for more than five seconds whatever is asked.
+    check(edvr::endFrameHoldMs() == 0, "no end-frame hold until the d3d11 half asks for one");
+    edvr::requestEndFrameHold(80);
+    check(edvr::endFrameHoldMs() == 80, "the end-frame hold carries its milliseconds");
+    edvr::requestEndFrameHold(60000);
+    check(edvr::endFrameHoldMs() == 5000, "a hold over five seconds is clamped to five");
+    edvr::requestEndFrameHold(0);
+    check(edvr::endFrameHoldMs() == 0, "and is withdrawn by asking for 0");
+
+    // frame_flag's layout check (the roll-call, since v34). Last, because a refusal it provokes
+    // is meant to outlast it. This process holds one half, so the roll-call
+    // has one signature and there is nothing to name...
+    check(edvr::kFrameFlagVersion == 37, "frame_flag layout is v37");
+    check(edvr::frameFlagPeerMismatch() == 0, "one half alone is no mismatch");
+    {
+        wchar_t name[64];
+        swprintf_s(name, L"Local\\edvr_frame_flag_rollcall_%lu", GetCurrentProcessId());
+        HANDLE h = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, name);
+        check(h != nullptr, "the roll-call is signed at the channel's first use");
+        auto* roll = h ? static_cast<volatile LONG*>(
+                             MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, 3 * sizeof(LONG)))
+                       : nullptr;
+        // Relative to kFrameFlagVersion, so only the pin above moves when the
+        // layout does; the roll-call's own behaviour does not change with it.
+        const LONG ours = static_cast<LONG>(edvr::kFrameFlagVersion);
+        check(roll && roll[0] == ours && roll[1] == 0 && roll[2] == 1,
+              "one signature, this layout first, nobody else");
+        if (roll) {
+            // ...a half on another layout signing second is named at once,
+            // and the channel refuses: a mark reads back as absent...
+            edvr::clearGlitchFrame();
+            InterlockedExchange(&roll[1], ours + 1);
+            check(edvr::frameFlagPeerMismatch() == static_cast<uint32_t>(ours + 1),
+                  "a half on the next layout signing second is named");
+            edvr::markGlitchFrame();
+            check(!edvr::glitchFrameMarked(), "the refused channel reads as absent");
+            InterlockedExchange(&roll[1], 0);
+            check(edvr::frameFlagPeerMismatch() == 0, "the roll-call refusal follows the roll-call");
+            edvr::markGlitchFrame();
+            check(edvr::glitchFrameMarked(), "and the channel carries again without it");
+            edvr::clearGlitchFrame();
+            UnmapViewOfFile(const_cast<LONG*>(roll));
+        }
+        if (h) CloseHandle(h);
+    }
+    {
+        // ...and a half built before the roll-call (v33, which never signs)
+        // is found by its block's name, and refused for good.
+        wchar_t name[64];
+        swprintf_s(name, L"Local\\edvr_glitch_frame_v33_%lu", GetCurrentProcessId());
+        HANDLE h = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, 4096, name);
+        check(h != nullptr, "a v33 block in the process");
+        check(edvr::frameFlagPeerMismatch() == 33, "an unsigned v33 half is named");
+        edvr::markGlitchFrame();
+        check(!edvr::glitchFrameMarked(), "and the channel stays refused");
+        if (h) CloseHandle(h);
+        check(edvr::frameFlagPeerMismatch() == 33, "a found v33 half is latched");
+    }
+
+    std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
+    return failures ? 1 : 0;
+}

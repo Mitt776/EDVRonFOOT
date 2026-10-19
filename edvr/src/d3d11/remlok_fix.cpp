@@ -1,0 +1,363 @@
+#include "remlok_fix.h"
+
+#include <windows.h>
+
+#include <d3d11.h>
+
+#include <cmath>
+
+#include "../common/config.h"
+#include "../common/frame_flag.h"
+#include "../common/log.h"
+#include "binding_shadow.h"
+
+namespace edvr {
+
+// remlokWantsDraws reads this from the header with no call: asked per
+// eye draw, and the build has no /GL to fold a cross-TU getter.
+// RemlokMode itself is declared in the header, so the inline function
+// there can name its kStock value.
+namespace detail {
+RemlokMode g_remlokMode = RemlokMode::kStock;
+}  // namespace detail
+
+namespace {
+using Mode = detail::RemlokMode;
+
+// The overlay's shape, exactly as the census measured and the field
+// suppression verified it (2026-08-19): a fullscreen triangle, one instance,
+// no depth view bound, PS slot 0 sampling the 1024x512 overlay image. The
+// size is the discriminating half -- the tonemap chain is made of otherwise
+// identical fullscreen triangles that sample eye-sized textures.
+constexpr char     kKind = 'N';   // DrawInstanced, as the census letters it
+constexpr uint32_t kVertices = 3;
+constexpr uint32_t kInstances = 1;
+constexpr uint32_t kSrvW = 1024;
+constexpr uint32_t kSrvH = 512;
+// The shape test itself is remlokOverlayShape (remlok_fix.h), inline so the
+// draw path can ask it first; it must say what the three constants say.
+static_assert(kKind == 'N' && kVertices == 3 && kInstances == 1,
+              "remlokOverlayShape (remlok_fix.h) must match the overlay's measured shape");
+
+float g_keep = 0.55f;
+bool  g_swap = false;
+// Scale of the substituted viewport for the overlay draw, centred. Below 1
+// the whole helmet frame renders smaller, which pulls the edge lines INWARD
+// from the image border -- on a wide-FOV headset the border is the lens rim,
+// where the game's own placement is invisible (measured on a Pimax: the
+// correctly-clipped temporal line could only be confirmed in the desktop
+// mirror). 1.0 keeps the game's placement. The manual fallback; the angle
+// below is the real setting.
+float g_scale = 1.0f;
+
+// Where the line should SIT, in degrees from straight ahead -- the human
+// constant the scale was hiding. Tuned by eye on two headsets, the chosen
+// fractions agreed on one angle to within a degree once the asymmetric
+// image centre is accounted for: 0.70 of a Quest 3 (outer tangent 1.376)
+// and 0.60 of a Pimax (1.529) are both the line at ~46 degrees. The scale
+// that puts the line there is derived per headset from the true tangents
+// the openvr half publishes; 0 turns the derivation off and g_scale rules.
+float g_angleDeg = 46.0f;
+bool  g_derivedNoted = false;
+
+// Matched draws this frame: 0 is the left eye, 1 the right. Reset at the
+// frame boundary so one odd frame cannot invert the pair for the session.
+uint32_t g_matchesThisFrame = 0;
+bool     g_pendingRight = false;
+
+// The game's rasterizer state, cloned once with ScissorEnable flipped on,
+// re-cloned only if the game ever draws the overlay with a different state.
+// The original is compared by pointer and never dereferenced after Release.
+ID3D11RasterizerState* g_cloneSource = nullptr;
+ID3D11RasterizerState* g_clone = nullptr;
+bool g_cloneSourceIsDefault = false;
+
+// What begin set, for end to put back. engaged is the contract between the
+// two: end restores exactly what begin says it changed.
+bool                   g_engaged = false;
+bool                   g_vpEngaged = false;
+ID3D11RasterizerState* g_savedRS = nullptr;
+UINT                   g_savedRectCount = 0;
+D3D11_RECT             g_savedRects[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+UINT                   g_savedVpCount = 0;
+D3D11_VIEWPORT         g_savedVps[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+
+uint64_t g_applied = 0;
+uint64_t g_hidden = 0;
+bool     g_cloneFailedNoted = false;
+
+// The scissor-enabled twin of the game's current rasterizer state. Cached
+// against the source pointer; a null source means the default state, whose
+// description is spelled out because there is no object to ask.
+ID3D11RasterizerState* cloneWithScissor(ID3D11DeviceContext* ctx,
+                                        ID3D11RasterizerState* source) {
+    if (g_clone && source == g_cloneSource &&
+        (source || g_cloneSourceIsDefault)) {
+        return g_clone;
+    }
+    D3D11_RASTERIZER_DESC d{};
+    if (source) {
+        source->GetDesc(&d);
+    } else {
+        // The documented defaults of the null rasterizer state.
+        d.FillMode = D3D11_FILL_SOLID;
+        d.CullMode = D3D11_CULL_BACK;
+        d.DepthClipEnable = TRUE;
+    }
+    d.ScissorEnable = TRUE;
+
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (!dev) return nullptr;
+    ID3D11RasterizerState* clone = nullptr;
+    const HRESULT hr = dev->CreateRasterizerState(&d, &clone);
+    dev->Release();
+    if (FAILED(hr) || !clone) {
+        if (!g_cloneFailedNoted) {
+            g_cloneFailedNoted = true;
+            Log::get().note("remlok: could not create the scissor rasterizer "
+                            "state (hr=0x%08X); the overlay draws untouched.",
+                            static_cast<unsigned>(hr));
+        }
+        return nullptr;
+    }
+    if (g_clone) g_clone->Release();
+    g_clone = clone;
+    g_cloneSource = source;
+    g_cloneSourceIsDefault = source == nullptr;
+    return g_clone;
+}
+
+}  // namespace
+
+void remlokConfigure(Config& cfg) {
+    const Mode was = detail::g_remlokMode;
+    const std::string m = cfg.getString("fix.remlok_lines", "stock");
+    if (m == "stock") {
+        detail::g_remlokMode = Mode::kStock;
+    } else if (m == "outer") {
+        detail::g_remlokMode = Mode::kOuter;
+    } else if (m == "hide") {
+        detail::g_remlokMode = Mode::kHide;
+    } else {
+        detail::g_remlokMode = Mode::kStock;
+        Log::get().note("remlok_lines \"%s\" is not stock, outer or hide; "
+                        "running stock.", m.c_str());
+    }
+
+    float keep = cfg.getFloat("advanced.remlok_keep_fraction", 0.55f);
+    // Under half and the two eyes' kept regions no longer meet in the
+    // middle -- a gap in anything the overlay draws at centre; near 1.0 the
+    // nasal line stops being clipped, which is the whole point. Clamp
+    // rather than refuse: this is documented as a live-tuned value.
+    if (keep < 0.50f) keep = 0.50f;
+    if (keep > 0.95f) keep = 0.95f;
+    g_keep = keep;
+    g_swap = cfg.getBool("advanced.remlok_swap_eyes", false);
+
+    float scale = cfg.getFloat("advanced.remlok_scale", 1.0f);
+    // Below half the helmet frame shrinks into a porthole; above 1 would
+    // push the lines further into the lens rim, the opposite of the knob's
+    // reason to exist.
+    if (scale < 0.50f) scale = 0.50f;
+    if (scale > 1.00f) scale = 1.00f;
+    g_scale = scale;
+
+    float ang = cfg.getFloat("fix.remlok_line_angle", 46.0f);
+    // 0 is the documented off switch; anything else is clamped into the band
+    // where the line is neither in the middle of the view nor back at the
+    // rim this setting exists to escape.
+    if (ang != 0.0f) {
+        if (ang < 20.0f) ang = 20.0f;
+        if (ang > 60.0f) ang = 60.0f;
+    }
+    if (ang != g_angleDeg) g_derivedNoted = false;   // re-announce the derivation
+    g_angleDeg = ang;
+
+    if (was != detail::g_remlokMode) {
+        const char* names[] = {"stock", "outer", "hide"};
+        Log::get().note("remlok lines: %s. The overlay is recognised by shape "
+                        "(3 vertices, 1 instance, no depth, 1024x512 in PS "
+                        "slot 0); outer keeps %.0f%% of each eye's width from "
+                        "its own temple.",
+                        names[static_cast<uint32_t>(detail::g_remlokMode)], g_keep * 100.0f);
+    }
+}
+
+namespace {
+
+// The viewport scale that puts the overlay's edge line at g_angleDeg for
+// THIS headset, from the true tangents the openvr half publishes -- or the
+// manual g_scale when the angle is off or nobody has published (openvr half
+// absent, or its hook not yet validated).
+//
+// The drawn image spans tangents [-outer, +inner] with outward negative, so
+// its CENTRE sits (outer-inner)/2 outward of straight ahead -- a centred
+// viewport scale scales about that point, not about the gaze. The formula
+// is validated by the field tuning it replaced: 0.70 on a Quest 3 and 0.60
+// on a Pimax both land within a degree of 46 through it.
+float effectiveScale() {
+    float outer = 0.0f, inner = 0.0f;
+    if (g_angleDeg <= 0.0f || !eyeTangents(&outer, &inner)) return g_scale;
+
+    const float halfSpan = (outer + inner) * 0.5f;
+    const float centerOut = (outer - inner) * 0.5f;
+    if (halfSpan < 1e-3f) return g_scale;
+
+    const float target = tanf(g_angleDeg * 3.1415926535f / 180.0f);
+    float s = (target - centerOut) / halfSpan;
+    if (s < 0.50f) s = 0.50f;
+    if (s > 1.00f) s = 1.00f;
+    if (!g_derivedNoted) {
+        g_derivedNoted = true;
+        Log::get().note("remlok lines: this headset's outer tangent is %.3f "
+                        "(%.1f deg), so the %.0f-degree line means overlay "
+                        "scale %.2f. remlok_scale is not consulted while "
+                        "remlok_line_angle is set.",
+                        outer, atanf(outer) * 180.0f / 3.1415926535f,
+                        g_angleDeg, s);
+    }
+    return s;
+}
+
+}  // namespace
+
+RemlokAction remlokOnEyeDraw(char kind, uint32_t count, uint32_t instances) {
+    if (detail::g_remlokMode == Mode::kStock) return RemlokAction::kNone;
+    if (!remlokOverlayShape(kind, count, instances)) {
+        return RemlokAction::kNone;
+    }
+    // The overlay binds no depth; scene and HUD draws do. Checked before the
+    // SRV resolve so the resolve only runs for depthless fullscreen
+    // triangles, which are a handful a frame.
+    if (bindingGet(BindSlot::Dsv0) != nullptr) return RemlokAction::kNone;
+    ResourceInfo info;
+    if (!bindingResolve(bindingGet(BindSlot::PsSrv0), &info) ||
+        !info.isTexture2D || info.a != kSrvW || info.b != kSrvH) {
+        return RemlokAction::kNone;
+    }
+
+    const uint32_t match = g_matchesThisFrame++;
+    if (detail::g_remlokMode == Mode::kHide) {
+        if (++g_hidden == 1) {
+            Log::get().note("remlok lines: hidden (first overlay draw "
+                            "suppressed this session).");
+        }
+        return RemlokAction::kHide;
+    }
+    g_pendingRight = ((match & 1u) != 0u) != g_swap;
+    return RemlokAction::kScissor;
+}
+
+void remlokScissorBegin(ID3D11DeviceContext* ctx) {
+    g_engaged = false;
+
+    ID3D11RasterizerState* current = nullptr;
+    ctx->RSGetState(&current);   // AddRef'd when non-null
+    ID3D11RasterizerState* scissored = cloneWithScissor(ctx, current);
+    if (!scissored) {
+        if (current) current->Release();
+        return;   // the draw runs untouched, which stock already survives
+    }
+
+    UINT vpCount = 1;
+    D3D11_VIEWPORT vp{};
+    ctx->RSGetViewports(&vpCount, &vp);
+    if (vpCount == 0 || vp.Width <= 0.0f) {
+        if (current) current->Release();
+        return;
+    }
+
+    g_savedRS = current;   // keep the reference until end restores it
+    g_savedRectCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    ctx->RSGetScissorRects(&g_savedRectCount, g_savedRects);
+
+    // The substituted viewport, when a scale applies: the same centre, a
+    // fraction of the size -- derived from remlok_line_angle and this
+    // headset's true tangents when the openvr half has published them,
+    // remlok_scale otherwise. The fullscreen triangle renders the whole
+    // overlay into it, which moves the edge lines inward from the image
+    // border -- the border is the lens rim on a wide-FOV headset, and a
+    // line drawn there is a line nobody sees. The undrawn margin ring is
+    // territory the overlay used to cover; nothing else draws after it on
+    // this target, so leaving it untouched is leaving the scene visible.
+    const float scale = effectiveScale();
+    g_vpEngaged = false;
+    if (scale < 0.999f) {
+        g_savedVpCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+        ctx->RSGetViewports(&g_savedVpCount, g_savedVps);
+        D3D11_VIEWPORT scaled = vp;
+        scaled.Width = vp.Width * scale;
+        scaled.Height = vp.Height * scale;
+        scaled.TopLeftX = vp.TopLeftX + (vp.Width - scaled.Width) * 0.5f;
+        scaled.TopLeftY = vp.TopLeftY + (vp.Height - scaled.Height) * 0.5f;
+        ctx->RSSetViewports(1, &scaled);
+        g_vpEngaged = true;
+        vp = scaled;   // the scissor below clips against what is drawn
+    }
+
+    // Each eye keeps the g_keep fraction nearest its own temple: the left
+    // eye's rectangle starts at the (possibly scaled) viewport's left edge,
+    // the right eye's ends at its right edge. What is clipped is the nasal
+    // remainder, where the wrong-side line sat.
+    const LONG x0 = static_cast<LONG>(vp.TopLeftX);
+    const LONG y0 = static_cast<LONG>(vp.TopLeftY);
+    const LONG w = static_cast<LONG>(vp.Width);
+    const LONG h = static_cast<LONG>(vp.Height);
+    const LONG keep = static_cast<LONG>(vp.Width * g_keep);
+    D3D11_RECT r{};
+    r.top = y0;
+    r.bottom = y0 + h;
+    if (g_pendingRight) {
+        r.left = x0 + w - keep;
+        r.right = x0 + w;
+    } else {
+        r.left = x0;
+        r.right = x0 + keep;
+    }
+    ctx->RSSetScissorRects(1, &r);
+    ctx->RSSetState(scissored);
+    g_engaged = true;
+
+    if (++g_applied == 1) {
+        Log::get().note("remlok lines: outer mode engaged -- each eye now "
+                        "keeps the line at its own temple and loses the one "
+                        "along the nose. First applied to the %s eye, %ld of "
+                        "%ld px kept, overlay scale %.2f.",
+                        g_pendingRight ? "right" : "left", keep, w,
+                        scale);
+    }
+}
+
+void remlokScissorEnd(ID3D11DeviceContext* ctx) {
+    if (!g_engaged) return;
+    g_engaged = false;
+    ctx->RSSetState(g_savedRS);
+    if (g_savedRS) {
+        g_savedRS->Release();
+        g_savedRS = nullptr;
+    }
+    ctx->RSSetScissorRects(g_savedRectCount,
+                           g_savedRectCount ? g_savedRects : nullptr);
+    if (g_vpEngaged) {
+        g_vpEngaged = false;
+        ctx->RSSetViewports(g_savedVpCount,
+                            g_savedVpCount ? g_savedVps : nullptr);
+    }
+}
+
+void remlokFrameBoundary() { g_matchesThisFrame = 0; }
+
+void remlokShutdown() {
+    if (g_clone) {
+        g_clone->Release();
+        g_clone = nullptr;
+    }
+    g_cloneSource = nullptr;
+    if (g_savedRS) {
+        g_savedRS->Release();
+        g_savedRS = nullptr;
+    }
+}
+
+}  // namespace edvr

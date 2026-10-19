@@ -1,0 +1,30 @@
+EDVR - native OpenXR package
+================================
+
+This folder contains the native OpenXR runtime facade, the Khronos loader,
+and the license notice. They are installed together in Openvr\win64.
+
+INSTALL
+-------
+
+1. Close Elite Dangerous.
+2. In the game's Openvr\win64 folder, rename the game's existing
+   openvr_api.dll to openvr_api_orig.dll. Preserve that file for uninstall.
+   If an original already exists, use the installer for the upgrade.
+3. Copy openvr_api.dll, openxr_loader.dll, and OPENXR-LOADER-LICENSE.txt from
+   this folder into Openvr\win64.
+4. Copy d3d11.dll to the folder containing EliteDangerous64.exe. Keep the
+   existing EDHM d3d11.dll chain intact if EDHM is installed.
+   Keep your edvr.ini, or copy the supplied one for a fresh installation.
+5. Start the game.
+
+The bundled loader uses the OpenXR runtime selected in Windows. SteamVR is an
+allowed selected runtime; the SteamVR application is not a separate package
+requirement. No vendor runtime DLL is substituted by this package.
+
+UNINSTALL
+---------
+
+Close Elite, remove EDVR's d3d11.dll, openvr_api.dll, openxr_loader.dll and
+the license notice, then rename openvr_api_orig.dll back to openvr_api.dll.
+Keep the original file untouched until the uninstall is complete.

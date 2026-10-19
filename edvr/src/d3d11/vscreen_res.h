@@ -1,0 +1,82 @@
+// The second place in edvr that writes to the game's code, and the last.
+//
+// vscreen_patch.cpp rewrites ONE texture allocation's size arguments. That
+// changed 8 of 61 render targets, because the size it patched had already been
+// decided somewhere else and handed down.
+//
+// This patches where it is decided. Reading the executable found six sites of
+// the same shape: a comparison against a view mode, and if it matches, the
+// panel's 1920x1080 forced as immediates -- otherwise the real size read from a
+// struct field. So the resolution is an override on two view-mode values, not a
+// quantity threaded through 29 owners as 6m concluded.
+//
+// What it changes: twelve 32-bit immediates, two per site.
+// What it does NOT change: the comparison, the branch, the mode value, the
+// struct read, or anything that is not one of those immediates.
+//
+// The actual policy, which this comment previously overstated in two ways:
+//
+//   * It accepts between three and twelve sites, all agreeing, and refuses
+//     outside that band -- see kMinSites and kMaxExpected. Six is what build
+//     330683 has. The band exists so a game update that adds or drops a call
+//     site does not disable the feature while the shape it matches is still
+//     unambiguous. "Exactly six" was never what the code did.
+//
+//   * It PROCEEDS on an unverified game build and says so in the log; it does
+//     not refuse. What protects an unknown build is the shape match and the site
+//     count, not a version number, and refusing on every update would make the
+//     feature useless the day Frontier ships one.
+//
+// Rolling back completely if any single write fails, and reverting on unload,
+// were both accurate: a partially applied resolution renders worse than none,
+// as an earlier version of this established by shipping one.
+//
+// This is the one feature that writes to the game's code, so what it claims has
+// to match what it does. README.md carried the same "exactly six" and has been
+// corrected with it.
+#pragma once
+
+#include <cstdint>
+
+namespace edvr {
+
+class Config;
+namespace vscreenfit { struct Decision; }   // src/common/vscreen_fit.h
+
+// Rewrites the forced panel resolution at every site. Returns true only if all
+// of them were written. Every failure path leaves the process untouched and
+// says why in the log.
+bool applyVScreenModeResolution(uint32_t width, uint32_t height);
+
+// Restores 1920x1080 everywhere. Safe to call if nothing was patched.
+void revertVScreenModeResolution();
+
+// The width the 2D screen's override is forced to right now; 0 while nothing is written. The panel patch's size
+// budget (ui_sizing_math.h) takes it as one of the widths the panel formula's c can start from. Lock-free.
+uint32_t vscreenModeAppliedWidth();
+
+// Resolves fix.vscreen_res_width -- "auto", or an explicit width in pixels --
+// into the width and height to force. (0, 0) means "leave the game's own
+// panel alone": the ini asks for the stock size, the value does not parse, or
+// "auto" has no prior session to go on yet (see ../common/vscreen_auto_state.h,
+// which is where that prior-session fact is recorded and read back). Height
+// is always DERIVED to keep 16:9; there is no independent height setting any
+// more. Called from the panel patch (device_hook.cpp), the intro-movie
+// upscaler (intro_upscale.cpp) and the in-headset menu's hint (menu.cpp), which
+// are documented as asking this exact question of this exact value -- see
+// vscreen_res.cpp for why "auto" cannot use this session's own render width.
+// `announce` logs the outcome, the rule that chose it and why (the `vScreen
+// resolution:` line); the panel patch is the one call site that should (its
+// caller is the only one with nothing else to say about the value), so the
+// others pass false rather than printing the same line twice on every reload.
+//
+// "auto" is TWO rules (../common/vscreen_fit.h): fitted to 70% of the on-foot
+// screen's head-on width in the eye when the VR world route will run, today's 125%
+// of the eye width when it will not. `outDecision`, when given, receives which one and the
+// numbers it was made from for an "auto" that resolved (its width is 0 for an
+// explicit width, which is used exactly, and for an auto with nothing on record).
+void resolveVScreenTargetResolution(Config& cfg, uint32_t* outWidth, uint32_t* outHeight,
+                                    bool announce = true,
+                                    vscreenfit::Decision* outDecision = nullptr);
+
+}  // namespace edvr

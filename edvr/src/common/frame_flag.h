@@ -1,0 +1,421 @@
+// A one-bit channel between the two proxies, for the frame that must not be
+// shown.
+//
+// The bad frame is detected in d3d11.dll, part-way through rendering, by
+// watching where the game is drawing from. The decision it feeds -- whether to
+// hand that frame to the headset -- belongs to openvr_api.dll. Those are
+// separate modules loaded from different directories, so they cannot share a
+// global.
+//
+// A named shared mapping is used rather than an exported symbol because it does
+// not care which module loads first, works if one of them is absent, and adds
+// nothing to either DLL's export table. It is per-process and holds two
+// integers.
+//
+// Nothing here reads or writes game state. It carries one flag between two parts
+// of EDVR.
+#pragma once
+
+#include <cstdint>
+
+namespace edvr {
+
+// ---- The layout version ---------------------------------------------------
+//
+// Both DLLs compile frame_flag.cpp, and the shared block's layout changes
+// with it, so the block's name carries the version
+// (Local\edvr_glitch_frame_v37_<pid>): halves from different builds never
+// share one. That kept a mismatched pair inert, but silently. Since v34
+// each half also signs a small version-independent roll-call with the
+// version it was built with, and looks for the last unsigned layout's
+// block (v33, v0.17.0's) by name. A half that finds its partner on another
+// version REFUSES the channel -- from then on every call here reads as "no
+// answer" and writes nothing -- and frameFlagPeerMismatch() names the
+// partner's version so the caller's log can say both.
+constexpr uint32_t kFrameFlagVersion = 37;
+
+// The partner half's layout version when it differs from kFrameFlagVersion,
+// else 0. Nonzero means the channel is refused. Each half asks on a cadence
+// of its own and logs the first nonzero answer: the d3d11 half once a
+// second (the partner can load at any point in the session), the VR
+// runtime half each frame. Until a matching partner has signed, a call
+// costs one OpenFileMapping lookup for the v33 block; after that, two
+// loads.
+uint32_t frameFlagPeerMismatch();
+
+// Mark the frame in progress as one that should not reach the headset. Cheap and
+// safe to call from the draw path.
+void markGlitchFrame();
+
+// True if the frame in progress has been marked.
+bool glitchFrameMarked();
+
+// Withdraw a mark WITHIN the frame that made it.
+//
+// The detector re-decides several times per frame, as each new camera candidate
+// arrives, and an early candidate can look like a jump while the frame's final
+// verdict is no.
+//
+// Identical to clearGlitchFrame() today, and kept as its own name because the
+// two mean different things to a reader: one is "I was wrong", the other is
+// "this frame is over". They used to differ -- a `counted` field distinguished
+// them, so a withdrawn mark would not be tallied twice -- but that total moved
+// into glitch_frame.cpp and the field became write-only. It has been removed
+// rather than left as a mechanism the header describes and nothing implements.
+void unmarkGlitchFrame();
+
+// Called once per frame, so a mark applies to exactly one frame. Without this a
+// single detection would suppress every frame that followed.
+void clearGlitchFrame();
+
+// The submitted eye textures, one slot per eye (0 left, 1 right), raw
+// ID3D11Texture2D pointers valid within this process. Written by
+// openvr_api.dll at each Submit; read by d3d11.dll's FSS series at the
+// frame boundary. Null means nobody has published (no openvr proxy, or a
+// mismatched pair), and readers fall back exactly as if unhooked.
+void publishSubmitTexture(int eye, void* texture);
+void* submittedTexture(int eye);
+
+// The game's own ID3D11Device, published by d3d11.dll the moment the game
+// creates it. A raw pointer valid within this process, like submitTex above.
+//
+// This one runs the other way round from every other d3d11 -> openvr field:
+// it is published BEFORE the openvr half has been called at all. Measured on
+// the field rig, the device is created 1.20 s before openvr_api.dll is first
+// asked for an interface. It was published for the early VR handover
+// (removed 2026-09-13); what reads it now is the native frame provider and the
+// graphics bridge, as the test for whether a d3d11 half is installed at all.
+//
+// Null means no d3d11 half, or a device the proxy never saw. Every reader
+// must treat that as "stand down", not as a reason to wait.
+// The intro is over: a rendered scene has arrived.
+//
+// Latched once by d3d11.dll at its own scene boundary -- the same eye-draw
+// count the intro and loader fixes retire on -- and computed whether or not
+// any of those fixes are switched on, so this is a fact about the GAME and
+// not about EDVR's configuration.
+//
+// Read by the native frame provider, which hands it to the runtime as sceneReady
+// (the frame-cycle statistics count a frame's producer only once it is set).
+//
+// False also means "nobody has said yet". A reader must pair it with
+// gameDevice() to tell "the intro is still up" from "no d3d11 half is
+// installed to tell me" -- the second must not hold anything back.
+void announceSceneArrived();
+bool sceneArrived();
+
+void  publishGameDevice(void* device);
+void* gameDevice();
+
+// The scanner-chrome stamp: bumped by d3d11 on every frame the scanner's
+// screen is drawn; the openvr half judges staleness against its own frame
+// count. The eye heal's gate.
+void bumpFssChromeStamp();
+long fssChromeStampValue();
+
+// The scanner screen's PROJECTED CORNERS in the eye -- TL,TR,BR,BL as
+// (u,v) pairs, 8 floats -- derived by d3d11 once per theater engage. The
+// openvr half hands them to the renderer, which rectifies the quad
+// through a square-to-quad homography: the content arrives level and
+// fully framed whatever the screen's tilt or the head's pose at engage.
+void publishFssPanelRect(const float* corners16);   // both eyes, L then R
+bool readFssPanelRect(float* out16);
+
+// The zoom-press arrival window, one bump per open frame: the squares'
+// ~10 frames, and the only frames the window-scoped heal touches.
+void bumpFssArrivalStamp();
+long fssArrivalStampValue();
+
+// A camera-jump latch WITHIN d3d11.dll (plain process state, not the
+// mapping): the glitch detector notes every world-camera jump; the
+// arrival census takes the latch at the frame boundary. Lives here so
+// the standalone glitch test, which links this file, resolves it.
+void noteWorldJump();
+bool takeWorldJump();
+
+// Announced by openvr_api.dll once its hook is validated, and read by d3d11.dll.
+//
+// The two halves install separately and the openvr one is optional, so d3d11 can
+// detect a bad frame and have nothing on the other end to act on it. Without
+// this the log would report "12 frames withheld" to somebody who skipped the
+// second file and had none withheld at all -- which is exactly the kind of
+// counter that gets believed and wastes a day.
+void announceGlitchConsumer();
+void retireGlitchConsumer();
+bool glitchConsumerPresent();
+
+// The detector's verdict on the last jump, d3d11 -> openvr. A jump is withheld
+// the frame it happens, and only the NEXT frame's camera says which it was: it
+// came back (1, a glitch -- the guard's own case) or it stayed (2, a change of
+// reference frame: a station arrival, a map, and the game's floating origin
+// moving under way near a station, every few seconds). The openvr half's
+// temporal pass reads it before restarting NVIDIA's history after the
+// withhold (temporalAaNoteWithheld): until 2026-09-10 the history restarted
+// on the frame after EVERY withhold, and under DLSS each restart is a visible
+// flash to the raw frame and a third of a second of re-accumulation -- the
+// flicker whenever the ship moved near a station. The packed word carries a
+// count above the verdict's two bits, so the reader can tell a new verdict
+// from the last jump's (jumpVerdictPacked before, compared after).
+void noteJumpVerdict(uint32_t verdict);
+uint32_t jumpVerdictPacked();
+
+// Ask the openvr half to decline the next `frames` frames.
+//
+// NO PRODUCTION CALLER since 2026-10-07: its only caller was the old Explorer
+// Cam's frame-hold setting, deleted with that route. The channel and its reader (takeSubmitHoldFrame, native_frame.cpp's
+// latchSubmit) are kept for now; native_frame_test still drives them.
+//
+// NOT A DETECTION, and that is the whole point of it. Everything else across
+// this channel is one half telling the other what it inferred; this is a
+// request made on a known event, with nothing to recognise and nothing to be
+// wrong about.
+//
+// It exists because during that transition Elite draws several frames from
+// somewhere the player is not -- confirmed with fix.transition_flash = 0, so it
+// is the game's and not ours -- and detection cannot help: withholding shows the
+// PREVIOUS frame, and by the time a detector has recognised a bad one, the
+// previous frame is already bad too. Starting at the press means the frame being
+// held is the last good one before any of it.
+//
+// The cost is unmeasured and is the reason this ships off by default. One
+// withheld frame has measured 74-82 ms because the compositor waits for a submit
+// that never comes; whether a RUN of them costs that each or settles into steady
+// reprojection is not known, and the difference is between a smooth hold and a
+// freeze. The ring's timing column is the readout.
+void requestSubmitHold(uint32_t frames);
+
+// One frame of that hold, consumed by the reader. True while the hold is live.
+bool takeSubmitHoldFrame();
+
+// Ask the vr half to recentre the seated origin to the CURRENT head pose,
+// once: d3d11.dll's intro panel calls this the first time it sees the
+// screen composite that lifts the launch movie (or, if the movie is
+// skipped, the splash after it) into the eyes. Both anchor to "the game's
+// forward", which VR_InitInternal's own one-shot centre sets from whatever
+// the head is doing near the very first tracked pose -- unmeasured until
+// docs/intro-video.md, 2026-09-17 -- so by the time either becomes visible
+// the head may already have turned away from it. Recentring right as the
+// player can first see something to face gives them a fresh, meaningful
+// forward instead of an arbitrary one.
+//
+// NOT A DETECTION, same discipline as requestSubmitHold: d3d11.dll is the
+// only half that can see the composite, and openvr_api.dll is the only
+// half that can move the seated origin, so this is one half asking the
+// other to act, not inferring anything about what it should do.
+void requestIntroRecentre();
+
+// True from the request until clearIntroRecentreRequest() below. A peek,
+// not a take: the vr half's poll can only act between frames (no frame
+// open, room in its own event queue), and a poll that finds itself unable
+// to act right now must see the request again next frame rather than lose
+// it -- markGlitchFrame's split, not requestSubmitHold's countdown, for
+// that reason.
+bool introRecentreRequested();
+
+// Clears the request. Called only once it has actually been acted on.
+void clearIntroRecentreRequest();
+
+// advanced.slow_test_ms (docs/headset-lock-vdxr-2026-10-02.md, the test trigger of the end-frame episode and
+// slow-regime instruments): d3d11.dll asks the runtime to hold every xrEndFrame it makes for `ms` more
+// milliseconds, INSIDE the call's timed region, so the runtime's own xr_end_frame phase, its long-call episodes
+// and its slow-regime detector see what a vendor runtime that stalls in xrEndFrame would show them. 0 withdraws
+// it. A TEST: it exists to make that stall happen on purpose, for a fixed stretch of one session (the d3d11 half
+// sets it 90 s in and withdraws it 40 s later), and nothing else writes it. Polled by the runtime's end-frame
+// path once per call (one load); a mismatched pair reads 0, which is "no hold".
+void requestEndFrameHold(uint32_t ms);
+uint32_t endFrameHoldMs();
+
+// The size of the texture the game hands the headset, as openvr_api.dll read it
+// off the Submit argument.
+//
+// WHY THIS IS A CHANNEL AND NOT A CONSTANT. The d3d11 half has to decide, per
+// render target, whether it is one of the eyes -- everything downstream of that
+// answer (the black void, the panel distance, the transition-flash detector's
+// "is a scene being drawn") is fed by it. It cannot
+// see a Submit, so it guessed by size: 2048x2048 or larger. A guess is what the
+// openvr half never has to make, because the texture is handed to it by name.
+//
+// Two failures came of the guess, and both are silent by construction -- a
+// target that is not recognised produces no line, because nothing happened.
+// A headset whose eye textures are under 2048 on an axis is never recognised at
+// all. And a panel raised to a size that is ALSO 2048-or-larger has to be told
+// apart from the eyes, which was done by size too -- so a vscreen_res that
+// happens to equal the eye textures excluded the eyes along with the panel.
+//
+// Published as one packed value rather than two fields on purpose: a reader
+// that catches a half-written pair gets a width from this session and a height
+// from the last one, and the eye test is an equality test. Width and height are
+// each under 65536 for any headset that exists, so both fit in one LONG and the
+// exchange is atomic.
+void announceEyeTextureSize(uint32_t width, uint32_t height);
+
+// The eye-texture size, or false when nobody has published one -- openvr_api.dll
+// is not installed, its hook has not validated yet, or the game submits
+// something that is not a D3D11 texture. False means "no answer", never "no":
+// callers must fall back to what they did before this existed rather than treat
+// it as evidence about any particular target.
+bool eyeTextureSize(uint32_t* width, uint32_t* height);
+
+// The headset's true horizontal frustum, published by openvr_api.dll as it
+// observes GetProjectionRaw: the OUTER (temporal) and INNER (nasal) tangent
+// magnitudes of one eye. The eyes mirror on every headset measured, so one
+// pair describes both.
+//
+// WHY THIS IS A CHANNEL: the RemLok overlay fix places the helmet's edge
+// line at a chosen ANGLE from straight ahead, and the tuned fractions that
+// looked right on two different headsets turned out to be one angle wearing
+// two denominators (0.70 of a Quest 3's image and 0.60 of a Pimax's both
+// put the line within a degree of 46) -- the angle is the human constant,
+// the tangents are the per-headset denominator, and only the openvr half
+// can read them. Same discipline as eyeSize: packed into one word so a
+// reader cannot tear the pair, zero is "no answer", and a reader without an
+// answer falls back to the manual scale.
+void announceEyeTangents(float outerMag, float innerMag);
+bool eyeTangents(float* outerMag, float* innerMag);
+
+// The VERTICAL frustum of one eye, magnitudes of OpenVR's pfTop and
+// pfBottom. Those API names are reversed physically: pfBottom describes
+// the +Y edge and pfTop the -Y edge. Ray consumers must swap the pair;
+// projection-matrix consumers retain the API order. Both eyes share these
+// -- measured identical on every headset
+// seen -- so there is one pair, not two.
+//
+// This exists because the vertical span used to be DERIVED, from the
+// horizontal span and the eye texture's shape, on the assumption that the
+// vertical frustum is symmetric. That assumption was checked against one
+// headset and holds there exactly:
+//
+//   Pimax Crystal Super  5424x5356  t=-1.2648 b=+1.2648   symmetric
+//   Quest 3 (Virtual Desktop)
+//                        3072x3264  t=-1.4281 b=+0.9657   NOT symmetric
+//
+// On the Quest 3 the derivation puts the frustum's vertical centre 0.19 of
+// a half-height out, and because the intro panel is world-locked that error
+// is applied through a projection that no longer matches the runtime's --
+// so the panel shears as the head moves. Reported from the field and
+// reproduced (docs/intro-video.md).
+//
+// Publishing the measurement instead of deriving it is the fix. Readers
+// must still handle false: an older openvr_api.dll publishes nothing here,
+// and the derivation remains as the fallback for exactly that pairing.
+void announceEyeTangentsVertical(float topMag, float botMag);
+bool eyeTangentsVertical(float* topMag, float* botMag);
+
+// Where the ship's forward axis points in the CURRENT head frame, as
+// tangent-space offsets from straight ahead -- published by openvr_api.dll
+// every frame from the pose it is handed, read by d3d11.dll to counter-move
+// head-locked sprites so they hold a direction instead of riding the head.
+// (0,0) means "looking dead ahead" and is a legitimate value, so the packing
+// carries an always-set presence bit: a zero word is "nobody publishing",
+// never "centred".
+void announceHeadForward(float tx, float ty);
+
+// The head pose the runtime returned, row-major 3x4 (rotation in the left
+// 3x3, translation in the last column), published by openvr_api.dll every
+// frame BEFORE any EDVR offset touches it.
+//
+// headForward above is a DIRECTION and cannot carry roll or translation,
+// which is enough to counter-move a sprite and not enough to place a panel
+// in the world. The intro movie needs the whole pose: it builds a real
+// view-projection so the movie is drawn on the splash's own screen, with
+// the stereo that a screen at a distance has (intro_panel.h). False when
+// nothing has published, which the caller must treat as "leave it alone".
+void publishHeadPose(const float* m12);
+bool headPose(float* out12);
+bool headForward(float* tx, float* ty);
+
+// THE SETTINGS MENU'S CHANNEL (docs/settings-menu.md). The d3d11 half owns
+// the menu -- its rows, its keys, its bitmap -- and the openvr half owns the
+// door the frame leaves through, so three facts cross:
+//
+// The ANCHOR: the raw head pose (headPose's own 3x4 layout) the panel was
+// summoned at, published by d3d11 once per summon or recentre. The openvr
+// half builds each eye's transform from it at Submit. seq is the presence
+// bit and the change stamp in one.
+void publishMenuAnchor(const float* m12);
+bool menuAnchor(float* out12, uint32_t* seq);
+
+// HEAD-LOCKED instead: the panel rides the look (menu.fps_overlay, the
+// toolkit's way), turned by yaw and pitch from straight ahead. The door
+// then builds the anchor from the frame's OWN pose rather than the
+// published one, so the lock has no lag at all. Written every frame by
+// d3d11; off (zero) means "use the published anchor".
+void setMenuHeadLock(bool on, float yawDeg, float pitchDeg);
+bool menuHeadLock(float* yawDeg, float* pitchDeg);
+
+// VISIBLE: written by d3d11 EVERY FRAME while the menu machinery runs, with
+// the panel's fade alpha (0..1) -- and the stamp moves on every write, so
+// "closed" and "d3d11 stopped saying" stay distinguishable. The openvr half draws when alpha > 0 and the stamp moved
+// within the last few frames.
+void setMenuVisible(float alpha);
+bool menuVisible(float* alpha, uint32_t* stamp);
+
+// DRAWN: bumped by the d3d11 export every time the openvr half actually
+// composited the panel onto an outgoing eye frame. The keyboard gate follows
+// this and not the menu's own idea of itself: a menu that is not being drawn
+// must never take the keyboard (the fail-open rule).
+void bumpMenuDrawn();
+uint32_t menuDrawnValue();
+
+// THE HEAD-LOCKED OVERLAY'S ANGLES cross as tenths of a degree in twelve
+// bits each, so they carry a bias: 1800 puts -180.0 at 0 and +180.0 at
+// 3600, both inside the field.
+//
+// It was 4096, which is 0x1000 -- one bit ABOVE a twelve-bit field, so the
+// mask that follows threw the whole bias away and every angle came back
+// 409.6 degrees low. Zero meant 49.6 degrees right of centre and 29.6 down
+// (flown 2026-09-08: "I had to set 60 across to kind of get it centered",
+// "40 up still puts it below my eye line" -- both predicted to the degree
+// by that arithmetic). A bias must fit in the field it is masked into.
+constexpr int32_t kHeadLockBias = 1800;
+
+// ONE VERDICT PER FRAME, over a channel that carries no frame identity.
+//
+// The mark above is read once per eye, at each Submit, and it legitimately
+// changes DURING a frame: the detector re-decides on every new furthest camera
+// and can set, withdraw and re-raise it by design. So a transition landing
+// between Submit(left) and Submit(right) shows one eye this frame and the other
+// a reprojection of the last one -- a one-frame binocular mismatch, which is
+// what a flash feels like. The fix for flashes, producing one.
+//
+// It cannot be solved by comparing frame numbers, because this channel does not
+// carry one (EDVR-31). It is solved by sampling once and making the second eye
+// follow, which is available without any protocol change at all.
+//
+// CONSISTENT-LATE BEATS SPLIT, in both directions. Two eyes showing the previous
+// frame is a dropped frame, which runtimes reproject and people are used to. Two
+// eyes disagreeing is not something either handles.
+//
+// Header-only and pure, so the property can be asserted without a compositor --
+// and shared, so the two copies of the hook cannot drift. compositor_hook.cpp is
+// FORKED and its "kept aligned by hand" regions have no mechanical check, which
+// is the standing gap in the sync tooling; this is four lines fewer to keep
+// aligned by remembering.
+class SubmitPairLatch {
+public:
+    // The verdict for this frame. The first call after reset() decides it; every
+    // later call in the same frame gets the same answer, whatever the flag has
+    // done since.
+    bool verdict(bool markedNow) {
+        if (!m_latched) {
+            m_latched = true;
+            m_withhold = markedNow;
+        }
+        return m_withhold;
+    }
+
+    // Called at the frame boundary -- WaitGetPoses, which is where the mark
+    // itself is cleared.
+    void reset() {
+        m_latched = false;
+        m_withhold = false;
+    }
+
+    bool latched() const { return m_latched; }
+
+private:
+    bool m_latched = false;
+    bool m_withhold = false;
+};
+
+}  // namespace edvr

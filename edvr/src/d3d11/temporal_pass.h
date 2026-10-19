@@ -1,0 +1,294 @@
+// The temporal anti-aliasing pass -- the d3d11 half of docs/anti-aliasing.md
+// Feature B, v1.
+//
+// Each frame, per eye, the game's finished LDR image is blended with a
+// history of the frames before it, each pixel's history fetched from where
+// that content sat last frame: the pixel's view direction through this
+// frame's frustum, rotated into last frame's view by the camera's motion
+// between the two, projected through last frame's frustum, and sampled with
+// Catmull-Rom so the history does not blur under repeated resampling. The
+// sampled history is clipped to the current frame's 3x3 neighbourhood in
+// YCoCg (variance clipping: history that disagrees with everything around
+// the pixel is pulled to the nearest agreeing value, which is the standard
+// bound on ghosting), blended in with the configured weight, and written as
+// both the output and the new history.
+//
+// What makes this anti-aliasing rather than smoothing is the JITTER: the
+// openvr half shifts the projection the game renders through by a sub-pixel
+// offset from a Halton (2,3) sequence, one per frame, so consecutive frames
+// sample different positions inside every pixel and the history converges
+// to a supersample of the scene even with the head held still. The pass
+// samples the current frame at the offset and lands it on the unjittered
+// grid, so what goes out was drawn through the true projection.
+//
+// v1 reprojects ROTATION only -- the head's, from the runtime's pose, or the
+// game's own camera, from the view rows it writes into its scene constants
+// (an experiment, the motion source) -- and needs no depth buffer.
+// Translation parallax (head motion against the cockpit, the ship against
+// near terrain) is left to the clamp, which is where every injected TAA
+// lives before it has depth; the depth reprojection is v2, gated on Phase 0
+// item 3.
+//
+// Runs FIRST at the door: on the game's texture, at render size, before the
+// sharpen. Everything
+// downstream sees a temporally settled frame. Off by default; every refusal
+// stands the pass down for the session with one line.
+#pragma once
+
+// Bounded CPU history of actual temporal submissions, written on Pause
+// alongside the camera history. Empty/stale history is reported explicitly.
+namespace edvr { void temporalPassDumpHistory(const char* trigger); }
+
+#include <cstddef>
+#include <cstdint>
+
+struct ID3D11Device;
+struct ID3D11DeviceContext;
+struct ID3D11Texture2D;
+
+namespace edvr {
+
+class Config;
+
+// Reads fix.temporal_aa (the warm compile and the camera capture want to
+// know).
+void temporalPassConfigure(Config& cfg);
+
+// Once per frame, from the frame boundary: the warm compile when wanted,
+// and the NGX warm-up once its gates open.
+void temporalPassTick(ID3D11DeviceContext* ctx);
+
+// The native temporal channel's game device and render thread, once one
+// is acquired (native_temporal.cpp): the identities its treat() insists
+// on, which the NGX warm-up must match before it touches the device. No
+// AddRef on the device; compare it by identity only. False until acquired.
+bool nativeTemporalWarmTarget(ID3D11Device** dev, unsigned long* thread);
+// The omission counters of the current native temporal channel (native_temporal.cpp), for tests.
+bool nativeTemporalOmissionCounters(uint64_t* skipped, uint64_t* historyKept, uint64_t* returnedResets, uint64_t* unjudgedResets);
+
+// The camera capture for the `camera` motion source. Every write of the
+// game's big scene-constants block passes through here (the Unmap tee
+// that already feeds the flash detector and the sun-glare fix); the rows
+// at float 932 are the true view matrix (measured, sunglare_fix.cpp) and
+// are kept pending. The frame's FIRST eye-sized draw latches the pending
+// rows as this frame's camera -- the last scene write before the first
+// eye draw is that eye's view, and the first eye each frame is the same
+// eye each frame, which is all a rotation delta needs.
+// res is the buffer object written: the rows are kept PER OBJECT, and the
+// latch takes the object bound at the frame's first scene draw -- the game
+// maps several blocks of the scene block's size a frame (a reflection or
+// environment pass has its own camera), and the last write before the
+// draw was another camera's on half the frames in space (2026-09-04).
+void temporalPassNoteSceneWrite(const void* res, const void* data, uint32_t bytes);
+void temporalPassNoteFirstEyeDraw(ID3D11DeviceContext* ctx);
+// Retrospective provenance only: latch the rows actually current at the first
+// supported rigid scene draw for each identified eye. The selection and motion
+// path do not read this state. `resource` is the VS b1 object used by the draw.
+bool temporalPassWantsRigidDraw(int eye);
+void temporalPassNoteRigidDraw(int eye, const void* resource, uint64_t vertexShaderHash);
+// This frame's rows become last frame's; called at the frame boundary.
+void temporalPassFrameBoundary();
+// The rows the pass CHOSE for the frame in progress (chooseCameraRows' pick: float 932 of the scene block, three 3x4 rows), for the VR camera census's episodes
+// (vr_camera_census_core.h: it matches them to the calls' view axes). Side-effect free: nothing is chosen, latched or counted by asking. False when no rows stand --
+// the pass is not wanted, or the frame has not treated yet (the choice is made at the first treat) or chose none; `rows` is then untouched. `bound` says the chosen
+// write was the block bound at the scene's first draw. Valid at any boundary that runs before temporalPassFrameBoundary (the census's does); render thread.
+bool temporalPassChosenRows(float rows[12], bool* bound);
+
+// hotkey.dump_eyes, and the settings menu's "Dump both eyes as seen": the
+// sixteen paired raw/treated left-eye crops, a whole treated overview,
+// the NVIDIA decision trace, the final-eye (after the interface layer) crops
+// and per-eye motion metadata in edvr_logs\eyes; the diagnostics that ride one
+// armed frame (the draw census, the object ledger, the pixel probe) arm with it.
+void temporalPassArmEyeDump();
+// Active eye-run diagnostic only, after the final crisp composition and before
+// the runtime's menu. region is the actual returned texture's unflipped bounds.
+void temporalPassCaptureFinalEye(uint64_t sequence, uint32_t eye, ID3D11Texture2D* texture,
+                                 const uint32_t region[4], bool composite, bool flipU, bool flipV);
+
+// The pass wants the scanner-chrome tracker (vscreen.cpp, beginPanelOverride)
+// running whenever it is on: the FSS's interface takes the head's path
+// while the scanner's screen is up (docs/fss-scanner.md, 2026-09-16), and
+// the tracker's stamp is how the pass knows the screen is up. The heal
+// gates the tracker too, but a rig with the heal off still needs the path.
+//
+// Inline: asked by vscreen.cpp's beginPanelOverride, and the build has no
+// /GL to fold a cross-TU getter for one bool load.
+namespace detail {
+extern bool g_temporalPassWantedFssChrome;
+}  // namespace detail
+inline bool temporalPassWantsFssChrome() { return detail::g_temporalPassWantedFssChrome; }
+
+// For the periodic totals line: eye-submits treated, the measured price,
+// and the share of pixels whose history was rejected (off the image or
+// none yet) or clipped (pulled to the neighbourhood). False when nothing
+// has run. The clip and reject shares are the field's instrument for
+// whether the reprojection is right: with the head turning and the ship
+// steady, a correct delta keeps both low.
+bool temporalPassTotals(uint32_t* treated, double* avgMs, double* maxMs,
+                        double* rejectPct, double* clipPct);
+
+// The registration instrument, for the same totals line. The second
+// flight (2026-09-03) ghosted and softened the cockpit's text under head
+// motion, which is what a history that does not land on near content
+// looks like; before v2 builds on depth, the frame-to-pose association
+// has to be exact. So every treated frame also asks what FOUR candidate
+// deltas would have fetched and judges each by the same clip, counting
+// and not using: the head's delta as used, the head's delta one frame
+// earlier (a pipelined renderer lands its frame a pose late), the game's
+// camera rows read as world->view, and the delta of the game-pose array's
+// HMD pose (a renderer that draws with those, predicted a frame further,
+// registers with their delta). The transposed camera reading held the
+// fourth slot on the third flight and lost to the untransposed one by a
+// wide margin (62% clipped by 6.5/255 against 53% by 5.0), so the rows
+// are world->view and the slot went to the game pose. And the
+// selected candidate's clip share split by head speed (still, slow,
+// fast). Each share carries the mean SIZE of its clips in luma: a nudge
+// on a text edge is a few 255ths, a history that landed somewhere else
+// is tens, and a count alone cannot tell them apart (the main menu's
+// turning ship model clips under every candidate alike, for instance).
+// Formats the text; false when nothing has run. With the scene still and
+// the head turning, the lowest share and size name the exact
+// association, and a size that climbs with head speed for ALL of them is
+// the translation v2's depth is for.
+// Two lines: the candidates and the world figures, then the latch, the
+// drops, the per-class clip shares and the probes (the logger caps a line
+// at 1200 characters). buf2 may be null.
+bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* buf3, size_t n3);
+
+// The ship split on foot (src/common/temporal_mode.h; docs/per-object-motion.md, 2026-10-07), once an interval beside the other
+// totals: the eye-frames the pass built constants for, how many had the split off because the game says the commander is on
+// foot, how many of those also had the world path on, and what the journal says now. It prints its zeros: a build without the
+// mode prints no line at all beside the totals line, a cockpit flight prints "off for 0 of N", a pass that ran without reaching
+// its constants prints "0 of 0", and a journal that cannot tell says why. Call it where the pass's totals are printed, in an
+// interval where it treated eye-submits. The change of mode is told once, by the pass itself, when it happens.
+void temporalPassNoteFootTotals();
+
+// The trained pass's totals (fix.temporal_aa = dlaa | dlss): eye-frames it
+// took, its measured price, and how many evaluations started NVIDIA's
+// history afresh (a handful per session on a good build: each eye's first
+// frame, each size change, each withhold). False when it never ran.
+bool temporalPassDlaaTotals(uint32_t* frames, double* avgMs, double* maxMs,
+                            uint32_t* resets);
+
+// The UI resolve's full-frame dispatches this session, and how many of them
+// lacked each input it can go without (a dispatch lacking two counts once in
+// each): lacked[0] the coverage mask, [1] the source-edit mask, [2] the
+// history. A lacked input is skipped, not read as zeros from a null view
+// (ui_resolve.h). False until one has run.
+bool temporalPassUiResolveTotals(uint64_t* dispatches, uint64_t lacked[3]);
+
+// The trained totals of whichever engine fix.temporal_aa names RIGHT NOW,
+// with the word a display should print for it ("NVIDIA", or "fsr 3.1.2"),
+// and whether that engine is AMD's -- the per-role figures below are
+// NVIDIA-only, so a display hides them under fsr. engineLabel and amd are
+// written whatever the return value; the return says only whether that
+// engine has a measured price yet. Every readout of the trained price goes
+// through this rather than trying one engine's totals and falling through
+// to the other's: neither total is cleared on a live engine switch, so
+// "whichever has a count" answers with the engine that ran FIRST.
+bool temporalPassTrainedTotals(uint32_t* frames, double* avgMs, double* maxMs, uint32_t* resets,
+                               const char** engineLabel, bool* amd);
+
+// The same price, split by eye (0 left, 1 right), so a display can show a
+// real per-eye figure instead of the pooled average above mislabeled as one.
+// False when that eye has not evaluated yet.
+bool temporalPassDlaaFullTotals(int eye, uint32_t* frames, double* avgMs, double* maxMs);
+
+// Stage 0 price report: the last
+// CLOSED window's per-region median milliseconds, stereo-pair-summed, in
+// the fixed order prep/full/ui -- the same
+// order as kRegionNames in temporal_pass.cpp -- plus "other" (the pair's
+// total less the sum of those three), how many stereo pairs the window
+// covered, and how many pairs/calls it dropped before pricing (unmeasured
+// pairs, lone eyes, no-slot frames and region-lease failures, summed).
+// A window closes every 600 pairs, or sooner on a treatment, output
+// size/format, or live temporal_aa_* setting change. False until one
+// window has closed this session; regionMedianMs must hold 3 doubles.
+// droppedTotal may be null.
+bool temporalPassPriceWindow(double regionMedianMs[3], double* otherMedianMs,
+                              uint32_t* pairs, uint32_t* droppedTotal);
+
+// The scene's near and far planes the last treat decoded depth with (the
+// openvr half's smallest-near pair). For ui_depth, which re-scales a
+// composite's depth from the interface projection's encoding into the
+// scene's. False until a treat has run.
+bool temporalPassPlanes(float* nearZ, float* farZ);
+
+// The depth-buffer value the scene's own projection writes for a surface
+// this many metres away (the scene block's row when it has been read, else
+// the planes above in the same reversed-Z form); 0 when neither is known.
+// ui_depth writes a floating HUD stroke's core at one metre with it, so the
+// stroke sits inside the ship split and reprojects with the head alone.
+float temporalPassDepthAt(float metres);
+
+void temporalPassShutdown();
+
+}  // namespace edvr
+
+extern "C" {
+// srcTex:    an ID3D11Texture2D* the game submitted -- its own frame.
+// eye:       0 left, 1 right; selects the per-eye owned resources.
+// bounds:    the Submit's uMin, vMin, uMax, vMax naming this eye's region of
+//            srcTex, or null for the whole texture.
+// tanNow:    l, r, t, b -- the frustum the game rendered THIS frame
+//            through, jitter excluded (the trimmed tangents under a FOV trim).
+// tanPrev:   the same for the frame whose history is being sampled.
+// jxNow/jyNow: this frame's jitter in render pixels (the content sits that
+//            far right and down from the unjittered grid). The current
+//            sample is a small jitter-aware Gaussian over the 3x3 around
+//            the pixel, and the clip's moments are weighted the same way
+//            (the shader says why).
+// deltaHead: 9 floats, row-major, the rotation taking this frame's view
+//            directions to last frame's (temporalHeadDelta); may be null.
+// headTrans: 3 floats, the translation term of the depth reprojection for
+//            this eye (temporalHeadTranslation), and headTransSwapped the
+//            same for the OTHER eye's offset (the instrument's check of
+//            the eye assignment); may be null. nearZ/farZ: the game's
+//            planes, for its reversed-Z depth (0 = unknown, no depth).
+// headDeg:   the head's turn this frame in degrees, for the instrument.
+// motion:    0 none (no reprojection), 1 head (deltaHead, rotation only),
+//            2 retired (the rows alone, un-flipped; the frame goes out
+//            unblended), 3 depth (the head's rotation AND translation,
+//            per pixel through the scene's depth from the depth probe;
+//            rotation only where there is no depth).
+// blend:     history weight 0.5..0.95. clampSigma: the clip's half-width in
+//            standard deviations of the 3x3 neighbourhood.
+// outW/outH: with flags bit 1, the size to come back at -- larger than the
+//            frame for DLSS proper (the game rendered a fraction of it),
+//            zero or equal for DLAA. Ignored by the pass's own history.
+// flags:     bit 0 -- reset the history before this frame (a withheld frame
+//            broke continuity; the first frame after an engage); bit 1 --
+//            an external, trained history (NVIDIA's or AMD's) instead of
+//            the pass's own, when the runtime is there; the pass says so
+//            either way. bit 6 -- with bit 1 set, the external engine is
+//            AMD's FSR rather than NVIDIA's DLAA/DLSS; ignored when bit 1
+//            is clear. Bits 2-5 are reset's own sub-reasons, read by the
+//            pass's own diagnostics; native_temporal.cpp's treat() (the
+//            ABI's one caller) never sets them.
+//
+// Returns the treated texture (EDVR-owned, per eye, the source's own format
+// family, region-sized, full-span content), or null: the pass refused or
+// failed, its own log line says why, and the caller forwards the original
+// and stands the pass down.
+__declspec(dllexport) void* edvrTemporalAa(void* srcTex, int eye,
+                                           const float* bounds,
+                                           const float* tanNow,
+                                           const float* tanPrev, float jxNow,
+                                           float jyNow, const float* deltaHead,
+                                           const float* headTrans,
+                                           const float* headTransSwapped,
+                                           float nearZ, float farZ,
+                                           float headDeg, int motion,
+                                           float blend, float clampSigma,
+                                           unsigned outW, unsigned outH,
+                                           unsigned flags);
+
+// The headset's pose for the frame the history holds and for this one
+// (the runtime's 3x4 rows, head -> tracking, the poses the game rendered
+// from) and this eye's offset in head space, noted before each
+// edvrTemporalAa: the world path composes the ship's camera rows with
+// them, since the rows carry no headset. Null pointers clear the note.
+__declspec(dllexport) void edvrTemporalAaNoteHead(int eye, const float* prevPose,
+                                                  const float* nowPose,
+                                                  const float* eyeOffset);
+}

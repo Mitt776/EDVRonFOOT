@@ -1,0 +1,2924 @@
+#pragma once
+// Shared native runtime host. Device ownership, graphics admission and owner
+// lifetime are supplied by the embedding host; this does not select a backend.
+#ifndef XR_USE_PLATFORM_WIN32
+#define XR_USE_PLATFORM_WIN32
+#endif
+#ifndef XR_USE_GRAPHICS_API_D3D11
+#define XR_USE_GRAPHICS_API_D3D11
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include "../common/game_call_probe.h"
+#include <d3d11.h>
+#include <openxr/openxr.h>
+#include <openxr/openxr_platform.h>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
+#include <cmath>
+#include <algorithm>
+#include <limits>
+#include <atomic>
+#include <chrono>
+#include <memory>
+#include <mutex>
+#include "../common/comfort_fade.h"
+#include "../common/frame_flag.h"
+#include "../common/parallel_projection_notice.h"
+#include "../common/periodic_work.h"
+#include "native_device.h"
+#include "native_menu_client.h"
+#include "native_temporal_client.h"
+#include "native_sharpen_client.h"
+#include "native_frame_client.h"
+#include "native_fss_client.h"
+#include "native_fov_trim.h"
+#include "native_timing_client.h"
+#include "device_gpu_timing.h"
+#include "producer_gpu_timing.h"
+#include "submission_stats.h"
+#include "frame_cycle_stats.h"
+#include "long_cycle_line.h"
+#include "vendor_events.h"
+#include "end_frame_episodes.h"
+#include "slow_regime.h"
+#include "../common/vram_query.h"
+#include "native_cpu_trace.h"
+#include "render_route.h"
+#include "shutdown_trace.h"
+#include "session_state.h"
+#include "d3d11_stereo.h"
+#include "projection_math.h"
+#include "geometry_locator.h"
+#include "openvr_system.h"
+#include "system_publication.h"
+#include "head_locator.h"
+#include "pose_gap.h"
+#include "runtime_gate.h"
+#include "frame_pacer.h"
+#include "frame_boundary.h"
+#include "eye_capture.h"
+#include "skybox_capture.h"
+#include "loading_state.h"
+#include "openvr_compositor.h"
+#include "compositor_publication.h"
+#include "space_pose.h"
+#include "seated_origin.h"
+#include "launch_centre_policy.h"
+#include "seated_space.h"
+#include "reference_changes.h"
+#include "reset_events.h"
+#include "runtime_exports.h"
+#include "openvr_auxiliary.h"
+#include "steam_identity.h"
+#include "owner_service.h"
+#include "render_thread_dispatcher.h"
+#include "present_work_queue.h"
+#include "../common/native_render_settings.h"
+#include "../common/openxr_resolution_entries.h"
+
+namespace edvr::openxr {
+struct RuntimeOptions {
+  std::wstring loader, graphicsProxy;
+  bool separateDevice=false; // Explicit staged-module V2 qualification mode.
+  // Borrowed validated provider from NativeRenderBinding. Its device and
+  // module references remain alive through owner shutdown and callback release.
+  HMODULE graphicsProvider = nullptr;
+  // edvr_openxr.ini frame_thread_priority=high|normal and frame_end_overlap=on|off.
+  // The overlap defaults on since its deferred pair retires the frame's
+  // timing before Submit returns (publishSubmitTimingCpu); before that it
+  // broke the Application-render GPU timing (flight 20260924_104337: valid
+  // 8725, invalid 43706). Flight 20260924_124504, Pimax OpenXR: invalid 5,
+  // second_submit_render_park p50 0.16-0.18 ms, next_wait_queue_delay
+  // p50 0.006 ms.
+  bool frameThreadPriorityHigh=true;
+  bool frameEndOverlap=true;
+};
+template<class T,class F> XrResult enumerate(F call,std::vector<T>& out,T initial=T{}) {
+  out.clear(); uint32_t n=0; XrResult r=call(0,&n,nullptr);
+  if(r!=XR_SUCCESS || !n) return r;
+  for(unsigned attempt=0;attempt<3;++attempt) {
+    if(n>4096) return XR_ERROR_LIMIT_REACHED;
+    std::vector<T> values(n,initial); uint32_t written=0;
+    r=call(n,&written,values.data());
+    if(r==XR_ERROR_SIZE_INSUFFICIENT && written>n) {n=written;continue;}
+    if(r!=XR_SUCCESS) return r;
+    if(written>n) return XR_ERROR_RUNTIME_FAILURE;
+    values.resize(written); out.swap(values); return XR_SUCCESS;
+  }
+  return XR_ERROR_SIZE_INSUFFICIENT;
+}
+inline bool validSize(const XrViewConfigurationView& v) {
+  return v.recommendedImageRectWidth && v.recommendedImageRectHeight &&
+    v.recommendedImageRectWidth<=v.maxImageRectWidth && v.recommendedImageRectHeight<=v.maxImageRectHeight &&
+    v.maxSwapchainSampleCount>=1 && v.recommendedImageRectWidth<=D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION &&
+    v.recommendedImageRectHeight<=D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION;
+}
+struct Api {
+  HMODULE module=nullptr; PFN_xrGetInstanceProcAddr get=nullptr;
+  PFN_xrEnumerateInstanceExtensionProperties extensions=nullptr;
+  PFN_xrCreateInstance createInstance=nullptr; PFN_xrDestroyInstance destroyInstance=nullptr;
+  PFN_xrGetInstanceProperties instanceProperties=nullptr; PFN_xrGetSystem getSystem=nullptr;
+  PFN_xrGetSystemProperties systemProperties=nullptr;
+  PFN_xrGetDisplayRefreshRateFB displayRefreshRate=nullptr;
+  PFN_xrGetVisibilityMaskKHR visibilityMask=nullptr;
+  // Both optional: XR_EXT_performance_settings (CPU/GPU performance level
+  // plus its event) and XR_META_performance_metrics (named counter paths).
+  // pathToString is core 1.0, loaded only alongside the META extension since
+  // counter paths are its one user here.
+  PFN_xrPerfSettingsSetPerformanceLevelEXT perfSettingsLevel=nullptr;
+  PFN_xrEnumeratePerformanceMetricsCounterPathsMETA perfMetricsEnumeratePaths=nullptr;
+  PFN_xrSetPerformanceMetricsStateMETA perfMetricsSetState=nullptr;
+  PFN_xrQueryPerformanceMetricsCounterMETA perfMetricsQueryCounter=nullptr;
+  PFN_xrPathToString pathToString=nullptr;
+  PFN_xrConvertWin32PerformanceCounterToTimeKHR convertTime=nullptr;
+  PFN_xrEnumerateViewConfigurations configurations=nullptr;
+  PFN_xrEnumerateViewConfigurationViews viewSizes=nullptr;
+  PFN_xrEnumerateEnvironmentBlendModes blends=nullptr;
+  PFN_xrGetD3D11GraphicsRequirementsKHR requirements=nullptr;
+  PFN_xrCreateSession createSession=nullptr; PFN_xrDestroySession destroySession=nullptr;
+  PFN_xrEnumerateReferenceSpaces spaces=nullptr; PFN_xrCreateReferenceSpace createSpace=nullptr;
+  PFN_xrDestroySpace destroySpace=nullptr; PFN_xrLocateViews locateViews=nullptr;
+  PFN_xrLocateSpace locateSpace=nullptr; PFN_xrRequestExitSession requestExit=nullptr;
+  Dispatch frames{}; StereoDispatch stereo{};
+};
+inline bool result(const char* operation,XrResult r) {
+  if(r==XR_SUCCESS) return true;
+  nativeTracePrintf("result,%s,%d\n",operation,int(r)); return false;
+}
+template<class T> bool load(Api& a,XrInstance instance,const char* name,T& destination) {
+  PFN_xrVoidFunction fn=nullptr; const XrResult r=a.get(instance,name,&fn);
+  if(!result(name,r)) return false;
+  if(!fn) return result(name,XR_ERROR_FUNCTION_UNSUPPORTED);
+  destination=reinterpret_cast<T>(fn); return true;
+}
+inline bool counterNow(LARGE_INTEGER* value) { return QueryPerformanceCounter(value)!=FALSE; }
+inline uint64_t nextRenderSizingGeneration() {
+  static std::atomic<uint64_t> generation{0};
+  return generation.fetch_add(1,std::memory_order_relaxed)+1;
+}
+class NativeRuntimeHost : public SystemSource, public FrameSink, public CompositorSource, public AuxiliarySource, public RuntimeBackend {
+ public:
+  NativeRuntimeHost(OwnerService& owner,RenderThreadDispatcher& dispatcher,RenderRoute& route,ID3D11Device* supplied=nullptr)
+      :service(owner),renderRoute(route),graphicsCalls(dispatcher),externalDevice(supplied){}
+  OwnerService& service;
+  RenderRoute& renderRoute;
+  CountedGraphics graphicsCalls;
+  ID3D11Device* externalDevice=nullptr; // host keeps device alive through owner join
+  // The hook-owning proxy remains loaded until process exit, as in the WARP
+  // fixture. Unloading a graphics proxy with retained hook contexts is unsafe.
+  HMODULE graphicsProxy=nullptr;
+  using BridgeCounts=void (*)(uint64_t*,uint64_t*);
+  BridgeCounts bridgeCounts=nullptr;
+  RuntimeOptions startupOptions;
+  uint64_t starts=0,stops=0,startupFrames=0;
+  // VR_InitInternal's cost by step, wall ms, for the runtime_startup_steps
+  // trace: open()'s stretches (instance/system, device, session, the stereo
+  // renderer, everything after it) and start()'s loop (zero-layer frames,
+  // the launch centre). Each is a measured bracket, not a share of a total.
+  struct StartupSteps{double instance=0,device=0,session=0,stereo=0,other=0,frames=0,centre=0;} startupSteps;
+  using StepClock=std::chrono::steady_clock;
+  static double stepMs(StepClock::time_point since){return std::chrono::duration<double,std::milli>(StepClock::now()-since).count();}
+  LaunchCentrePolicy launchCentre;
+  uint64_t launchCentreSamples=0,launchCentreBegan=0;
+  uint64_t eventPumps=0;
+  std::atomic<uint64_t> publishedPumps{0};
+  bool serviceStopped=false,serviceFailed=false;
+  // A terminal OpenXR event is surfaced through the OpenVR event queue.  The
+  // owner records it here; pollEvent is also marshalled to the owner, so no
+  // cross-thread event queue is needed.
+  bool quitEventPending=false;
+  uint64_t quitEventGeneration=0;
+  Lifecycle tracedLifecycle=Lifecycle::Uninitialized;
+  OpenVRExtendedDisplay displayInterface{*this};OpenVRChaperone chaperoneInterface{*this};
+  Api api; XrInstance instance=XR_NULL_HANDLE; XrSession session=XR_NULL_HANDLE;
+  XrSpace local=XR_NULL_HANDLE, view=XR_NULL_HANDLE; XrSystemId system=XR_NULL_SYSTEM_ID;
+  NativeDevice graphics; SessionBinding binding; D3D11Stereo stereo; SessionState state;
+  EyeCapture captured;
+  EyeCapture previousPair;
+  bool previousPairValid=false,frameWithheld=false,frameDecisionReady=false;
+  XrView previousViews[2]{};
+  StereoPlacement previousPlacement[2]{};
+  XrSpace previousSpace=XR_NULL_HANDLE;
+  uint64_t previousReference=0,withheldPairs=0,replayedPairs=0,emptyWithholds=0;
+  NativeFrameClient features;
+  NativeFssClient fss;
+  NativeFovTrim fovTrim;
+  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_5};
+  EdvrNativeFrameDecision featureDecision{sizeof(featureDecision),EDVR_NATIVE_FRAME_VERSION_1};
+  bool featureFrameKnown=false;
+  uint64_t fssHealedEyes[2]{},featureChanges=0;
+  uint64_t fssDeferredEyes=0;
+  // The heal's target eye, held from its own submit until the donor eye's
+  // treat delivers the heal; its sharpen, menu and capture run then.
+  struct DeferredEye {
+    bool active=false;vr::EVREye eye=vr::Eye_Left;uint64_t sequence=0;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> submittedSource,temporalOutput;
+    vr::VRTextureBounds_t bounds{},temporalBounds{};bool hasBounds=false;
+    vr::EVRSubmitFlags flags=vr::Submit_Default;vr::EColorSpace colorSpace=vr::ColorSpace_Auto;
+  } deferredEye;
+  NativeMenuClient menu;
+  NativeTemporalClient temporal;
+  NativeSharpenClient sharpen;
+  NativeTimingClient timing;
+  DeviceGpuTiming deviceTiming;
+  bool deviceTimingReady=false;
+  // Producer-side (Elite's own device) copy timing; separate from deviceTiming
+  // above, which times only the consumer copy on EDVR's own device. Lazily
+  // bound to the render thread the first time a capture() call below reaches
+  // it; see producer_gpu_timing.h.
+  ProducerGpuTiming producerTiming;
+  uint64_t timingSequence=0;
+  bool timingFrameActive=false;
+  std::atomic<bool> timingApplicationOpen{false};
+  std::atomic<uint64_t> timingApplicationSequence{0};
+  unsigned timingFrameMask=0;
+  EdvrNativeTimingFrame timingFrame{sizeof(timingFrame),EDVR_NATIVE_TIMING_VERSION_5};
+  bool timingGpuBegun[2]{};
+  // frame_end_overlap: a deferred pair publishes its CPU timing record before
+  // finishPair() has composed it, so composeMs is the PREVIOUS overlapped
+  // pair's measured value instead -- one frame stale. Updated at the end of
+  // every deferred finish (finishPendingFrameEndBody), read at the next
+  // deferred pair's early publish (publishSubmitTimingCpu). Stays the
+  // "missing" sentinel until the first one completes.
+  double lastOverlappedComposeMs=std::numeric_limits<double>::quiet_NaN();
+  SubmissionStats submitStats;
+  SubmissionStats::Sample submitSample;
+  FrameCycleStats frameCycles;
+  std::atomic<bool> frameCycleEnabledNoted{false},frameCycleFirstNoted{false},postSubmitFirstNoted{false};
+  std::atomic<uint64_t> frameCycleWaitToken{0},frameCycleSubmitToken{0},frameCycleSequence{0};
+  // Phase-0 timing (src/common/periodic_work.h) of the 30 s frame-cycle report: built by makeReport's sorts
+  // inside frameCycles.waitCallerEnd and written by reportFrameCycles, both on Elite's thread, the only user
+  // of this instance. Summaries and SLOW lines go to the runtime's own trace (recordFrameCycleReport): this
+  // DLL has no edvr::Log. Context: the samples the report sorted.
+  PeriodicWork frameCycleReportWork{"frame_cycle_report","samples"};
+  // native_long_cycle: count is every completed cycle past the threshold,
+  // logged or not; logged is how many printed. A cycle of kFreezeAlwaysLogMs (250 ms) or more always prints,
+  // and is not charged to the limiter; every other one is held to cycleLimiter's 4 a wall-clock second
+  // (GetTickCount64()/1000) and 400 a session. native_long_cycle_summary reports
+  // both at session close, with the counts by size bucket (cycleBook, freeze_book.h), and the same counts
+  // are written every kFreezeCountsEveryMs as native_long_cycle_counts. The worst few cycles of the
+  // session are kept in cycleBook and written as native_long_cycle_worst at close.
+  uint64_t longCycleCount=0,longCycleLogged=0;FreezeSecondLimiter cycleLimiter;
+  std::mutex cycleBookMutex;FreezeBook cycleBook;uint64_t longCycleCountsMs=0;uint32_t longCycleWorstPrinted=0;
+  // The vendor instruments of the headset-lock arc (docs/headset-lock-vdxr-2026-10-02.md), all owner-thread state:
+  // the vendor's events (vendor_events.h, fed by SessionState's observer), every xrEndFrame of three display periods
+  // or more as an episode (end_frame_episodes.h), and a frame rate under 40% of the display's held for 5 s as a
+  // slow regime with the owner that holds it (slow_regime.h). Each writes an armed line at startup (startInstruments).
+  VendorEventLog vendorEvents;
+  EndFrameEpisodes endFrameEpisodes;
+  EndFrameEpisodes::Lines endFrameLines;
+  SlowRegime slowRegime;
+  // The adapter the runtime's own device sits on, for the figures beside a SLOW line (vram_query.h). Null, with the
+  // reason, on a stack that does not offer IDXGIAdapter3.
+  Microsoft::WRL::ComPtr<IDXGIAdapter3> vramAdapter;
+  const char* vramWhy="the runtime's device was not opened";
+  // True while finishPendingFrameEndBody runs: the end-frame call is then the overlapped one.
+  bool finishingOverlapped=false;
+  // The test hold (frame_flag's endFrameHoldMs, advanced.slow_test_ms): whether one is running and how many calls it held.
+  bool endFrameHoldActive=false;
+  uint64_t endFrameHeldCalls=0;
+  // The display rate the vendor reported (0 when it did not: the SLOW detector then judges by the predicted period).
+  double instrumentDisplayHz=0;
+  uint64_t instrumentSummaryMs=0;
+  TransferWallTimes transferWall;
+  uint64_t submitCallbacksBegin=0;
+  std::atomic<bool> submitRouteNoted[2]{};
+  float frameTangentShift[2][2]{};
+  unsigned temporalFrameEyes=0;
+  uint64_t temporalEyes[2]{},temporalFrames=0,temporalFailures=0;
+  uint64_t sharpenEyes[2]{},sharpenFailures=0;
+  uint64_t menuEyes[2]{}, menuFailures=0, menuPosePublications=0;
+  SkyboxCapture skybox;
+  LoadingState loading;
+  uint64_t loadingClears=0;
+  uint64_t skyboxSets=0,skyboxClears=0,loadingFrames=0,loadingLayers=0,loadingEmpty=0,loadingToScene=0;
+  SeatedSpace seated;ReferenceChanges changes;ResetEvents resetEvents;
+  XrSpace frameSpace=XR_NULL_HANDLE;
+  uint64_t recenters=0,resetPolls=0,referenceChanges=0;
+  XrResult lastResetResult=XR_SUCCESS;
+  XrTime lastResetTime=0;
+  float resetPositionError=0,resetYawError=0;
+  // Declared before boundary: boundary's constructor stores its address, and
+  // it must already exist to be bound (native_frame's own reset() sequence
+  // below binds it once the session that owns its xrWaitFrame exists).
+  FramePacer pacer;
+  FrameBoundary boundary{state,*this,&pacer};
+  // The pacing decided for the frame in flight and how many times it has
+  // changed, traced as native_pacing at each transition. The flag comes from
+  // the PREVIOUS frame's features.begin (native_frame_client.h's begin() is
+  // called after this frame's boundary.waitAndBegin), a one-frame lag.
+  FramePacing lastPacing=FramePacing::Runtime; uint64_t pacingChanges=0;
+  // Overlapped frame end (edvr_openxr.ini frame_end_overlap): set once from
+  // startupOptions in start(). When the second Submit of a runtime-paced,
+  // separate-device pair completes, finishPair() (consumer copy, compose,
+  // xrEndFrame) is queued to the owner instead of run inline, so Elite's
+  // Submit returns as soon as its texture is free to reuse. Before it does,
+  // submitEye already runs publishSubmitTimingCpu and retires the
+  // caller-visible timing context exactly as the synchronous path leaves it
+  // by the time Submit returns -- otherwise the caller's post-Submit
+  // producerResume/applicationSegment(seq,true) would reopen a segment on a
+  // pair finishPair has not even started (docs/openxr-performance-review-
+  // 2026-09-14.md). pendingFrameEnd* is owner-thread-only state read back by
+  // the queued job or, if OwnerService cancelled it unrun, by close()'s
+  // inline fallback: the eye and its own copy of the sequence (so the job
+  // never depends on timingSequence still holding this pair's value by the
+  // time it runs) and whether the early publish above actually ran, so the
+  // job's own finishPair()-dependent half never publishes twice.
+  // frameEnd*Count are the native_frame_end_overlap_summary tallies at
+  // session close.
+  bool frameEndOverlapEnabled=true;
+  bool pendingFrameEndFinish=false;
+  vr::EVREye pendingFrameEndEye=vr::Eye_Left;
+  uint64_t pendingFrameEndSequence=0;
+  bool pendingFrameEndPublished=false;
+  uint64_t frameEndOverlapCount=0,frameEndSyncCount=0,frameEndInlineAtCloseCount=0,frameEndFailureCount=0;
+  // A completed producer pair may hand off without waiting for its queued XR
+  // finish. Publication and queue admission share this mutex: a later caller
+  // wait/submit clears admission before it can enqueue a new frame. None of
+  // the owner-only pendingFrameEnd fields is inspected by that caller.
+  std::mutex overlapHandoffMutex;
+  uint64_t overlapHandoffGeneration=0,overlapHandoffEpoch=0;
+  uint64_t overlapPresentEpoch=0;
+  bool overlapPresentAvailable=false;
+  std::atomic<uint64_t> overlapPresentBypassed{0};
+  std::atomic<uint64_t> overlapHandoffAccepted{0},overlapHandoffCompleted{0},
+    overlapHandoffRejected{0},overlapHandoffInvalid{0},overlapHandoffCancelledOrFailed{0};
+  uint64_t clearOverlapHandoff() {
+    std::lock_guard<std::mutex> lock(overlapHandoffMutex);overlapHandoffGeneration=0;
+    overlapPresentAvailable=false;
+    return ++overlapHandoffEpoch;
+  }
+  // This pair's finish already owns sceneSubmitted (or fatal failure). Its
+  // first Present need not enqueue a redundant loading check behind that
+  // finish. Independent of handoff consumption; read only published values.
+  bool consumeOverlappedPresent() {
+    std::lock_guard<std::mutex> lock(overlapHandoffMutex);
+    if(!overlapPresentAvailable||overlapPresentEpoch!=overlapHandoffEpoch)return false;
+    overlapPresentAvailable=false;
+    overlapPresentBypassed.fetch_add(1,std::memory_order_relaxed);return true;
+  }
+  RuntimeGate gate; uint64_t runtimeGeneration=0;
+  // frameViews is the projection the XR layer advertises: the located one,
+  // always, so every runtime composes it the way it composes an untouched
+  // frame. frameContentViews is the projection the treated pixels actually
+  // hold, which a trim makes narrower, and framePlacement is where those
+  // pixels sit inside the layer's own field. The three agree when no trim
+  // is live, and the placement is then the whole image.
+  XrView frameViews[2]{};
+  XrView frameContentViews[2]{};
+  StereoPlacement framePlacement[2]{};
+  uint64_t copiedEyes=0, composedPairs=0;
+  SystemPublication geometry; uint64_t geometryGeneration=0;
+  OpenVRSystem systemInterface{*this};
+  CompositorPublication poses;uint64_t compositorGeneration=0;
+  OpenVRCompositor compositorInterface{this};
+  GeometryInput frameGeometry{};bool frameGeometryAvailable=false;
+  XrResult lastCompositorResult=XR_SUCCESS;
+  uint64_t compositorWaits=0,compositorSubmits=0,compositorHandoffs=0,validGamePoses=0;
+  uint64_t poseFailures=0;
+  DWORD ownerThread=GetCurrentThreadId();
+  XrResult lastHeadResult=XR_SUCCESS;XrTime lastHeadTime=0;
+  // The head-pose answer and its diagnostic (head_pose_time.h, pose_gap.h; docs\terrain-culling.md). `latestPoseFrame` is the frame the game
+  // was last given by WaitGetPoses -- the pose that is drawn -- kept for Elite's "now" pose calls to be located from (one display period past its
+  // display time) and measured against.
+  // Written and read on the owner thread only. It is the frame of the CURRENT session and origin: every place that invalidates the origin, the
+  // session or the geometry publication drops it (dropPoseFrame), and a display time that has fallen more than one period behind now is not
+  // used (displayTimeFresh), so nothing the game was told earlier outlives the state it was told in.
+  struct PoseFrame {
+    bool valid=false,orientationKnown=false,speedKnown=false;
+    XrTime displayTime=0;XrDuration period=0;
+    float orientation[4]{0,0,0,1};
+    double speedDegPerSec=0;
+  } latestPoseFrame;
+  void dropPoseFrame() {latestPoseFrame=PoseFrame{};}
+  // The clock Elite's "now" pose calls read (a rig substitutes its own so "now" is a number it chooses), and the explicit-time locates the runtime
+  // refused with XR_ERROR_TIME_INVALID and that were located at now + prediction instead.
+  CounterNow headClock=counterNow;
+  uint64_t displayTimeRefusals=0;
+  HeadPoseSightings poseSightings;
+  PoseGapStats poseGap;
+  // Diagnostic only (docs/linux-native-openxr-launch-centre-2026-09-22.md).
+  uint64_t headLocateFailures=0,headLocateConsecutiveFailures=0;
+  XrViewConfigurationView sizes[2]{};
+  float requestedRenderScale=EDVR_NATIVE_RENDER_SCALE_DEFAULT;
+  float effectiveRenderScale=EDVR_NATIVE_RENDER_SCALE_DEFAULT;
+  // The headset's identity for fix.openxr_resolution: the runtime and system
+  // names as the v2 settings ABI carries them (63 bytes plus NUL). The token
+  // traced as headset_key is computed from these copies, so it is byte-equal
+  // to the one the graphics DLL matched on whatever the raw string's length.
+  char runtimeLabel[64]{};
+  char systemLabel[64]{};
+  static void copyLabel(char (&label)[64],const char* raw) {
+    std::memset(label,0,sizeof(label)); if(raw) std::strncpy(label,raw,sizeof(label)-1);
+  }
+  // Parallel projection left on for a canted Pimax (parallel_projection_notice.h, docs/canted-projection.md): decided once a session, from
+  // the first pair of eye orientations that located and passed makeGeometrySnapshot, never before one, and said in the log when it applies.
+  // The graphics half decides the user-facing notice for itself from the eye poses and names that already cross to it. The verdict stays
+  // here for the rig to read.
+  bool projectionModeNoted=false;
+  edvr::ppn::Verdict projectionVerdict=edvr::ppn::Verdict::NotApplicable;
+  void noteProjectionMode(const GeometryInput& located) {
+    if(projectionModeNoted)return;
+    const auto& left=located.views[0].pose.orientation;const auto& right=located.views[1].pose.orientation;
+    const auto views=edvr::ppn::classifyViews(left,right);
+    if(views==edvr::ppn::Views::Unknown)return;   // not a pair of orientations: wait for the next locate, decide nothing
+    projectionModeNoted=true;
+    projectionVerdict=edvr::ppn::decide(systemLabel,runtimeLabel,views);
+    char line[1024]{};
+    if(edvr::ppn::formatLog(line,sizeof(line),projectionVerdict,systemLabel,runtimeLabel,
+         sizes[0].recommendedImageRectWidth,sizes[0].recommendedImageRectHeight,edvr::ppn::viewAngleDegrees(left,right))>0)
+      nativeTracePuts(line);
+  }
+  bool renderSettingsCaptured=false;
+  uint64_t renderSizingGeneration=0;
+  EdvrNativeRenderViewBounds renderBounds[2]{};
+  // SessionState frame tokens restart at one when the same bound session is
+  // begun again. Provider tables deliberately retain their sequence floors,
+  // so the host adds this offset to every published frame sequence.
+  uint64_t frameSequenceOffset=0,lastPublishedFrameSequence=0;
+  uint64_t activeFrameSequence=0;
+  mutable std::atomic<unsigned> geometryQueryNotes[6][2]{};
+  // Reads that handed the game a recommended size (GetRecommendedRenderTarget-
+  // Size, and the extended display's two, which report the same size), from
+  // any thread, for the life of this host, which is one VR_Init. While it is
+  // 0 the trim can tell itself as the game's first ask
+  // (NativeTrimRoute::FirstAsk): the startup frames run inside VR_Init,
+  // before the game holds an interface to ask through.
+  mutable std::atomic<uint64_t> sizeAsks{0};
+  unsigned originInvalidationNotes=0;
+  bool clean=true;
+  bool displayRefreshExtension=false;
+  bool visibilityMaskExtension=false,visibilityMaskDirty=false;
+  uint64_t visibilityRevision=0;
+  unsigned visibilityRefreshes=0;
+  // XR_EXT_performance_settings and XR_META_performance_metrics, both
+  // optional. perfMetricsReady is true
+  // only once xrSetPerformanceMetricsStateMETA(enabled=1) itself succeeded;
+  // perfMetricsExtension alone just means the runtime listed it.
+  bool perfSettingsExtension=false,perfMetricsExtension=false,perfMetricsReady=false;
+  uint64_t perfSettingsEvents=0;
+  std::vector<XrPath> perfMetricsPaths;
+  void refreshHiddenMasks(const char* reason) {
+    if(GetCurrentThreadId()!=ownerThread||!session||!geometryGeneration||!read().connected)return;
+    visibilityMaskDirty=false;
+    if(visibilityRefreshes>=32){geometry.hiddenMasks(geometryGeneration,nullptr);return;}
+    ++visibilityRefreshes;
+    std::shared_ptr<NativeHiddenMasks> candidate;
+    XrResult status=XR_ERROR_FUNCTION_UNSUPPORTED;
+    try {
+      if(visibilityMaskExtension&&api.visibilityMask) {
+        candidate=std::make_shared<NativeHiddenMasks>();candidate->generation=geometryGeneration;
+        candidate->revision=++visibilityRevision;status=XR_SUCCESS;
+        for(unsigned eye=0;eye<2;++eye) {
+          status=readHiddenMask(api.visibilityMask,session,eye,candidate->eyes[eye]);
+          if(XR_FAILED(status))break;
+          const auto w=edvr::native_render::scaledDimension(renderBounds[eye].originalWidth,
+              renderBounds[eye].maxWidth,EDVR_NATIVE_RENDER_SCALE_MINIMUM);
+          const auto h=edvr::native_render::scaledDimension(renderBounds[eye].originalHeight,
+              renderBounds[eye].maxHeight,EDVR_NATIVE_RENDER_SCALE_MINIMUM);
+          if(!w||!h){status=XR_ERROR_VALIDATION_FAILURE;break;}
+          candidate->guard[eye][0]=2.0f/w;candidate->guard[eye][1]=2.0f/h;
+        }
+      }
+    } catch(...) {status=XR_ERROR_OUT_OF_MEMORY;}
+    if(XR_FAILED(status))candidate.reset();
+    geometry.hiddenMasks(geometryGeneration,candidate);
+    const unsigned triLeft=candidate?unsigned(candidate->eyes[0].indices.size()/3):0;
+    const unsigned triRight=candidate?unsigned(candidate->eyes[1].indices.size()/3):0;
+    nativeTracePrintf("visibility_mask,enabled=%u,query=%u,revision=%llu,result=%d,triangles=%u/%u,reason=%s,refresh=%u/32\n",
+      unsigned(visibilityMaskExtension),unsigned(api.visibilityMask!=nullptr),(unsigned long long)visibilityRevision,int(status),
+      triLeft,triRight,
+      reason,visibilityRefreshes);
+  }
+  void publishDisplayFrequency(float hz,bool estimated,const char* reason,XrResult status) {
+    if(GetCurrentThreadId()!=ownerThread||!geometry.displayFrequency(geometryGeneration,hz,estimated))return;
+    instrumentDisplayHz=!estimated&&std::isfinite(hz)&&hz>0?double(hz):0.0;
+    nativeTracePrintf("display_frequency,hz=%.9g,source=%s,extension_enabled=%u,result=%d,reason=%s\n",
+      double(hz),estimated?"compatibility_90hz":"runtime",unsigned(displayRefreshExtension),int(status),reason);
+  }
+  void refreshDisplayFrequency(const char* reason) {
+    if(GetCurrentThreadId()!=ownerThread||!session||!geometryGeneration||!read().connected)return;
+    float hz=0;
+    const XrResult r=displayRefreshExtension&&api.displayRefreshRate?
+      api.displayRefreshRate(session,&hz):XR_ERROR_FUNCTION_UNSUPPORTED;
+    const bool measured=(r==XR_SUCCESS||r==XR_SESSION_LOSS_PENDING)&&std::isfinite(hz)&&hz>0;
+    // OpenComposite's compatibility default. Never infer physical refresh from
+    // predictedDisplayPeriod: application cadence can differ from panel rate.
+    publishDisplayFrequency(measured?hz:90.0f,!measured,reason,r);
+  }
+  // XR_EXT_performance_settings: sustained-high CPU and GPU levels, asked
+  // for at the session's first start. A restarted session
+  // (prepareSessionRestart) is not asked again and runs at the runtime's
+  // default level.
+  void applyPerformanceSettings() {
+    if(!perfSettingsExtension||!api.perfSettingsLevel) {
+      nativeTracePrintf("native_perf_settings,extension=absent,cpu=n/a,gpu=n/a\n");
+      return;
+    }
+    const XrResult cpu=api.perfSettingsLevel(session,XR_PERF_SETTINGS_DOMAIN_CPU_EXT,XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT);
+    const XrResult gpu=api.perfSettingsLevel(session,XR_PERF_SETTINGS_DOMAIN_GPU_EXT,XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT);
+    nativeTracePrintf("native_perf_settings,extension=enabled,cpu=%d,gpu=%d\n",int(cpu),int(gpu));
+  }
+  // Best-effort XrPath -> text via the core xrPathToString. Empty when the
+  // function never loaded or the runtime rejects the path.
+  std::string perfMetricsPathText(XrPath path) const {
+    if(!api.pathToString)return {};
+    char text[256]{};uint32_t count=0;
+    if(XR_FAILED(api.pathToString(instance,path,sizeof(text),&count,text)))return {};
+    return std::string(text);
+  }
+  // XR_META_performance_metrics: enables the state and enumerates the
+  // runtime's counter paths once, at session start; reportPerformanceMetrics
+  // queries them at every frame-cycle window.
+  void enablePerformanceMetrics() {
+    perfMetricsReady=false;perfMetricsPaths.clear();
+    if(!perfMetricsExtension||!api.perfMetricsSetState||!api.perfMetricsEnumeratePaths||
+       !api.perfMetricsQueryCounter||!api.pathToString) {
+      nativeTracePrintf("native_perf_metrics,extension=absent\n");
+      return;
+    }
+    XrPerformanceMetricsStateMETA state{XR_TYPE_PERFORMANCE_METRICS_STATE_META,nullptr,XR_TRUE};
+    const XrResult set=api.perfMetricsSetState(session,&state);
+    if(XR_FAILED(set)) {
+      nativeTracePrintf("native_perf_metrics,extension=enabled,set_state=%d,ready=0\n",int(set));
+      return;
+    }
+    perfMetricsReady=true;
+    uint32_t count=0;
+    api.perfMetricsEnumeratePaths(instance,0,&count,nullptr);
+    if(count) {
+      perfMetricsPaths.assign(count,XrPath(XR_NULL_PATH));
+      api.perfMetricsEnumeratePaths(instance,count,&count,perfMetricsPaths.data());
+      perfMetricsPaths.resize(count);
+    }
+    char list[1024]{};size_t used=0;
+    for(size_t i=0;i<perfMetricsPaths.size();++i) {
+      const auto text=perfMetricsPathText(perfMetricsPaths[i]);
+      if(used>=sizeof(list))break;
+      const int n=std::snprintf(list+used,sizeof(list)-used,"%s%s",i?"|":"",text.c_str());
+      if(n>0)used+=(std::min)(size_t(n),sizeof(list)-used);
+    }
+    nativeTracePrintf("native_perf_metrics_paths,count=%u,paths=%s\n",unsigned(perfMetricsPaths.size()),list);
+  }
+  // Called from reportFrameCycles() at every frame-cycle window; silent
+  // (native_perf_metrics,extension=absent already said its one word) unless
+  // enablePerformanceMetrics() actually got the state enabled.
+  void reportPerformanceMetrics(uint64_t window) {
+    if(!perfMetricsReady||perfMetricsPaths.empty())return;
+    char list[1024]{};size_t used=0;
+    for(const auto path:perfMetricsPaths) {
+      XrPerformanceMetricsCounterMETA counter{XR_TYPE_PERFORMANCE_METRICS_COUNTER_META};
+      if(XR_FAILED(api.perfMetricsQueryCounter(session,path,&counter)))continue;
+      double value=std::numeric_limits<double>::quiet_NaN();
+      if(counter.counterFlags&XR_PERFORMANCE_METRICS_COUNTER_FLOAT_VALUE_VALID_BIT_META)value=double(counter.floatValue);
+      else if(counter.counterFlags&XR_PERFORMANCE_METRICS_COUNTER_UINT_VALUE_VALID_BIT_META)value=double(counter.uintValue);
+      const auto text=perfMetricsPathText(path);
+      if(used>=sizeof(list))break;
+      const int n=std::snprintf(list+used,sizeof(list)-used,",%s=%.6g",text.c_str(),value);
+      if(n>0)used+=(std::min)(size_t(n),sizeof(list)-used);
+    }
+    nativeTracePrintf("native_perf_metrics,window=%llu%s\n",(unsigned long long)window,list);
+  }
+  // XR_TYPE_EVENT_DATA_PERF_SETTINGS_EXT, rate-limited the way pose_failure
+  // and native_menu failures are in this file: the first 8 logged, every one
+  // counted for native_pacing_summary.
+  void notePerfSettingsEvent(const XrEventDataPerfSettingsEXT& event) {
+    if(perfSettingsEvents++<8)
+      nativeTracePrintf("native_perf_settings_event,domain=%d,sub_domain=%d,from=%d,to=%d\n",
+        int(event.domain),int(event.subDomain),int(event.fromLevel),int(event.toLevel));
+  }
+  bool separateGraphics()const{return startupOptions.separateDevice;}
+  bool captureRenderSettings() {
+    if(renderSettingsCaptured) return true;
+    renderSizingGeneration=nextRenderSizingGeneration();
+    if(!renderSizingGeneration) return result("render_sizing_generation",XR_ERROR_LIMIT_REACHED);
+    requestedRenderScale=EDVR_NATIVE_RENDER_SCALE_DEFAULT;
+    effectiveRenderScale=EDVR_NATIVE_RENDER_SCALE_DEFAULT;
+    renderSettingsCaptured=false;
+    const std::string key=edvr::native_render::headsetKey(
+        edvr::native_render::headsetToken(runtimeLabel,sizeof(runtimeLabel)),
+        edvr::native_render::headsetToken(systemLabel,sizeof(systemLabel)));
+    // The headset-free/native host diagnostic has no paired graphics
+    // provider, so its recommendation remains the runtime's 100% size.
+    if(!graphicsProxy) {
+      renderSettingsCaptured=true;
+      nativeTracePrintf("openxr_resolution,provider=0,key=%s,headset=%ux%u,matched=0,entries=0,requested=1.000000\n",
+          key.c_str(),renderBounds[0].originalWidth,renderBounds[0].originalHeight);
+      return true;
+    }
+    const auto query=reinterpret_cast<EdvrQueryNativeRenderSettings>(
+        GetProcAddress(graphicsProxy,"edvrQueryNativeRenderSettings"));
+    if(!query) return result("native_render_settings_export",XR_ERROR_FUNCTION_UNSUPPORTED);
+    // One in/out buffer: the bounds and names go in, the graphics DLL
+    // resolves fix.openxr_resolution for this headset and echoes the inputs,
+    // and the echo is compared byte for byte (a stale DLL on either side
+    // fails here with -1 rather than flying a wrong size).
+    const EdvrNativeRenderSettings request=edvr::native_render::buildRenderSettingsRequest(
+        renderBounds,runtimeLabel,systemLabel);
+    EdvrNativeRenderSettings settings=request;
+    BOOL answered=FALSE;
+    if(!graphicsCalls.invoke([&]{
+         answered=query(EDVR_NATIVE_RENDER_SETTINGS_VERSION_2,sizeof(settings),&settings);
+       }) || !answered || !edvr::native_render::validateRenderSettingsAnswer(request,settings))
+      return result("native_render_settings_query",XR_ERROR_VALIDATION_FAILURE);
+    requestedRenderScale=settings.openxrRenderScale;
+    effectiveRenderScale=edvr::native_render::clampScale(requestedRenderScale);
+    renderSettingsCaptured=true;
+    nativeTracePrintf("openxr_resolution,provider=1,key=%s,headset=%ux%u,matched=%u,entries=%u,requested=%.6f\n",
+        key.c_str(),renderBounds[0].originalWidth,renderBounds[0].originalHeight,
+        settings.matchedEntry,settings.entryCount,requestedRenderScale);
+    return true;
+  }
+  void applyRenderScale() {
+    effectiveRenderScale=edvr::native_render::effectiveScale(
+        requestedRenderScale,renderBounds,2);
+    for(unsigned eye=0;eye<2;++eye) {
+      const unsigned originalWidth=renderBounds[eye].originalWidth;
+      const unsigned originalHeight=renderBounds[eye].originalHeight;
+      const uint32_t maxWidth=renderBounds[eye].maxWidth;
+      const uint32_t maxHeight=renderBounds[eye].maxHeight;
+      sizes[eye].recommendedImageRectWidth=edvr::native_render::scaledDimension(
+          originalWidth,maxWidth,effectiveRenderScale);
+      sizes[eye].recommendedImageRectHeight=edvr::native_render::scaledDimension(
+          originalHeight,maxHeight,effectiveRenderScale);
+      nativeTracePrintf("openxr_render_size,eye=%u,original=%ux%u,scaled=%ux%u,requested=%.6f,effective=%.6f,megapixels=%.2f\n",
+          eye,originalWidth,originalHeight,sizes[eye].recommendedImageRectWidth,
+          sizes[eye].recommendedImageRectHeight,requestedRenderScale,effectiveRenderScale,
+          edvr::native_render::megapixels(sizes[eye].recommendedImageRectWidth,sizes[eye].recommendedImageRectHeight));
+    }
+  }
+  bool publishRenderSizing(bool valid) {
+    if(!graphicsProxy) return true;
+    const auto publish=reinterpret_cast<EdvrPublishNativeRenderSizing>(
+        GetProcAddress(graphicsProxy,"edvrPublishNativeRenderSizing"));
+    if(!publish) return !valid;
+    EdvrNativeRenderSizing sizing{sizeof(sizing),EDVR_NATIVE_RENDER_SIZING_VERSION_1,renderSizingGeneration};
+    if(valid) {
+      for(unsigned eye=0;eye<2;++eye) {
+        sizing.eyes[eye]=renderBounds[eye];
+        sizing.activeWidth[eye]=sizes[eye].recommendedImageRectWidth;
+        sizing.activeHeight[eye]=sizes[eye].recommendedImageRectHeight;
+      }
+      sizing.requestedScale=requestedRenderScale;
+      sizing.effectiveScale=effectiveRenderScale;
+      sizing.valid=1;
+    }
+    // Snapshot publication is thread-safe and CPU-only. Shutdown needs no
+    // producer callback or Config access, even after graphics admission ends.
+    if(!valid) return publish(EDVR_NATIVE_RENDER_SIZING_VERSION_1,sizeof(sizing),&sizing)!=FALSE;
+    BOOL published=FALSE;
+    const bool dispatched=graphicsCalls.invoke([&]{
+      published=publish(EDVR_NATIVE_RENDER_SIZING_VERSION_1,sizeof(sizing),&sizing);
+    });
+    if(!dispatched || !published) {
+      if(valid) nativeTracePrintf("openxr_render_sizing,published=0\n");
+      return false;
+    }
+    return true;
+  }
+  AuxiliaryRead readAuxiliary()const override {
+    const auto snapshot=geometry.read();AuxiliaryRead out{};
+    out.generation=snapshot.generation;out.connected=snapshot.connected;
+    for(unsigned eye=0;eye<2;++eye){out.width[eye]=snapshot.recommendedWidth[eye];out.height[eye]=snapshot.recommendedHeight[eye];}
+    traceGeometryQuery(5,snapshot);
+    return out;
+  }
+  void traceGeometryQuery(unsigned slot,const SystemRead& snapshot) const noexcept {
+    // Counted before the trace's own cap, and only where the read handed out
+    // a size (a live snapshot; openvr_system.cpp's live()).
+    if((slot==0||slot==5)&&snapshot.connected&&snapshot.generation)sizeAsks.fetch_add(1,std::memory_order_relaxed);
+    if(slot>=6||geometryQueryNotes[slot][snapshot.geometryValid?1:0].fetch_add(1,std::memory_order_relaxed)>=4)return;
+    nativeTracePrintf("system_geometry_query,slot=%u,generation=%llu,connected=%u,geometry_valid=%u,optics_valid=%u,optics_sequence=%llu,sequence=%llu,recommended=%ux%u/%ux%u\n",
+      slot,(unsigned long long)snapshot.generation,unsigned(snapshot.connected),unsigned(snapshot.geometryValid),
+      unsigned(snapshot.opticsValid),(unsigned long long)snapshot.optics.sequence,
+      (unsigned long long)snapshot.geometry.native.sequence,snapshot.recommendedWidth[0],snapshot.recommendedHeight[0],
+      snapshot.recommendedWidth[1],snapshot.recommendedHeight[1]);
+  }
+  void noteGeometryQuery(unsigned slot,const SystemRead& snapshot) noexcept override {traceGeometryQuery(slot,snapshot);}
+  void noteProjectionQuery(const SystemRead& s,unsigned eye,float nearZ,float farZ,
+      vr::EGraphicsAPIConvention convention,bool accepted,const vr::HmdMatrix44_t& m,const void* caller) noexcept override {
+    nativeTracePrintf("projection_query,eye=%u,near=%.9g,far=%.9g,api=%u,accepted=%u,live=%u,optics=%u,sequence=%llu,caller=%p,m00=%.9g,m11=%.9g,m02=%.9g,m12=%.9g,m22=%.9g,m23=%.9g\n",
+      eye,double(nearZ),double(farZ),unsigned(convention),unsigned(accepted),unsigned(s.geometryValid),unsigned(s.opticsValid),
+      (unsigned long long)s.geometry.native.sequence,caller,double(m.m[0][0]),double(m.m[1][1]),double(m.m[0][2]),double(m.m[1][2]),double(m.m[2][2]),double(m.m[2][3]));
+  }
+  void noteFrequencyQuery(const SystemRead& s,vr::TrackedDeviceIndex_t index,
+      vr::ETrackedPropertyError error,float value,unsigned sample) noexcept override {
+    const auto stack=edvr::captureGameCallStack();
+    nativeTracePrintf("frequency_query,index=%u,property=2002,error=%u,value=%.9g,estimated=%u,sample=%u/16,generation=%llu,sequence=%llu,stack_frames=%u,game_frames=%u,game_rvas=%s\n",
+      index,unsigned(error),double(value),unsigned(s.displayFrequencyEstimated),sample,(unsigned long long)s.generation,
+      (unsigned long long)s.geometry.native.sequence,stack.captured,stack.gameFrames,stack.rvas);
+  }
+  void auxiliaryUnsupported(unsigned interfaceId,unsigned slot)noexcept override {
+    nativeTracePrintf("auxiliary_unavailable,interface=%u,slot=%u\n",interfaceId,slot);
+  }
+  void notePropertyQuery(unsigned slot,vr::TrackedDeviceIndex_t index,vr::ETrackedDeviceProperty property,
+                         vr::ETrackedPropertyError error) noexcept override {
+    const auto stack=edvr::captureGameCallStack();
+    nativeTracePrintf("property_query,slot=%u,index=%u,property=%u,error=%u,game_frames=%u,game_rvas=%s\n",
+      slot,index,unsigned(property),unsigned(error),stack.gameFrames,stack.rvas);
+  }
+  void noteHiddenMesh(unsigned eye,uint64_t revision,uint32_t triangles,const char* reason,uint32_t dropped) noexcept override {
+    const auto stack=edvr::captureGameCallStack();
+    nativeTracePrintf("hidden_mesh_query,eye=%u,revision=%llu,triangles=%u,dropped=%u,reason=%s,game_frames=%u,game_rvas=%s\n",
+      eye,(unsigned long long)revision,triangles,dropped,reason,stack.gameFrames,stack.rvas);
+  }
+  vr::EVRInitError start(uint32_t token,const std::atomic<bool>& cancelled,RuntimeInterfaces& out) override {
+    ++starts;
+    // Constructed on the service thread with its thread-bound frame/device
+    // members. The diagnostic owns its device; game-device use remains separate.
+    if(GetCurrentThreadId()!=ownerThread||starts!=1)return vr::VRInitError_Init_Internal;
+    if(cancelled.load(std::memory_order_acquire))return vr::VRInitError_Init_ShuttingDown;
+    if(startupOptions.frameThreadPriorityHigh)raiseCurrentThreadPriority("owner");
+    pacer.priorityHigh=startupOptions.frameThreadPriorityHigh;
+    frameEndOverlapEnabled=startupOptions.frameEndOverlap;
+    nativeTracePrintf("native_frame_end_overlap,enabled=%u,reason=%s\n",
+      unsigned(frameEndOverlapEnabled&&startupOptions.separateDevice),
+      !frameEndOverlapEnabled?"config":!startupOptions.separateDevice?"borrowed_device":"config");
+    const auto openBegan=StepClock::now();
+    if(!open(startupOptions))return vr::VRInitError_Init_Internal;
+    const double openMs=stepMs(openBegan);
+    startInstruments();
+    const auto loopBegan=StepClock::now();
+    const auto began=GetTickCount64();
+    while(!cancelled.load(std::memory_order_acquire)&&GetTickCount64()-began<15000) {
+      auto operation=gate.tryEnter(runtimeGeneration);
+      if(!operation)return vr::VRInitError_Init_Internal;
+      XrResult r=state.pollEvents();
+      if(r!=XR_SUCCESS||state.terminal()||!changes.active())return vr::VRInitError_Init_Internal;
+      if(state.lifecycle()==Lifecycle::Stopping)return vr::VRInitError_Init_ShuttingDown;
+      if(state.lifecycle()==Lifecycle::Ready&&!state.running()) {
+        r=state.startIfReady();if(r!=XR_SUCCESS)return vr::VRInitError_Init_Internal;
+        refreshDisplayFrequency("session_started");
+        refreshHiddenMasks("session_started");
+        applyPerformanceSettings();
+        enablePerformanceMetrics();
+      }
+      if(!state.running()){operation=RuntimeGate::Lease{};Sleep(10);continue;}
+      operation=RuntimeGate::Lease{};
+      CompositorRead initial{};
+      if(waitPoses(compositorGeneration,initial)!=vr::VRCompositorError_None)return vr::VRInitError_Init_Internal;
+      ++startupFrames;
+      if(closeDiagnosticFrame()!=XR_SUCCESS)return vr::VRInitError_Init_Internal;
+      const auto snapshot=read();
+      if(snapshot.geometryValid) {
+        // No game interface or loading callback has escaped Init yet. Finish
+        // this zero-layer frame before replacing its space, then obtain a new
+        // geometry snapshot before publishing the interfaces to Elite.
+        if(launchCentre.pending()) {
+          bool refresh=false;
+          const auto centreBegan=StepClock::now();
+          const bool centred=centreAtStartup(refresh);
+          startupSteps.centre+=stepMs(centreBegan);
+          if(!centred)return vr::VRInitError_Init_Internal;
+          if(refresh)continue;
+        }
+        out={&systemInterface,&compositorInterface,&chaperoneInterface,&displayInterface};
+        nativeTracePrintf("runtime_startup,token=%u,zero_layer_frames=%llu,geometry_sequence=%llu,prior_submits=%llu,geometry_ready=1\n",
+          token,(unsigned long long)startupFrames,(unsigned long long)snapshot.geometry.native.sequence,(unsigned long long)compositorSubmits);
+        // The same startup by step. `frames` is the poll/begin/zero-layer
+        // loop less the centre's own brackets; `swapchains` and `shaders`
+        // are the stereo renderer's two measured stretches and `other` is
+        // the measured remainder of open() -- the stereo renderer's
+        // contexts and states, the capture textures, the provider acquires.
+        // The fields sum to total; nothing here is a share of a whole.
+        {
+          const double loopMs=stepMs(loopBegan);
+          startupSteps.frames=loopMs-startupSteps.centre;
+          const double swapchains=stereo.initSwapchainMs(),shaders=stereo.initShaderMs();
+          const double other=startupSteps.other+(startupSteps.stereo-swapchains-shaders);
+          nativeTracePrintf("runtime_startup_steps,instance=%.1f,device=%.1f,session=%.1f,swapchains=%.1f,shaders=%.1f,other=%.1f,frames=%.1f,centre=%.1f,total=%.1f,units=wall_ms\n",
+            startupSteps.instance,startupSteps.device,startupSteps.session,swapchains,shaders,other,
+            startupSteps.frames,startupSteps.centre,openMs+loopMs);
+          // The stereo renderer's four shaders are created from bytecode the build compiled (stereo_shader_source.h); the runtime carries no compiler. `stretch_ms` is the
+          // `shaders` stretch above: the four creations and the blit's buffer and sampler. (Until 2026-10-01 it held four D3DCompile calls, ~443 ms in the 2026-09-15 flight.)
+          nativeTracePrintf("runtime_shaders,source=precompiled,created=4,stretch_ms=%.2f,units=wall_ms\n",shaders);
+        }
+        return vr::VRInitError_None;
+      }
+    }
+    nativeTracePuts("error,runtime_startup_cancelled_or_deadline");
+    return cancelled.load(std::memory_order_acquire)?vr::VRInitError_Init_ShuttingDown:vr::VRInitError_Init_HmdNotFound;
+  }
+  bool stop()noexcept override {
+    clearOverlapHandoff();
+    ++stops;
+    nativeTracePrintf("service_shutdown_entry,source=runtime_backend,stops=%llu\n",(unsigned long long)stops);
+    if(runtimeGeneration)gate.requestStop(runtimeGeneration);
+    geometry.retire(geometryGeneration);poses.retire(compositorGeneration);resetEvents.retire(geometryGeneration);
+    if(GetCurrentThreadId()!=ownerThread)return false;
+    return close();
+  }
+  void pumpEvents() {
+    if(GetCurrentThreadId()!=ownerThread||!runtimeGeneration||serviceFailed)return;
+    // owner_service.h's idle callback: fires when the queue is empty, but
+    // also on its own 5 ms cadence right after ANY request finishes, whether
+    // or not another one is already queued behind it. A frame_end_overlap
+    // finish can be that next item -- pair fully captured, frame still open,
+    // waiting to be composed and ended -- so if this ran now, the STOPPING
+    // branch below would drain() the boundary and end that pair empty out
+    // from under the pending finish. Skip this whole tick and let the next
+    // one (or the finish job itself) proceed once pendingFrameEndFinish clears.
+    if(pendingFrameEndFinish)return;
+    auto operation=gate.tryEnter(runtimeGeneration);
+    if(!operation){publishFatalFailure(XR_ERROR_RUNTIME_FAILURE,"service_operation");return;}
+    ++eventPumps;
+    XrResult r=state.pollEvents();
+    publishedPumps.store(eventPumps,std::memory_order_release);
+    const auto lifecycle=state.lifecycle();
+    traceLifecycle(lifecycle);
+    poses.focus(compositorGeneration,true,state.running()&&!state.terminal()&&lifecycle==Lifecycle::Focused);
+    if(XR_FAILED(r)||state.terminal()||!changes.active()) {
+      // A retired reference-change policy is also a fatal service state: the
+      // game must observe the same quit path instead of rendering forever on
+      // invalidated publications.
+      publishFatalFailure(r,"service_poll_terminal");
+      return;
+    }
+    if(lifecycle==Lifecycle::Ready&&!state.running()) {
+      // Ended sessions may receive READY again. Keep publication generations
+      // and provider tables alive, but clear cached poses/history and advance
+      // the frame sequence above every sequence already admitted this session.
+      if(!prepareSessionRestart()) {
+        publishFatalFailure(XR_ERROR_LIMIT_REACHED,"service_session_rebind");return;
+      }
+      r=state.startIfReady();
+      if(XR_FAILED(r)||state.terminal()) {
+        publishFatalFailure(r,"service_session_restart");return;
+      }
+      serviceStopped=false;
+      refreshDisplayFrequency("session_restarted");
+      refreshHiddenMasks("session_restarted");
+      nativeTracePrintf("service_session_restart,generation=%llu\n",(unsigned long long)compositorGeneration);
+      return;
+    }
+    if(lifecycle==Lifecycle::Stopping&&state.running()) {
+      r=boundary.drain();
+      if(r==XR_SUCCESS)r=state.stop();
+      serviceStopped=r==XR_SUCCESS;
+      if(XR_FAILED(r)||state.terminal())publishFatalFailure(r,"service_xrEndSession");
+      else {
+        geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);dropPoseFrame();
+        menu.invalidate();invalidateEyeTreatments();timingInvalidate();
+      }
+      result("service_xrEndSession",r);
+      return;
+    }
+    // Idle service work is CPU/XR only. A loading projection needs an explicit
+    // render-caller boundary; it cannot borrow the game context between calls.
+    if(visibilityMaskDirty&&state.running())refreshHiddenMasks("runtime_event");
+  }
+  void loadingBoundary() {
+    if(GetCurrentThreadId()!=ownerThread||serviceStopped||serviceFailed)return;
+    auto operation=gate.tryEnter(runtimeGeneration);
+    if(!operation){publishFatalFailure(XR_ERROR_RUNTIME_FAILURE,"loading_operation");return;}
+    if(loading.work(state.frameOpen())==LoadingWork::None||!state.running())return;
+    const auto r=loadingStep();
+    if(r!=XR_SUCCESS)publishFatalFailure(boundary.failed()?boundary.lastResult():r,"loading_frame");
+  }
+  // The frame the game now holds, for Elite's "now" pose calls to be located at and measured against, and the pose-gap instrument's
+  // window: counted here, written here, so the lines come from the one thread that already logs per frame.
+  template<class Sink>
+  void publishPoseGap(XrTime displayTime,XrDuration period,const XrPosef& headPose,bool poseValid,XrSpaceVelocityFlags velocityFlags,
+                      const XrVector3f& angularVelocity,uint64_t nowMs,Sink&& sink) {
+    latestPoseFrame.valid=true;latestPoseFrame.displayTime=displayTime;latestPoseFrame.period=period;
+    latestPoseFrame.orientationKnown=poseValid;
+    latestPoseFrame.orientation[0]=headPose.orientation.x;latestPoseFrame.orientation[1]=headPose.orientation.y;
+    latestPoseFrame.orientation[2]=headPose.orientation.z;latestPoseFrame.orientation[3]=headPose.orientation.w;
+    latestPoseFrame.speedKnown=(velocityFlags&XR_SPACE_VELOCITY_ANGULAR_VALID_BIT)!=0;
+    latestPoseFrame.speedDegPerSec=latestPoseFrame.speedKnown?angularSpeedDegrees(angularVelocity.x,angularVelocity.y,angularVelocity.z):0.0;
+    poseGap.noteWait();
+    poseGap.flushIfDue(nowMs,sink);
+  }
+  // Whether the runtime's hidden-area mesh may be handed to the game this frame.
+  // It is cut for the runtime's own frustum and Elite reads it once, so a trim,
+  // which changes that frustum, withholds it -- keyed on what is
+  // configured, not on the stage, because there is no second read.
+  bool hiddenMeshCompatible() const {
+    return !featureFrameKnown||(featureFrame.trimOuterDeg<=0&&
+      featureFrame.trimNasalDeg<=0&&featureFrame.trimVerticalDeg<=0);
+  }
+  XrResult loadingStep() {
+    if(GetCurrentThreadId()!=ownerThread||state.frameOpen())return XR_ERROR_CALL_ORDER_INVALID;
+    const auto work=loading.work(false);
+    if(work==LoadingWork::None)return XR_ERROR_CALL_ORDER_INVALID;
+    auto r=boundary.waitAndBegin();
+    if(r!=XR_SUCCESS&&r!=XR_FRAME_DISCARDED&&r!=XR_SESSION_LOSS_PENDING)return r;
+    auto frame=boundary.frame();
+    if(!applyFrameSequence(frame)){boundary.clear();return XR_ERROR_LIMIT_REACHED;}
+    if(state.terminal())return boundary.clear();
+    if(work==LoadingWork::Empty) {
+      r=boundary.clear();
+      if(r==XR_SUCCESS){loading.emptyCompleted();++loadingClears;++loadingFrames;++loadingEmpty;}
+      return r;
+    }
+    uint64_t applied=0;
+    if(!changes.advance(frame.predictedDisplayTime,applied))return XR_ERROR_TIME_INVALID;
+    if(applied){referenceChanges+=applied;if(!invalidateOrigin())return XR_ERROR_LIMIT_REACHED;}
+    frameSpace=seated.space();
+    GeometryInput located{};
+    r=locateGeometry({api.locateViews,api.locateSpace},binding,frame,geometryGeneration,sizes,located,nullptr,frameSpace);
+    if(r!=XR_SUCCESS){if(!XR_FAILED(r))boundary.clear();return r;}
+    GeometrySnapshot snapshot{};
+    const bool valid=makeGeometrySnapshot(located,snapshot);
+    if(valid)noteProjectionMode(located);
+    frameViews[0]=located.views[0];frameViews[1]=located.views[1];
+    frameContentViews[0]=frameViews[0];frameContentViews[1]=frameViews[1];
+    framePlacement[0]={};framePlacement[1]={};
+    boundary.setGeometryReady(valid);
+    r=boundary.background();
+    if(r==XR_SUCCESS){++loadingFrames;if(valid&&frame.shouldRender)++loadingLayers;else ++loadingEmpty;}
+    return r;
+  }
+  static void referenceEvent(const XrEventDataBuffer& buffer,void* context) noexcept {
+    auto& host=*static_cast<NativeRuntimeHost*>(context);
+    if(GetCurrentThreadId()!=host.ownerThread)return;
+    if(buffer.type==XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR&&host.visibilityMaskExtension) {
+      const auto& event=*reinterpret_cast<const XrEventDataVisibilityMaskChangedKHR*>(&buffer);
+      if(event.session==host.session&&event.viewConfigurationType==XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO&&event.viewIndex<2) {
+        host.visibilityMaskDirty=true;
+        host.geometry.hiddenMasks(host.geometryGeneration,nullptr);
+      }
+    }
+    if(buffer.type==XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB && host.displayRefreshExtension) {
+      const auto& event=*reinterpret_cast<const XrEventDataDisplayRefreshRateChangedFB*>(&buffer);
+      host.publishDisplayFrequency(event.toDisplayRefreshRate,false,"runtime_event",XR_SUCCESS);
+    }
+    if(buffer.type==XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
+      const auto& event=*reinterpret_cast<const XrEventDataReferenceSpaceChangePending*>(&buffer);
+      if(!host.changes.note(event))nativeTracePuts("error,reference_change_policy");
+    }
+    if(buffer.type==XR_TYPE_EVENT_DATA_PERF_SETTINGS_EXT && host.perfSettingsExtension) {
+      const auto& event=*reinterpret_cast<const XrEventDataPerfSettingsEXT*>(&buffer);
+      host.notePerfSettingsEvent(event);
+    }
+  }
+  static double elapsedMs(const LARGE_INTEGER& begin,const LARGE_INTEGER& end) {
+    LARGE_INTEGER frequency{}; if(!QueryPerformanceFrequency(&frequency)||!frequency.QuadPart)return std::numeric_limits<double>::quiet_NaN();
+    return 1000.0*double(end.QuadPart-begin.QuadPart)/double(frequency.QuadPart);
+  }
+  void timingInvalidate() {
+    deviceTiming.invalidate(); // CPU-only; never admits context work here.
+    if(timing.acquired()) timing.invalidate();
+    timingFrameActive=false; timingApplicationOpen.store(false,std::memory_order_release); timingApplicationSequence.store(0,std::memory_order_release); timingSequence=0; timingFrameMask=0; timingGpuBegun[0]=timingGpuBegun[1]=false;
+  }
+  void timingRetire() {
+    timingFrameActive=false; timingApplicationOpen.store(false,std::memory_order_release); timingApplicationSequence.store(0,std::memory_order_release); timingSequence=0; timingFrameMask=0; timingGpuBegun[0]=timingGpuBegun[1]=false;
+  }
+  // Only called from actual capture/submit work on the separate XR owner.
+  void pollDeviceTiming() {
+    if(!deviceTimingReady)return;
+    EdvrNativeDeviceGpuSample samples[8]{};
+    const auto count=deviceTiming.poll(samples,8);
+    for(unsigned i=0;i<count;++i)timing.publishDeviceGpu(samples[i]);
+  }
+  void timingResetFrame(uint64_t sequence) {
+    timingFrame={sizeof(timingFrame),EDVR_NATIVE_TIMING_VERSION_5};   // callerWork absent until the publish fills it
+    timingFrame.sequence=sequence;
+    const double missing=std::numeric_limits<double>::quiet_NaN();
+    for(double& value:timingFrame.submitMs)value=missing;
+    for(double& value:timingFrame.temporalMs)value=missing;
+    for(double& value:timingFrame.menuMs)value=missing;
+    for(double& value:timingFrame.transferMs)value=missing;
+    timingFrame.composeMs=missing;
+    // The base the consumer flags throttling against: the display_frequency
+    // publication (runtime refresh rate, or the compatibility 90 Hz default).
+    const auto system=read();
+    timingFrame.baseDisplayHz=system.displayFrequencyAvailable&&std::isfinite(system.displayFrequency)&&system.displayFrequency>0?system.displayFrequency:0;
+  }
+  bool invalidateOrigin(const char* reason="reference_change") {
+    menu.invalidate(); // CPU only, including callers without a producer boundary.
+    invalidateEyeTreatments();
+    features.invalidate();previousPairValid=false;
+    timingInvalidate();
+    geometry.invalidate(geometryGeneration);frameGeometryAvailable=false;
+    dropPoseFrame();
+    if(originInvalidationNotes++<16)nativeTracePrintf("geometry_invalidated,reason=%s,generation=%llu,recenters=%llu,reference_changes=%llu\n",
+      reason,(unsigned long long)geometryGeneration,(unsigned long long)recenters,(unsigned long long)referenceChanges);
+    return poses.resetOrigin(compositorGeneration);
+  }
+  CompositorRead compositorRead() const override {return poses.read();}
+  void compositorUnsupported(unsigned slot) noexcept override {nativeTracePrintf("compositor_unavailable,slot=%u\n",slot);}
+  vr::EVRCompositorError waitPoses(uint64_t generation,CompositorRead& out) override {
+    clearOverlapHandoff();
+    if(!service.isOwner()) {
+      const uint64_t callerBegan=frameCycleUs();const DWORD caller=GetCurrentThreadId();
+      const auto postRequest=frameCycles.postRequest();
+      EdvrNativePresentTrace postTrace{};
+      const bool havePostTrace=postRequest.sequence&&
+        timing.readPresentTrace(postRequest.beginUs,callerBegan,postTrace);
+      frameCycles.enabled();const uint64_t cycleToken=frameCycles.waitCallerBegin(callerBegan,caller,havePostTrace?&postTrace:nullptr);
+      if(!frameCycleEnabledNoted.exchange(true)){
+        nativeTracePrintf("native_frame_cycle,enabled=1,boundary=host_wait_return_to_next_host_wait_return,units=wall_ms,nested=1,gpu=0\n");
+        nativeTracePrintf("native_post_submit,enabled=1,present_provider=%u,boundary=second_submit_return_to_next_wait_entry,units=wall_ms,gpu=0,handoff_nested=1\n",unsigned(timing.presentTraceAvailable()));
+      }
+      auto result=vr::VRCompositorError_InvalidTexture;
+      FrameCycleStats::Shape cycleShape{};
+      const bool dispatched=service.invoke([&]{
+        frameCycleWaitToken.store(cycleToken,std::memory_order_release);frameCycles.waitOwnerBegin(cycleToken,frameCycleUs());
+        result=waitPoses(generation,out);
+        cycleShape.generation=runtimeGeneration;cycleShape.featureEpoch=featureChanges;cycleShape.pacing=unsigned(lastPacing);
+        cycleShape.shouldRender=boundary.frame().shouldRender?1u:0u;
+        cycleShape.sceneReady=featureFrameKnown&&featureFrame.sceneReady?1u:0u;
+        for(unsigned i=0;i<2;++i){const auto submitted=fovTrim.lastSubmitted(i);cycleShape.width[i]=submitted.width;cycleShape.height[i]=submitted.height;cycleShape.outputWidth[i]=sizes[i].recommendedImageRectWidth;cycleShape.outputHeight[i]=sizes[i].recommendedImageRectHeight;}
+        frameCycles.waitOwnerEnd(cycleToken,frameCycleUs());frameCycleWaitToken.store(0,std::memory_order_release);
+      });
+      // Start after the route returns so the dispatch/rendezvous is outside
+      // the application interval. Direct owner calls have no producer-side
+      // route return and therefore do not claim this interval.
+      uint64_t producerSequence=0;
+      if(dispatched&&result==vr::VRCompositorError_None&&out.sequence) {
+        const auto sequence=timingApplicationSequence.load(std::memory_order_acquire);
+        timing.producerResume(sequence);
+        const bool opened=timing.applicationSegment(sequence,true);
+        timingApplicationOpen.store(opened,std::memory_order_release);
+        timingApplicationSequence.store(opened?sequence:0,std::memory_order_release);
+        producerSequence=opened?sequence:0;
+      }
+      // waitCallerEnd is where a finished 30 s window becomes its report (makeReport's 28 sorts), so its
+      // duration is the build half of the report's cost; reportFrameCycles below adds the write half.
+      const uint64_t cycleEndBegan=frameCycleUs();
+      frameCycles.waitCallerEnd(cycleToken,out.sequence,cycleEndBegan,GetTickCount64(),caller,cycleShape,
+        dispatched&&result==vr::VRCompositorError_None&&out.sequence,producerSequence);
+      const uint64_t cycleEndUs=frameCycleUs()-cycleEndBegan;
+      FrameCycleStats::Completed completed{};
+      if(frameCycles.takeCompleted(completed)) {
+        EdvrNativeCpuCompletedFramePayloadV2 payload{};auto& event=payload.frame;
+        event.timestampUs=completed.nextWaitReturnUs;payload.gpuSequence=completed.producerSequence;
+        event.sequence=completed.sequence;event.generation=completed.generation;event.featureEpoch=completed.featureEpoch;
+        event.waitReturnUs=completed.waitReturnUs;event.secondSubmitReturnUs=completed.secondSubmitReturnUs;
+        event.nextWaitEntryUs=completed.nextWaitEntryUs;event.nextWaitReturnUs=completed.nextWaitReturnUs;
+        event.presentBeginUs=completed.presentBeginUs;event.presentEndUs=completed.presentEndUs;
+        event.callerThread=completed.callerThread;event.nextWaitThread=completed.nextWaitThread;
+        event.status=completed.postUnavailable;event.sceneReady=completed.sceneReady;
+        if(completed.postValid)event.flags|=EdvrNativeCpuPostValid;
+        if(completed.singlePresent)event.flags|=EdvrNativeCpuSinglePresent;
+        NativeCpuTrace::get().emitFrame(payload);
+        noteLongCycle(completed);
+      }
+      frameCycleSequence.store(dispatched&&result==vr::VRCompositorError_None?out.sequence:0,std::memory_order_release);
+      reportFrameCycles(cycleEndUs);
+      return dispatched?result:vr::VRCompositorError_InvalidTexture;
+    }
+    if(!frameCycleWaitToken.load(std::memory_order_acquire))frameCycles.noteDirectOwner();
+    if(GetCurrentThreadId()!=ownerThread)return vr::VRCompositorError_InvalidTexture;
+    auto operation=gate.tryEnter(runtimeGeneration);
+    if(!operation||generation!=compositorGeneration||!poses.read().connected||!state.running()||state.terminal()||serviceStopped||serviceFailed||!seated.space()||!changes.active())
+      return vr::VRCompositorError_InvalidTexture;
+    // No frame of ours is open yet at this point in WaitGetPoses, which is
+    // exactly what applyIntroRecentre requires. Cleared only on success, so
+    // a poll that cannot act this frame (a frame happens to be open, or the
+    // reset-event queue has no room) sees the request again next frame.
+    // Returning here rather than falling through: the reset just bumped the
+    // generation the rest of this function would otherwise read, the same
+    // reason centreAtStartup's own caller restarts its loop instead of
+    // continuing past one. Sacrificing this one frame's pose update is the
+    // same outcome every other early return below already takes.
+    // frame_flag's layout check (frame_flag.h): the first frame the d3d11
+    // half is seen on another layout, said once. The channel is refused by
+    // then, which is what the recentre poll below reads.
+    {
+      static bool frameFlagMismatchTraced=false;
+      if(!frameFlagMismatchTraced) {
+        if(const uint32_t theirs=frameFlagPeerMismatch()) {
+          frameFlagMismatchTraced=true;
+          nativeTracePrintf("frame_flag_mismatch,ours=%u,theirs=%u,channel=refused,reason=d3d11 half from another EDVR build\n",
+            kFrameFlagVersion,theirs);
+        }
+      }
+    }
+    if(introRecentreRequested()) {
+      if(applyIntroRecentre())clearIntroRecentreRequest();
+      return vr::VRCompositorError_InvalidTexture;
+    }
+    timingRetire(); // Provider waitBegin rejects an unfinished previous pair.
+    timingSequence=timing.waitBegin(); timingFrameActive=timingSequence!=0;
+    timingApplicationSequence.store(timingSequence,std::memory_order_release);
+    timingResetFrame(timingSequence);
+    if(submitStats.advance(GetTickCount64()))nativeTracePrintf("native_submit_window_begin,window=%llu,warmup=%u,samples=%u,interval_ms=30000\n",
+      (unsigned long long)submitStats.window(),SubmissionStats::warmup,SubmissionStats::capacity);
+    submitSample={};transferWall={};submitSample.sequence=timingSequence;submitCallbacksBegin=graphicsCalls.calls;
+    if(temporalFrameEyes!=3)invalidateEyeTreatments(); // prior incomplete pair never reached the runtime
+    temporalFrameEyes=0;std::memset(frameTangentShift,0,sizeof(frameTangentShift));
+    frameWithheld=false;frameDecisionReady=false;
+    ++compositorWaits;frameGeometryAvailable=false;frameGeometry={};
+    auto fail=[&](XrResult error){timingInvalidate();lastCompositorResult=error;poses.invalidate(generation);menu.invalidate();invalidateEyeTreatments();
+      geometry.invalidate(geometryGeneration);dropPoseFrame();
+      if(boundary.failed())publishFatalFailure(boundary.lastResult(),"pose_boundary");
+      if(poseFailures++<8)nativeTracePrintf("pose_failure,result=%d,sequence=%llu\n",int(error),(unsigned long long)boundary.frame().sequence);
+      return vr::VRCompositorError_InvalidTexture;};
+    const FramePacing pacing=featureFrameKnown&&featureFrame.deferredPacing?FramePacing::Deferred:FramePacing::Runtime;
+    if(pacing!=lastPacing){lastPacing=pacing;++pacingChanges;++featureChanges;
+      nativeTracePrintf("native_pacing,mode=%s,sequence=%llu,changes=%llu\n",
+        pacing==FramePacing::Deferred?"deferred":"runtime",
+        (unsigned long long)(frameSequenceOffset+compositorWaits),(unsigned long long)pacingChanges);}
+    lastCompositorResult=boundary.waitAndBegin(pacing);
+    if(lastCompositorResult!=XR_SUCCESS&&lastCompositorResult!=XR_FRAME_DISCARDED&&lastCompositorResult!=XR_SESSION_LOSS_PENDING)
+      return fail(lastCompositorResult);
+    loading.sceneWaited();
+    Frame frame=boundary.frame();
+    if(!applyFrameSequence(frame)){boundary.clear();return fail(XR_ERROR_LIMIT_REACHED);}
+    if(state.terminal()){boundary.clear();return fail(XR_SESSION_LOSS_PENDING);}
+    uint64_t applied=0;
+    if(!changes.advance(frame.predictedDisplayTime,applied)){boundary.clear();return fail(XR_ERROR_TIME_INVALID);}
+    if(applied){referenceChanges+=applied;if(!invalidateOrigin()){boundary.clear();return fail(XR_ERROR_LIMIT_REACHED);}}
+    frameSpace=seated.space();
+    GeometryInput located{};XrSpaceVelocity velocity{XR_TYPE_SPACE_VELOCITY};
+    auto r=locateGeometry({api.locateViews,api.locateSpace},binding,frame,geometryGeneration,sizes,located,&velocity,frameSpace);
+    if(r!=XR_SUCCESS){if(!XR_FAILED(r))boundary.clear();return fail(r);}
+    TimedHeadPose render{},game{};
+    if(!makeHeadPose(located.headPose,located.headFlags,velocity.velocityFlags,velocity.linearVelocity,velocity.angularVelocity,true,render))
+      {boundary.clear();return fail(XR_ERROR_POSE_INVALID);}
+    render.time=frame.predictedDisplayTime;game.pose=invalidHeadPose(true);
+    XrTime gameplayTime=0;
+    if(nextPredictionTime(frame.predictedDisplayTime,frame.predictedDisplayPeriod,gameplayTime)&&
+       !changes.crosses(frame.predictedDisplayTime,gameplayTime)) {
+      r=locateHeadAt(api.locateSpace,view,frameSpace,gameplayTime,true,game);
+      // A runtime may not locate an additional frame ahead. Leave that
+      // independent gameplay prediction invalid rather than reusing render.
+      if(r!=XR_SUCCESS&&r!=XR_ERROR_TIME_INVALID) {if(!XR_FAILED(r))boundary.clear();return fail(r);}
+    }
+    if(game.pose.bPoseIsValid)++validGamePoses;
+    GeometrySnapshot temporalGeometry{};
+    const bool locatedValid=makeGeometrySnapshot(located,temporalGeometry);
+    if(locatedValid)noteProjectionMode(located);
+    auto gameGeometry=located;
+    // This is the geometry exposed to Elite and the temporal provider. Keep
+    // runtime `located` dimensions raw for XR accounting, but make every
+    // game-facing path even so Elite's quality multiplier cannot truncate an
+    // odd width or height below NGX's legal input range.
+    for(unsigned eye=0;eye<2;++eye) {
+      const auto dims=gameFacingDimensions({located.width[eye],located.height[eye]});
+      gameGeometry.width[eye]=dims.width;gameGeometry.height[eye]=dims.height;
+    }
+    if(features.acquired()) {
+      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_5};
+      if(features.begin(located,poses.read().originGeneration,next)!=S_OK) {
+        boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);
+      }
+      if(featureFrameKnown&&next.resubmitEnabled!=featureFrame.resubmitEnabled)previousPairValid=false;
+      featureFrame=next;featureFrameKnown=true;
+      if(locatedValid) {
+        NativeTrimSettings settings{};
+        settings.trimOuterDeg=featureFrame.trimOuterDeg;settings.trimNasalDeg=featureFrame.trimNasalDeg;
+        settings.trimVerticalDeg=featureFrame.trimVerticalDeg;
+        NativeTrimFrustum frusta[2]{};NativeTrimDimensions dimensions[2]{};
+        for(unsigned e=0;e<2;++e) {
+          const auto& raw=temporalGeometry.raw[e];frusta[e]={raw.left,raw.right,raw.top,raw.bottom};
+          dimensions[e]={located.width[e],located.height[e]};
+        }
+        // Sampled before the frame's size is published (geometry.recommend
+        // below), so 0 means no read the game made could have seen anything
+        // but what this frame tells it.
+        const uint64_t asks=sizeAsks.load(std::memory_order_relaxed);
+        fovTrim.beginFrame(settings,frusta,dimensions,poses.read().originGeneration,asks!=0);
+        if(fovTrim.changed()) {
+          invalidateEyeTreatments();menu.invalidate();previousPairValid=false;++featureChanges;
+          // Eye 0's, as they stand at this stage: the frustum the treated
+          // image will hold and where it sits in the eye's full field, which
+          // are the runtime's own and identity until the stage goes live. A
+          // clamped trim shows as an applied value below the one asked for.
+          // route= says why the stage was entered as it was (NativeTrimRoute):
+          // first_ask for a trim told before the game read any size (asked=0),
+          // promoted by the first pair; rebuild for a trim told after an
+          // earlier ask, landed by the game's rebuild.
+          const auto target=fovTrim.contentFrustum(0);const auto place=fovTrim.placementBounds(0);
+          nativeTracePrintf("native_trim,stage=%u,factors=%.5f/%.5f,recommended=%ux%u,trim=%.1f/%.1f/%.1f,"
+            "target=%.4f/%.4f/%.4f/%.4f,placement=%.4f/%.4f/%.4f/%.4f,route=%s,scene=%u,asked=%llu\n",unsigned(fovTrim.stage()),
+            fovTrim.factorWidth(),fovTrim.factorHeight(),fovTrim.recommended(0).width,fovTrim.recommended(0).height,
+            fovTrim.appliedOuterDeg(0),fovTrim.appliedNasalDeg(0),fovTrim.appliedVerticalDeg(0),
+            target.left,target.right,target.down,target.up,place.left,place.top,place.right,place.bottom,
+            nativeTrimRouteName(fovTrim.route()),unsigned(featureFrame.sceneReady!=0),(unsigned long long)asks);
+          // Once per entry into Adopting: what the trim decided about the
+          // game's own rebuild (NativeFovTrim::startNudge and the
+          // NativeTrimNudge names). `told` is the height the game reads from
+          // here on, `asked` the height before any nudge, `floor` the lowest
+          // height told since the rebuild last seen. `started` expects
+          // stage=3 within seconds without an apply; `taller` and `capped`
+          // expect it only at the next apply.
+          if(fovTrim.nudge()!=NativeTrimNudge::None)
+            nativeTracePrintf("native_trim_nudge,%s,told=%u,asked=%u,floor=%u\n",nativeTrimNudgeName(fovTrim.nudge()),
+              fovTrim.recommended(0).height,fovTrim.trueRecommended(0).height,fovTrim.nudgeFloor());
+        }
+        // While a rebuild is awaited, say what is waited for, so a stall
+        // reads as numbers rather than as a stage 2 line with no stage 3
+        // after it (flight 3, 2026-09-16): once as the baseline is seeded,
+        // then every two seconds. `for` is the ask that baseline was
+        // rendered for, `ask` what the game is told now, `last` the newest
+        // complete pair. A first ask has no baseline (0x0): its `for` is the
+        // ask itself, and it waits only for the game's first complete pair.
+        const bool firstAsk=fovTrim.route()==NativeTrimRoute::FirstAsk;
+        if(fovTrim.stage()==NativeTrimStage::Adopting&&(fovTrim.baselineReady()||firstAsk)&&(fovTrim.adoptingFrames()%180u)==2u) {
+          const auto b=fovTrim.baseline(0),f=firstAsk?fovTrim.treatedFor(0):fovTrim.baselineAsk(0),a=fovTrim.recommended(0),l=fovTrim.lastSubmitted(0);
+          nativeTracePrintf("native_trim_adopting,frames=%u,route=%s,baseline=%ux%u,for=%ux%u,ask=%ux%u,last=%ux%u\n",
+            fovTrim.adoptingFrames(),nativeTrimRouteName(fovTrim.route()),b.width,b.height,f.width,f.height,a.width,a.height,l.width,l.height);
+        }
+        for(unsigned e=0;e<2;++e) {
+          const auto frustum=fovTrim.gameFrustum(e);const auto dims=fovTrim.recommended(e);
+          gameGeometry.views[e].fov={std::atan(frustum.left),std::atan(frustum.right),std::atan(frustum.up),std::atan(frustum.down)};
+          gameGeometry.width[e]=dims.width;gameGeometry.height[e]=dims.height;
+        }
+      }
+    }
+    if(locatedValid) geometry.recommend(gameGeometry.width,gameGeometry.height);
+    // The temporal pass is sized by what the frame it is handed was rendered
+    // for, which while a rebuild is awaited is the previous ask and not the
+    // one the game is told now (NativeFovTrim::treatedFor). The frusta are
+    // the game-facing ones either way.
+    auto treatedGeometry=gameGeometry;
+    if(features.acquired()&&locatedValid) for(unsigned e=0;e<2;++e) {
+      const auto dims=fovTrim.treatedFor(e);
+      treatedGeometry.width[e]=dims.width;treatedGeometry.height[e]=dims.height;
+    }
+    for(unsigned eye=0;eye<2;++eye) {
+      const auto& fov=gameGeometry.views[eye].fov;
+      timingFrame.gameFov[eye][0]=fov.angleLeft;
+      timingFrame.gameFov[eye][1]=fov.angleRight;
+      timingFrame.gameFov[eye][2]=fov.angleUp;
+      timingFrame.gameFov[eye][3]=fov.angleDown;
+      timingFrame.outputWidth[eye]=sizes[eye].recommendedImageRectWidth;
+      timingFrame.outputHeight[eye]=sizes[eye].recommendedImageRectHeight;
+    }
+    timingFrame.featureEpoch=featureChanges;
+    if(temporal.acquired()&&locatedValid&&frame.shouldRender) {
+      // ...and what the game is told now, which leads that during an
+      // adoption: fix.ui_quality's surfaces size a panel the game makes for
+      // the new ask by it (the P3-1 lag, flight 2026-09-23 13:23).
+      // ...and the true display frustum (the located views, before a
+      // trim), which the engine-side panel sizing takes k_out from.
+      const auto begun=temporal.begin(treatedGeometry,poses.read().originGeneration,frameTangentShift,&render.pose.mDeviceToAbsoluteTracking,
+          (std::max)(gameGeometry.width[0],gameGeometry.width[1]),(std::max)(gameGeometry.height[0],gameGeometry.height[1]),
+          std::fabs(temporalGeometry.raw[0].top),std::fabs(temporalGeometry.raw[0].bottom));
+      if(begun!=S_OK){boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);}
+      ++temporalFrames;
+    } else invalidateEyeTreatments();
+    if(fss.acquired()&&locatedValid&&frame.shouldRender && fss.begin(gameGeometry,poses.read().originGeneration)!=S_OK) {
+      boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);
+    }
+    // The hidden-area mesh is withheld on a trim (hiddenMeshCompatible).
+    const bool geometryValid=geometry.publish(gameGeometry,false,false,frameTangentShift,hiddenMeshCompatible());
+    boundary.setGeometryReady(geometryValid);
+    frameGeometry=located;frameGeometryAvailable=true;
+    frameViews[0]=located.views[0];frameViews[1]=located.views[1];
+    frameContentViews[0]=frameViews[0];frameContentViews[1]=frameViews[1];
+    framePlacement[0]={};framePlacement[1]={};
+    auto snapshot=poses.read();snapshot.sequence=frame.sequence;snapshot.renderTime=render.time;snapshot.gameTime=game.time;
+    snapshot.renderPose=render.pose;snapshot.gamePose=game.pose;snapshot.posesAvailable=true;
+    if(!poses.publish(snapshot)){boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);}
+    out=snapshot;lastCompositorResult=XR_SUCCESS;
+    publishPoseGap(frame.predictedDisplayTime,frame.predictedDisplayPeriod,located.headPose,render.pose.bPoseIsValid,
+      velocity.velocityFlags,velocity.angularVelocity,GetTickCount64(),[](const char* gapLine){nativeTracePuts(gapLine);});
+    if(timingFrameActive && FAILED(timing.waitEnd(timingSequence,true,static_cast<int64_t>(frame.predictedDisplayPeriod))))
+      timingInvalidate();
+    if(timingFrameActive) {
+      const bool enabled=timing.gpuEnabled();
+      if(deviceTimingReady)deviceTiming.beginFrame(timingSequence,enabled);
+      else {
+        EdvrNativeDeviceGpuSample missing{sizeof(missing),EDVR_NATIVE_TIMING_VERSION_3,
+          timingSequence,GetTickCount64(),enabled ? uint32_t(separateGraphics()?EdvrNativeGpuQueryFailure:EdvrNativeGpuNotSeparate) : uint32_t(EdvrNativeGpuDisabled)};
+        timing.publishDeviceGpu(missing);
+      }
+    }
+    return vr::VRCompositorError_None;
+  }
+  bool setTrackingSpace(uint64_t generation,vr::ETrackingUniverseOrigin origin) override {
+    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=setTrackingSpace(generation,origin);})&&result;}
+    if(GetCurrentThreadId()!=ownerThread)return false;
+    auto operation=gate.tryEnter(runtimeGeneration);
+    // Standing/raw need their own supported runtime spaces and remain absent.
+    return operation&&generation==compositorGeneration&&seated.space()&&origin==vr::TrackingUniverseSeated;
+  }
+  vr::EVRCompositorError submitEye(uint64_t generation,vr::EVREye eye,const vr::Texture_t* texture,
+      const vr::VRTextureBounds_t* bounds,vr::EVRSubmitFlags flags) override {
+    const auto admission=clearOverlapHandoff();
+    return submitEyeAdmitted(generation,eye,texture,bounds,flags,admission);
+  }
+  // Carry the caller's admission through the synchronous owner rendezvous.
+  // A later admission may invalidate it before this owner job publishes its
+  // pair; that must not resurrect stale asynchronous handoff eligibility.
+  vr::EVRCompositorError submitEyeAdmitted(uint64_t generation,vr::EVREye eye,const vr::Texture_t* texture,
+      const vr::VRTextureBounds_t* bounds,vr::EVRSubmitFlags flags,uint64_t admission) {
+    if(!service.isOwner()) {
+      auto result=vr::VRCompositorError_InvalidTexture;
+      const auto sequence=timingApplicationSequence.load(std::memory_order_acquire);
+      const auto cycleSequence=frameCycleSequence.load(std::memory_order_acquire);
+      const DWORD caller=GetCurrentThreadId();const uint64_t cycleToken=frameCycles.submitCallerBegin(unsigned(eye),frameCycleUs(),caller);
+      const bool queued=renderRoute.present&&!renderRoute.present->isRenderThread();
+      bool expected=false;
+      if(submitRouteNoted[queued?1:0].compare_exchange_strong(expected,true,std::memory_order_relaxed))
+        nativeTracePrintf("native_submit_route,path=%s,caller_thread=%lu,render_thread=%lu,owner_thread=%lu,sequence=%llu,eye=%u\n",
+          queued?"present_queue":"direct",(unsigned long)GetCurrentThreadId(),
+          (unsigned long)graphicsCalls.thread,(unsigned long)ownerThread,
+          (unsigned long long)sequence,unsigned(eye));
+      if(timingApplicationOpen.exchange(false,std::memory_order_acq_rel) && sequence)
+        timing.applicationSegment(sequence,false);
+      if(sequence) timing.producerPause(sequence);
+      RenderRoute::Park cyclePark;
+      const bool dispatched=renderRoute.invoke([&]{frameCycleSubmitToken.store(cycleToken,std::memory_order_release);frameCycles.submitOwnerBegin(cycleToken,frameCycleUs());result=submitEyeAdmitted(generation,eye,texture,bounds,flags,admission);frameCycles.submitOwnerEnd(cycleToken,frameCycleUs());frameCycleSubmitToken.store(0,std::memory_order_release);},&cyclePark);
+      // Admission after the route returns excludes the rendezvous itself and
+      // permits the next between-eye game interval. A completed pair retires
+      // the timing context, in which case this callback correctly returns 0.
+      if(dispatched&&result==vr::VRCompositorError_None&&sequence)
+        timing.producerResume(sequence);
+      if(dispatched&&result==vr::VRCompositorError_None&&sequence&&
+          timing.applicationSegment(sequence,true))
+        timingApplicationOpen.store(true,std::memory_order_release);
+      frameCycles.submitCallerEnd(cycleToken,unsigned(eye),cycleSequence,frameCycleUs(),caller,
+        cyclePark.measured?cyclePark.ms:0.0,dispatched&&result==vr::VRCompositorError_None&&cyclePark.measured);
+      return dispatched?result:vr::VRCompositorError_InvalidTexture;
+    }
+    if(!frameCycleSubmitToken.load(std::memory_order_acquire))frameCycles.noteDirectOwner();
+    if(GetCurrentThreadId()!=ownerThread)return vr::VRCompositorError_InvalidTexture;
+    auto operation=gate.tryEnter(runtimeGeneration);
+    if(!operation||generation!=compositorGeneration||serviceStopped||serviceFailed)return vr::VRCompositorError_InvalidTexture;
+    // Close the initial game interval at Submit admission, before any
+    // producer rendezvous. The treatment callback below opens its own
+    // interval so its native GPU/CPU work remains part of application time.
+    if(timingFrameActive && timingApplicationOpen.exchange(false,std::memory_order_acq_rel)) {
+      if(!timing.applicationSegment(timingSequence,false)) timingInvalidate();
+    }
+    if(eye!=vr::Eye_Left&&eye!=vr::Eye_Right) {
+      timingInvalidate();invalidateEyeTreatments();
+      const auto rejected=boundary.submit(eye,texture,bounds,flags);
+      lastCompositorResult=boundary.lastResult();return rejected;
+    }
+    LARGE_INTEGER submitBegin{},submitEnd{}; const auto submitClock=QueryPerformanceCounter(&submitBegin);
+    bool pairReady=false;
+    // Not `captured`: that name is the EyeCapture member (C4458).
+    const auto published=boundary.publish(eye,texture,bounds,flags,pairReady);
+    // frame_end_overlap scope: separate device (finishPair below then needs
+    // no graphicsCalls rendezvous with Elite's thread -- capture() above,
+    // reached from publish(), already ran any producer copy that did),
+    // runtime pacing (turbo already overlaps its own wait against the game,
+    // so there is nothing left to gain here), the switch, and no earlier
+    // pair's finish still outstanding.
+    const bool eligible=published==vr::VRCompositorError_None&&pairReady&&
+      separateGraphics()&&!boundary.turbo()&&frameEndOverlapEnabled&&!pendingFrameEndFinish;
+    const bool deferred=eligible&&service.submit([this]{finishPendingFrameEnd();});
+    if(deferred){
+      pendingFrameEndFinish=true;pendingFrameEndEye=eye;pendingFrameEndSequence=timingSequence;++frameEndOverlapCount;
+      std::lock_guard<std::mutex> lock(overlapHandoffMutex);
+      if(overlapHandoffEpoch==admission) {
+        overlapHandoffGeneration=generation;
+        overlapPresentEpoch=admission;overlapPresentAvailable=true;
+      }
+    }
+    const bool pairSync=!deferred&&published==vr::VRCompositorError_None&&pairReady;
+    if(pairSync)++frameEndSyncCount;
+    const auto r=deferred?vr::VRCompositorError_None:
+      (pairSync?(boundary.finishPair()==XR_SUCCESS?vr::VRCompositorError_None:vr::VRCompositorError_InvalidTexture):published);
+    const auto submitClockEnd=QueryPerformanceCounter(&submitEnd);
+    if(submitClock&&submitClockEnd) timingFrame.submitMs[unsigned(eye)]=elapsedMs(submitBegin,submitEnd);
+    lastCompositorResult=boundary.lastResult();
+    if(deferred) {
+      // The producer copy is already done and Elite's texture is free to
+      // reuse: give its still-parked thread the GPU marker now, then let it
+      // go. Only then publish this pair's CPU timing record and retire the
+      // caller-visible context (publishSubmitTimingCpu) -- dispatchGpuEyeMarker
+      // needs c->published still false on the D3D11 side, exactly like the
+      // synchronous call below. The caller's post-Submit producerResume/
+      // applicationSegment(seq,true), reached once this returns, then finds
+      // the retired context precisely as a synchronous pair already leaves
+      // it, long before finishPair -- consumer copy, compose, xrEndFrame --
+      // ever runs. finishSubmitTail and the finishPair()-dependent half of
+      // the timing publish run later, from finishPendingFrameEnd, after
+      // finishPair completes on the owner, overlapping Elite's own
+      // post-Submit work instead of blocking it.
+      dispatchGpuEyeMarker(eye,texture,true);
+      if(timingFrameActive) {
+        timingFrame.composeMs=lastOverlappedComposeMs; // this pair's own compose() has not run yet
+        pendingFrameEndPublished=publishSubmitTimingCpu(eye);
+      } else pendingFrameEndPublished=false;
+      return vr::VRCompositorError_None;
+    }
+    dispatchGpuEyeMarker(eye,texture,r==vr::VRCompositorError_None);
+    return finishSubmitTail(eye,r);
+  }
+  // Queued via service.submit from inside the second Submit's owner body
+  // above when frame_end_overlap applies. owner_service.h's FIFO guarantees
+  // this runs before the next WaitGetPoses or Submit invoke, so nothing else
+  // touches the shared capture/eye-capture state, submitSample, transferWall
+  // or timingFrame for this frame before it does. Also run inline by close()
+  // when OwnerService::stop() cancelled this job before it got to run.
+  void finishPendingFrameEnd() {
+    if(!pendingFrameEndFinish)return;
+    auto operation=gate.tryEnter(runtimeGeneration);
+    if(!operation) {
+      // Cannot happen today -- gate.requestStop() is only called from
+      // close(), which only runs once OwnerService::stop() has fully
+      // drained this queue, so this job and that call can never be
+      // concurrent -- but if it ever did, leave pendingFrameEndFinish set:
+      // close() is what would have stopped the gate, and its own inline
+      // fallback below finishes this pair before it drains the boundary.
+      return;
+    }
+    const auto eye=pendingFrameEndEye;const auto sequence=pendingFrameEndSequence;
+    const auto published=pendingFrameEndPublished;pendingFrameEndFinish=false;
+    frameCycles.frameEndOwnerBegin(frameCycleUs());
+    finishPendingFrameEndBody(eye,sequence,published);
+    frameCycles.frameEndOwnerEnd(frameCycleUs());
+  }
+  // The finishPair()-side half of an overlapped pair's finish: shared by the
+  // queued job above and close()'s inline fallback for one OwnerService::
+  // stop() cancelled before it ran. eye/sequence/published are what submitEye
+  // captured at deferral -- published because publishSubmitTimingCpu already
+  // ran there (or didn't) and this must not publish the CPU record again.
+  void finishPendingFrameEndBody(vr::EVREye eye,uint64_t sequence,bool published) {
+    finishingOverlapped=true; // endFrameReturned names the path
+    const auto r=boundary.finishPair()==XR_SUCCESS?vr::VRCompositorError_None:vr::VRCompositorError_InvalidTexture;
+    finishingOverlapped=false;
+    lastCompositorResult=boundary.lastResult();
+    finishSubmitTail(eye,r);
+    if(published&&r==vr::VRCompositorError_None)publishSubmitTimingDevice(sequence);
+    lastOverlappedComposeMs=timingFrame.composeMs;
+  }
+  // Needs Elite's own texture pointer and its thread still parked in this
+  // rendezvous, so both submitEye (synchronous or about to defer) call this
+  // themselves before a deferral could let that thread go; finishSubmitTail
+  // below, which the deferred path only reaches later, never does.
+  void dispatchGpuEyeMarker(vr::EVREye eye,const vr::Texture_t* texture,bool ok) {
+    if(!ok||!timingGpuBegun[unsigned(eye)])return;
+    const bool markerDispatched=graphicsCalls.invoke([&]{
+      Microsoft::WRL::ComPtr<ID3D11Texture2D> source;
+      ID3D11Texture2D* raw=nullptr;
+      if(texture&&texture->handle&&SUCCEEDED(static_cast<IUnknown*>(texture->handle)->QueryInterface(IID_PPV_ARGS(&source))))
+        raw=source.Get();
+      if(raw) timing.gpuEye(timingSequence,unsigned(eye),false,true,raw);
+    });
+    if(!markerDispatched) timingInvalidate();
+    timingGpuBegun[unsigned(eye)]=false;
+  }
+  // Shared by the synchronous pair-finish in submitEye and the deferred one
+  // in finishPendingFrameEnd: everything that depends on finishPair()'s
+  // outcome (or, for a non-pairing eye, just on the capture result already
+  // in r).
+  vr::EVRCompositorError finishSubmitTail(vr::EVREye eye,vr::EVRCompositorError r) {
+    if(boundary.failed()) {
+      ++frameEndFailureCount;
+      publishFatalFailure(boundary.lastResult(),"submit_boundary");
+      return vr::VRCompositorError_InvalidTexture;
+    }
+    if(r!=vr::VRCompositorError_None){invalidateEyeTreatments();timingInvalidate();}
+    if(r==vr::VRCompositorError_None&&timingFrameActive)publishSubmitTimingIfComplete(eye);
+    if(r==vr::VRCompositorError_None){++compositorSubmits;if(loading.sceneSubmitted())++loadingToScene;}
+    return r;
+  }
+  // frame_end_overlap's early half of publishSubmitTimingIfComplete below,
+  // called from submitEye itself before a deferred Submit returns to Elite:
+  // caller work and timing.publishCpu(timingFrame), then -- only once that
+  // succeeds -- the same caller-visible retire timingRetire() performs
+  // (timingFrameActive, timingApplicationOpen, timingApplicationSequence,
+  // timingGpuBegun), so the caller's post-Submit producerResume/
+  // applicationSegment(seq,true) find it retired exactly as a synchronous
+  // pair already leaves it (native_timing.cpp's c->published gate) -- long
+  // before finishPair() has even run. timingSequence and timingFrameMask are
+  // left alone: publishSubmitTimingDevice below still needs both once
+  // finishPair()'s results exist. Device timing (which needs those results)
+  // and the submitSample fill/add/report stay there too, which is why this
+  // does not simply call publishSubmitTimingIfComplete early -- that
+  // function polls device timing before publishing CPU, an order only the
+  // synchronous path, where finishPair() has already run, can keep.
+  bool publishSubmitTimingCpu(vr::EVREye eye) {
+    timingFrameMask|=1u<<unsigned(eye); if(timingFrameMask!=3)return false;
+    double callerWork=0;
+    timingFrame.callerWorkValid=frameCycles.callerWorkForCurrent(callerWork)?1u:0u;
+    timingFrame.callerWorkMs=timingFrame.callerWorkValid?callerWork:0.0;
+    if(FAILED(timing.publishCpu(timingFrame))){timingInvalidate();return false;}
+    timingFrameActive=false;timingApplicationOpen.store(false,std::memory_order_release);
+    timingApplicationSequence.store(0,std::memory_order_release);timingGpuBegun[0]=timingGpuBegun[1]=false;
+    return true;
+  }
+  // The finishPair()-dependent half publishSubmitTimingCpu above defers:
+  // device GPU spans for the consumer copy and compose finishPair() just
+  // ran, the submitSample fields it measured, and the final owner-side clear
+  // of timingSequence/timingFrameMask that function left in place. sequence
+  // is pendingFrameEndSequence, captured at deferral. Called only when
+  // publishSubmitTimingCpu returned true for this pair (finishPendingFrameEndBody).
+  void publishSubmitTimingDevice(uint64_t sequence) {
+    deviceTiming.acceptFrame(sequence);
+    pollDeviceTiming();
+    submitSample.submitMs=timingFrame.submitMs[0]+timingFrame.submitMs[1];
+    submitSample.callbacks=graphicsCalls.calls-submitCallbacksBegin;
+    submitSample.featureEpoch=featureChanges;
+    submitSample.producerDispatchMs=transferWall.producerDispatch;
+    submitSample.producerAcquireMs=transferWall.producerAcquire;
+    submitSample.producerFlushMs=transferWall.producerFlush;
+    submitSample.consumerAcquireMs=transferWall.consumerAcquire;
+    submitSample.consumerFlushMs=transferWall.consumerFlush;
+    submitSample.endFrameMs=boundary.endFrameMs();
+    submitSample.waitFrameMs=boundary.waitBlockMs();
+    submitSample.pacerBlockMs=boundary.pacerBlockMs();
+    submitSample.deferred=boundary.turbo()?1u:0u;
+    if(!frameWithheld&&submitStats.add(submitSample))reportSubmitStats();
+    timingSequence=0;timingFrameMask=0;
+  }
+  void publishSubmitTimingIfComplete(vr::EVREye eye) {
+    timingFrameMask|=1u<<unsigned(eye); if(timingFrameMask!=3)return;
+    deviceTiming.acceptFrame(timingSequence);
+    pollDeviceTiming();
+    // Version 5: the caller work of the cycle this frame's own pose wait
+    // closed (frame_cycle_stats.h, callerWorkForCurrent). The caller thread
+    // completed it at this frame's wait return, before either submit. With
+    // frame_end_overlap the caller may already be past this Submit, but its
+    // next wait cannot close the cycle until this job has run (the owner
+    // queue is FIFO). Absent when that cycle failed.
+    double callerWork=0;
+    timingFrame.callerWorkValid=frameCycles.callerWorkForCurrent(callerWork)?1u:0u;
+    timingFrame.callerWorkMs=timingFrame.callerWorkValid?callerWork:0.0;
+    if(FAILED(timing.publishCpu(timingFrame))) timingInvalidate(); else {
+      submitSample.submitMs=timingFrame.submitMs[0]+timingFrame.submitMs[1];
+      submitSample.callbacks=graphicsCalls.calls-submitCallbacksBegin;
+      submitSample.featureEpoch=featureChanges;
+      submitSample.producerDispatchMs=transferWall.producerDispatch;
+      submitSample.producerAcquireMs=transferWall.producerAcquire;
+      submitSample.producerFlushMs=transferWall.producerFlush;
+      submitSample.consumerAcquireMs=transferWall.consumerAcquire;
+      submitSample.consumerFlushMs=transferWall.consumerFlush;
+      submitSample.endFrameMs=boundary.endFrameMs();
+      submitSample.waitFrameMs=boundary.waitBlockMs();
+      submitSample.pacerBlockMs=boundary.pacerBlockMs();
+      submitSample.deferred=boundary.turbo()?1u:0u;
+      if(!frameWithheld&&submitStats.add(submitSample))reportSubmitStats();
+      timingRetire();
+    }
+  }
+  bool clearSubmitted(uint64_t generation) override {
+    clearOverlapHandoff();
+    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=clearSubmitted(generation);})&&result;}
+    if(GetCurrentThreadId()!=ownerThread)return false;
+    auto operation=gate.tryEnter(runtimeGeneration);
+    if(!operation||generation!=compositorGeneration||serviceStopped||serviceFailed)return false;
+    const auto cleared=boundary.clear();
+    if(cleared!=XR_SUCCESS) {
+      if(boundary.failed())publishFatalFailure(boundary.lastResult(),"clear_boundary");
+      return false;
+    }
+    invalidateEyeTreatments();timingInvalidate();temporalFrameEyes=0;previousPairValid=false;
+    loading.sceneCleared();
+    return loading.visible(); // no default historical grid when no override exists
+  }
+  vr::EVRCompositorError setSkybox(uint64_t generation,const vr::Texture_t* textures,uint32_t count) override {
+    if(!service.isOwner()) {
+      clearOverlapHandoff();
+      auto result=vr::VRCompositorError_InvalidTexture;
+      return renderRoute.invoke([&]{result=setSkybox(generation,textures,count);})?result:vr::VRCompositorError_InvalidTexture;
+    }
+    clearOverlapHandoff();
+    auto operation=gate.tryEnter(runtimeGeneration);
+    if(!operation||generation!=compositorGeneration||!poses.read().connected||!state.running()||state.terminal()||serviceStopped||serviceFailed)
+      return vr::VRCompositorError_InvalidTexture;
+    auto result=vr::VRCompositorError_InvalidTexture;
+    if(separateGraphics())result=skybox.set(textures,count);
+    else if(!graphicsCalls.invoke([&]{result=skybox.set(textures,count);}))return vr::VRCompositorError_InvalidTexture;
+    if(result==vr::VRCompositorError_None){++skyboxSets;loading.overrideSet();}
+    return result;
+  }
+  bool clearSkybox(uint64_t generation) override {
+    clearOverlapHandoff();
+    if(!service.isOwner()){bool result=false;return service.invoke([&]{result=clearSkybox(generation);})&&result;}
+    auto operation=gate.tryEnter(runtimeGeneration);
+    if(!operation||generation!=compositorGeneration||!poses.read().connected)return false;
+    skybox.clear();loading.overrideCleared();++skyboxClears;return true;
+  }
+  bool handoff(uint64_t generation) override {
+    if(!service.isOwner()) {
+      const auto began=frameCycleUs();const auto sequence=frameCycleSequence.load(std::memory_order_acquire);
+      const DWORD caller=GetCurrentThreadId();bool asynchronous=false,accepted=false;
+      {
+        std::lock_guard<std::mutex> lock(overlapHandoffMutex);
+        if(generation&&overlapHandoffGeneration==generation) {
+          overlapHandoffGeneration=0;asynchronous=true;
+          // The host outlives the service's active requests, cancellation and
+          // owner finalizer. Capture values only; the deferred finish is ahead
+          // of this request in the same FIFO, and still has close()'s fallback.
+          try {
+            accepted=service.submit([this,generation]{
+              if(!handoff(generation))overlapHandoffInvalid.fetch_add(1,std::memory_order_relaxed);
+            },[this](bool success){
+              (success?overlapHandoffCompleted:overlapHandoffCancelledOrFailed).fetch_add(1,std::memory_order_relaxed);
+            });
+          } catch(...) {}
+          (accepted?overlapHandoffAccepted:overlapHandoffRejected).fetch_add(1,std::memory_order_relaxed);
+        }
+      }
+      if(asynchronous) {
+        frameCycles.noteHandoff(began,frameCycleUs(),sequence,caller,accepted);
+        return accepted;
+      }
+      bool result=false;
+      const bool dispatched=service.invoke([&]{result=handoff(generation);});
+      frameCycles.noteHandoff(began,frameCycleUs(),sequence,caller,dispatched&&result);
+      return dispatched&&result;
+    }
+    if(GetCurrentThreadId()!=ownerThread)return false;
+    auto operation=gate.tryEnter(runtimeGeneration);
+    if(!operation||generation!=compositorGeneration||state.frameOpen())return false;
+    ++compositorHandoffs;return true; // the completed pair already ended its frame
+  }
+  XrResult closeDiagnosticFrame() {
+    if(GetCurrentThreadId()!=ownerThread)return XR_ERROR_CALL_ORDER_INVALID;
+    auto operation=gate.tryEnter(runtimeGeneration);
+    return operation?boundary.clear():XR_ERROR_CALL_ORDER_INVALID;
+  }
+  // Runs as one synchronous producer callback. The XR owner is waiting and
+  // retains this frame's state throughout; no operation here dispatches back
+  // to that owner or invokes SharedTextureTransfer's producer rendezvous.
+  vr::EVRCompositorError treatEyeTemporal(vr::EVREye eye,ID3D11Texture2D* submittedSource,
+      const vr::VRTextureBounds_t* bounds,Microsoft::WRL::ComPtr<ID3D11Texture2D>& temporalOutput,
+      vr::VRTextureBounds_t& temporalBounds) {
+    const auto sequence=activeFrameSequence;
+    if(temporal.acquired()) {
+      LARGE_INTEGER began{},ended{}; const auto clock=QueryPerformanceCounter(&began);
+      const auto treatment=temporal.treat(sequence,unsigned(eye),submittedSource,bounds,temporalOutput,temporalBounds);
+      const auto clockEnd=QueryPerformanceCounter(&ended);
+      if(clock&&clockEnd) timingFrame.temporalMs[unsigned(eye)]=elapsedMs(began,ended);
+      if(FAILED(treatment)) {
+        invalidateEyeTreatments();timingInvalidate();
+        if(temporalFailures++<8)nativeTracePrintf("native_temporal,failure=%08lx,callback=1\n",(unsigned long)treatment);
+        return vr::VRCompositorError_InvalidTexture;
+      }
+      if(temporalOutput&&temporalEyes[unsigned(eye)]++==0)
+        nativeTracePrintf("native_temporal,first_treated_eye=%u,sequence=%llu\n",unsigned(eye),(unsigned long long)sequence);
+    }
+    return vr::VRCompositorError_None;
+  }
+  vr::EVRCompositorError finishCapturedEye(vr::EVREye eye,ID3D11Texture2D* submittedSource,
+      const vr::VRTextureBounds_t* bounds,const Microsoft::WRL::ComPtr<ID3D11Texture2D>& temporalOutput,
+      const vr::VRTextureBounds_t& temporalBounds,const Microsoft::WRL::ComPtr<ID3D11Texture2D>& healed,
+      Microsoft::WRL::ComPtr<ID3D11Texture2D>& selected,vr::VRTextureBounds_t& selectedBounds,bool& menuTreated) {
+    const auto sequence=activeFrameSequence;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> treated;
+    vr::VRTextureBounds_t treatedBounds{};
+    // A refused temporal pass leaves jitter in the raw pixels. Preserve their
+    // actual projection for this frame: in the menu and the XR layer both,
+    // or, where a trim has moved the two apart, in the menu and the
+    // placement, which is the one that still describes those pixels.
+    frameViews[unsigned(eye)]=frameGeometry.views[unsigned(eye)];
+    frameContentViews[unsigned(eye)]=frameViews[unsigned(eye)];
+    framePlacement[unsigned(eye)]={};
+    // A trim narrows what the image holds without narrowing what the layer
+    // advertises: the Oculus runtime ignores a narrower layer FOV, so the
+    // pixels are placed inside the full field instead and the rest is black.
+    // Without a trim the image still holds the located projection, and both
+    // the menu and the layer keep the located angles untouched.
+    const bool placed=fovTrim.stage()==NativeTrimStage::Live&&fovTrim.trimmed();
+    if(placed) {
+      const auto content=fovTrim.contentFrustum(unsigned(eye));
+      frameContentViews[unsigned(eye)].fov={std::atan(content.left),std::atan(content.right),
+        std::atan(content.up),std::atan(content.down)};
+      const auto place=fovTrim.placementBounds(unsigned(eye));
+      framePlacement[unsigned(eye)]={place.left,place.top,place.right,place.bottom};
+    }
+    if(!temporalOutput) {
+      const auto* shift=frameTangentShift[unsigned(eye)];
+      if(shift[0]!=0||shift[1]!=0) {
+        auto& fov=frameContentViews[unsigned(eye)].fov;
+        RawFov raw{};
+        if(!fovToRaw(fov,raw)){timingInvalidate();return vr::VRCompositorError_InvalidTexture;}
+        fov={std::atan(raw.left+shift[0]),std::atan(raw.right+shift[0]),
+             std::atan(raw.bottom+shift[1]),std::atan(raw.top+shift[1])};
+        if(placed) {
+          // The jittered pixels sit a fraction of the eye's own span away
+          // from where the placement put them. Move the rectangle, so the
+          // layer keeps the located field it is composed against.
+          const auto full=fovTrim.runtimeFrustum(unsigned(eye));
+          const float du=full.right-full.left,dv=full.up-full.down;
+          if(!(du>1e-4f&&dv>1e-4f)){timingInvalidate();return vr::VRCompositorError_InvalidTexture;}
+          auto& place=framePlacement[unsigned(eye)];
+          place.left+=shift[0]/du;place.right+=shift[0]/du;
+          place.top-=shift[1]/dv;place.bottom-=shift[1]/dv;
+        } else frameViews[unsigned(eye)].fov=fov;
+      }
+    }
+    // A healed texture is the heal's own copy of its source's region, so its
+    // bounds are the whole of it whichever stage it came from.
+    const vr::VRTextureBounds_t fullBounds{0,0,1,1};
+    auto* sharpenSource=healed?healed.Get():temporalOutput?temporalOutput.Get():submittedSource;
+    const auto* sharpenBounds=healed?&fullBounds:temporalOutput?&temporalBounds:bounds;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> sharpenOutput;
+    vr::VRTextureBounds_t sharpenedBounds{};
+    if(sharpen.acquired()) {
+      const auto treatment=sharpen.treat(sequence,unsigned(eye),sharpenSource,sharpenBounds,sharpenOutput,sharpenedBounds);
+      if(FAILED(treatment)) {
+        invalidateEyeTreatments();timingInvalidate();
+        if(sharpenFailures++<8)nativeTracePrintf("native_sharpen,failure=%08lx,callback=1\n",(unsigned long)treatment);
+        return vr::VRCompositorError_InvalidTexture;
+      }
+      if(sharpenOutput&&sharpenEyes[unsigned(eye)]++==0)
+        nativeTracePrintf("native_sharpen,first_treated_eye=%u,sequence=%llu\n",unsigned(eye),(unsigned long long)sequence);
+    }
+    // Keep the actual temporal projection regardless of a later spatial pass.
+    // Menu text is composited after sharpening, as in the OpenVR submission.
+    auto* menuSource=sharpenOutput?sharpenOutput.Get():sharpenSource;
+    const auto* menuBounds=sharpenOutput?&sharpenedBounds:sharpenBounds;
+    if(menu.acquired()) {
+      HRESULT treatment=E_FAIL;
+      LARGE_INTEGER menuBegan{},menuEnded{}; const auto menuClock=QueryPerformanceCounter(&menuBegan);
+      // The menu is drawn into the treated image, so it is placed by what
+      // that image holds, not by what the layer will advertise.
+      auto menuGeometry=frameGeometry;
+      menuGeometry.views[0]=frameContentViews[0];menuGeometry.views[1]=frameContentViews[1];
+      if(frameGeometryAvailable&&menu.publish(menuGeometry,poses.read().originGeneration)==S_OK) {
+        ++menuPosePublications;
+        treatment=menu.treat(unsigned(eye),menuSource,menuBounds,treated,treatedBounds);
+      }
+      const auto menuClockEnd=QueryPerformanceCounter(&menuEnded);
+      if(menuClock&&menuClockEnd) timingFrame.menuMs[unsigned(eye)]=elapsedMs(menuBegan,menuEnded);
+      if(FAILED(treatment)) {
+        menu.invalidate();invalidateEyeTreatments();timingInvalidate();
+        if(menuFailures++<8)nativeTracePrintf("native_menu,failure=%08lx,callback=1\n",(unsigned long)treatment);
+        return vr::VRCompositorError_InvalidTexture;
+      }
+    }
+    selected=treated?treated.Get():menuSource;
+    selectedBounds=treated?treatedBounds:menuBounds?*menuBounds:fullBounds;
+    menuTreated=treated!=nullptr;
+    submitSample.treatments[unsigned(eye)]=(healed?1u:0u)|(temporalOutput?2u:0u)|
+      (sharpenOutput?4u:0u)|(menuTreated?8u:0u);
+    timingFrame.treatments[unsigned(eye)]=submitSample.treatments[unsigned(eye)];
+    return vr::VRCompositorError_None;
+  }
+  vr::EVRCompositorError capture(vr::EVREye eye,const vr::Texture_t* texture,
+      const vr::VRTextureBounds_t* bounds,vr::EVRSubmitFlags flags,bool copyPixels) override {
+    auto r=vr::VRCompositorError_InvalidTexture;
+    // Validate the game submission before any menu GPU work or capture mutation.
+    if(separateGraphics())r=captured.capture(eye,texture,bounds,flags,false);
+    else if(!graphicsCalls.invoke([&]{r=captured.capture(eye,texture,bounds,flags,false);})) { timingInvalidate(); return r; }
+    if(r!=vr::VRCompositorError_None)return r;
+    if(!copyPixels){menu.invalidate();invalidateEyeTreatments();timingInvalidate();return r;}
+    const auto sequence=activeFrameSequence;
+    if(features.acquired()&&!frameDecisionReady) {
+      if(features.latch(sequence,featureDecision)!=S_OK)return vr::VRCompositorError_InvalidTexture;
+      frameDecisionReady=true;frameWithheld=featureDecision.withhold!=0;
+      if(frameWithheld){fss.invalidate();++withheldPairs;}
+    }
+    // Dimensions describe Elite's ROI before upscaling.
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> submittedSource;
+    if(FAILED(static_cast<IUnknown*>(texture->handle)->QueryInterface(IID_PPV_ARGS(&submittedSource))))
+      return vr::VRCompositorError_InvalidTexture;
+    D3D11_TEXTURE2D_DESC submittedDesc{};submittedSource->GetDesc(&submittedDesc);
+    const auto submittedWidth=uint32_t(std::lround(submittedDesc.Width*(bounds?std::fabs(bounds->uMax-bounds->uMin):1.f)));
+    const auto submittedHeight=uint32_t(std::lround(submittedDesc.Height*(bounds?std::fabs(bounds->vMax-bounds->vMin):1.f)));
+    fovTrim.noteSubmittedSize(unsigned(eye),submittedWidth,submittedHeight);
+    submitSample.width[unsigned(eye)]=submittedWidth;submitSample.height[unsigned(eye)]=submittedHeight;
+    timingFrame.inputWidth[unsigned(eye)]=submittedWidth;
+    timingFrame.inputHeight[unsigned(eye)]=submittedHeight;
+    if(frameWithheld) {
+      if(FAILED(temporal.skip(sequence,unsigned(eye),featureDecision.jumpOnly!=0,featureDecision.verdict)))
+        return vr::VRCompositorError_InvalidTexture;
+      temporalFrameEyes|=1u<<unsigned(eye);
+      return vr::VRCompositorError_None;
+    }
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> treated,temporalOutput,deferredTreated;
+    vr::VRTextureBounds_t treatedBounds{},temporalBounds{},deferredTreatedBounds{};
+    bool menuTreated=false,deferred=false,finishingDeferred=false,deferredMenuTreated=false;
+    LARGE_INTEGER dispatchBegan{},dispatchEnded{},workBegan{},workEnded{};
+    // Always measured, not only while the 30 s window has room (submitStats.full()): the end-frame episodes and the
+    // slow-regime detector attribute every frame's time (end_frame_episodes.h, slow_regime.h), and a frame that
+    // is slow for a minute must not be the frame the window was full for. The window itself still takes only what
+    // it has room for. About 38 more QueryPerformanceCounter reads a frame across this path, about a microsecond.
+    const bool measure=counterNow(&dispatchBegan);
+    bool workClock=false;
+    const auto treat=[&]{
+      workClock=measure&&counterNow(&workBegan);
+      if(timingFrameActive && timing.gpuEye(timingSequence,unsigned(eye),true,false,submittedSource.Get()))
+        timingGpuBegun[unsigned(eye)]=true;
+      const bool appOpened=timingFrameActive && timing.applicationSegment(timingSequence,true);
+      if(timingFrameActive && !appOpened) timingInvalidate();
+      // Every exit from the stages below still closes the brackets and the
+      // work clock; a return here would publish a zero work end as cost.
+      do {
+      r=treatEyeTemporal(eye,submittedSource.Get(),bounds,temporalOutput,temporalBounds);
+      if(r!=vr::VRCompositorError_None)break;
+      // The FSS heal reads the temporal OUTPUT, both eyes at the same stage, so
+      // a healed eye keeps its DLSS frame. Until 2026-09-16 it read the raw
+      // source and the healed eye skipped the temporal pass: for the 600-frame
+      // window after every zoom press the left eye reached the headset as the
+      // raw jittered input beside a DLSS right, seen on the Quest 3 as a
+      // slight double on the body while zooming (docs/fss-scanner.md). With no
+      // temporal output the heal reads the raw source as before, and the raw
+      // pixels keep their jittered FOV below.
+      // The heal is delivered by healPair with this frame's other eye; until
+      // 2026-09-16 the donor was the previous frame's right and the view's
+      // motion between frames put a displaced copy of the limb into the fill
+      // (docs/fss-scanner.md, entry 2026-09-16).
+      Microsoft::WRL::ComPtr<ID3D11Texture2D> healed,deferredHealed;bool deferNow=false;
+      if(fss.acquired()) {
+        auto* healSource=temporalOutput?temporalOutput.Get():submittedSource.Get();
+        const auto* healBounds=temporalOutput?&temporalBounds:bounds;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> unused;
+        const auto treatment=fss.treat(sequence,unsigned(eye),healSource,healBounds,unused);
+        if(FAILED(treatment)){invalidateEyeTreatments();timingInvalidate();r=vr::VRCompositorError_InvalidTexture;break;}
+        unsigned healedEye=0;Microsoft::WRL::ComPtr<ID3D11Texture2D> pairOutput;
+        const auto pair=fss.healPair(sequence,healedEye,pairOutput);
+        if(FAILED(pair)&&pair!=E_PENDING){invalidateEyeTreatments();timingInvalidate();r=vr::VRCompositorError_InvalidTexture;break;}
+        if(pair==E_PENDING)deferNow=!deferredEye.active;   // one deferral per frame; a second pending eye goes unhealed
+        else if(pair==S_OK) {
+          if(healedEye==unsigned(eye))healed=pairOutput;
+          else if(deferredEye.active&&deferredEye.sequence==sequence&&unsigned(deferredEye.eye)==healedEye)deferredHealed=pairOutput;
+          if((healed||deferredHealed)&&fssHealedEyes[healedEye]++==0)
+            nativeTracePrintf("native_fss,first_healed_eye=%u,sequence=%llu,source=%s,donor=pair\n",healedEye,(unsigned long long)sequence,temporalOutput?"temporal":"raw");
+        }
+      }
+      if(deferNow) {
+        deferredEye={};deferredEye.active=true;deferredEye.eye=eye;deferredEye.sequence=sequence;
+        deferredEye.submittedSource=submittedSource;deferredEye.temporalOutput=temporalOutput;
+        deferredEye.temporalBounds=temporalBounds;if(bounds){deferredEye.bounds=*bounds;deferredEye.hasBounds=true;}
+        deferredEye.flags=flags;deferredEye.colorSpace=texture->eColorSpace;
+        ++fssDeferredEyes;deferred=true;
+        // A heal frame's GPU brackets no longer describe one eye each: this
+        // eye's later stages run in the other eye's bracket. Drop the sample.
+        timingInvalidate();break;
+      }
+      if(deferredEye.active) {
+        if(deferredEye.sequence!=sequence)deferredEye={};
+        else {
+          r=finishCapturedEye(deferredEye.eye,deferredEye.submittedSource.Get(),deferredEye.hasBounds?&deferredEye.bounds:nullptr,
+            deferredEye.temporalOutput,deferredEye.temporalBounds,deferredHealed,deferredTreated,deferredTreatedBounds,deferredMenuTreated);
+          if(r!=vr::VRCompositorError_None){deferredEye={};break;}
+          finishingDeferred=true;timingInvalidate();
+        }
+      }
+      r=finishCapturedEye(eye,submittedSource.Get(),bounds,temporalOutput,temporalBounds,healed,treated,treatedBounds,menuTreated);
+      } while(false);
+      if(appOpened && !timing.applicationSegment(timingSequence,false)) timingInvalidate();
+      if(timingGpuBegun[unsigned(eye)] &&
+          !timing.producerSegmentEnd(timingSequence,unsigned(eye),submittedSource.Get()))
+        timingInvalidate();
+      workClock=workClock&&counterNow(&workEnded);
+    };
+    if(fss.acquired()||temporal.acquired()||sharpen.acquired()||menu.acquired()) {
+      if(!graphicsCalls.invoke(treat)) {
+        menu.invalidate();invalidateEyeTreatments();timingInvalidate();
+        return vr::VRCompositorError_InvalidTexture;
+      }
+    } else treat(); // standalone diagnostic: projection bookkeeping only
+    if(measure&&workClock&&counterNow(&dispatchEnded)) {
+      submitSample.dispatchMs+=elapsedMs(dispatchBegan,dispatchEnded);
+      submitSample.treatmentMs+=elapsedMs(workBegan,workEnded);
+    } else if(!submitStats.full())submitSample.sequence=0; // never publish missing clocks as zero-cost work
+    if(r!=vr::VRCompositorError_None)return r;
+    if(deferred)return r; // None: this eye's copy waits on the donor eye's submit
+    const vr::Texture_t processed{treated.Get(),vr::API_DirectX,texture->eColorSpace};
+    D3D11_TEXTURE2D_DESC outputDesc{};treated->GetDesc(&outputDesc);
+    submitSample.outputWidth[unsigned(eye)]=outputDesc.Width;
+    submitSample.outputHeight[unsigned(eye)]=outputDesc.Height;
+    const auto* selected=&processed;const auto* region=&treatedBounds;
+    // The selected output stays stable until its producer snapshot completes.
+    // Shared capture publishes an EDVR-owned slot now and consumes it only at
+    // pair composition. It must never be nested in the treatment callback.
+    LARGE_INTEGER transferBegan{},transferEnded{}; const auto transferClock=QueryPerformanceCounter(&transferBegan);
+    if(finishingDeferred) {
+      const vr::Texture_t deferredProcessed{deferredTreated.Get(),vr::API_DirectX,deferredEye.colorSpace};
+      D3D11_TEXTURE2D_DESC deferredOutputDesc{};deferredTreated->GetDesc(&deferredOutputDesc);
+      submitSample.outputWidth[unsigned(deferredEye.eye)]=deferredOutputDesc.Width;
+      submitSample.outputHeight[unsigned(deferredEye.eye)]=deferredOutputDesc.Height;
+      auto deferredR=vr::VRCompositorError_InvalidTexture;
+      if(separateGraphics()) {
+        pollDeviceTiming();
+        deferredR=captured.capture(deferredEye.eye,&deferredProcessed,&deferredTreatedBounds,deferredEye.flags,true,
+          nullptr,true,nullptr,&producerTiming);
+        r=captured.capture(eye,selected,region,flags,true,
+          nullptr,true,&transferWall,&producerTiming);
+      } else if(!graphicsCalls.invoke([&]{
+          deferredR=captured.capture(deferredEye.eye,&deferredProcessed,&deferredTreatedBounds,deferredEye.flags,true);
+          r=captured.capture(eye,selected,region,flags,true);
+        })) { timingInvalidate(); deferredEye={}; return vr::VRCompositorError_InvalidTexture; }
+      const auto transferClockEnd=QueryPerformanceCounter(&transferEnded);
+      if(transferClock&&transferClockEnd) timingFrame.transferMs[unsigned(eye)]=elapsedMs(transferBegan,transferEnded);
+      if(deferredR==vr::VRCompositorError_None&&deferredMenuTreated&&menuEyes[unsigned(deferredEye.eye)]++==0)
+        nativeTracePrintf("native_menu,first_captured_eye=%u\n",unsigned(deferredEye.eye));
+      if(deferredR==vr::VRCompositorError_None){++copiedEyes;temporalFrameEyes|=1u<<unsigned(deferredEye.eye);}
+      else { invalidateEyeTreatments(); timingInvalidate(); }
+      deferredEye={};
+      if(r==vr::VRCompositorError_None&&menuTreated&&menuEyes[unsigned(eye)]++==0)
+        nativeTracePrintf("native_menu,first_captured_eye=%u\n",unsigned(eye));
+      if(r==vr::VRCompositorError_None && copyPixels){++copiedEyes;temporalFrameEyes|=1u<<unsigned(eye);}
+      else { invalidateEyeTreatments(); timingInvalidate(); }
+      return deferredR!=vr::VRCompositorError_None?deferredR:r;
+    }
+    if(separateGraphics()) {
+      pollDeviceTiming();
+      r=captured.capture(eye,selected,region,flags,true,
+        nullptr,true,&transferWall,&producerTiming);
+    }
+    else if(!graphicsCalls.invoke([&]{r=captured.capture(eye,selected,region,flags,true);})) { timingInvalidate(); return vr::VRCompositorError_InvalidTexture; }
+    const auto transferClockEnd=QueryPerformanceCounter(&transferEnded);
+    if(transferClock&&transferClockEnd) timingFrame.transferMs[unsigned(eye)]=elapsedMs(transferBegan,transferEnded);
+    if(r==vr::VRCompositorError_None&&menuTreated&&menuEyes[unsigned(eye)]++==0)
+      nativeTracePrintf("native_menu,first_captured_eye=%u\n",unsigned(eye));
+    if(r==vr::VRCompositorError_None && copyPixels){++copiedEyes;temporalFrameEyes|=1u<<unsigned(eye);}
+    else { invalidateEyeTreatments(); timingInvalidate(); }
+    return r;
+  }
+  static uint64_t frameCycleUs() noexcept {
+    return edvrNativeTraceNowUs();
+  }
+  // One line per completed cycle longer than twice the runtime's last real
+  // predicted period: the outlier a 30-second window's mean/p95 hides. The
+  // phases are this one cycle's, not a window's. sequence is the timing
+  // ABI's counter (set from timing.waitBegin()), the number the d3d11 LONG
+  // FRAME line prints as "runtime sequence", so the two lines match to
+  // within a frame; 0 when the cycle's sample was not admitted. The frame's
+  // own submit stages (xr_end_frame, wait_frame, producer/consumer) are left
+  // out: submitSample is one reused buffer that a withheld frame never
+  // refills, so a stale zero there would read as a free frame.
+  //
+  // post_second_submit_to_next_wait is cut at Elite's Present from the graphics
+  // half's Present trace (long_cycle_line.h): pre_present, present_hook,
+  // post_present, and the hook's own four parts. The line's text lives there so a
+  // rig can hold it to its format.
+  //
+  // A cycle of kFreezeAlwaysLogMs or more is a freeze, and it always prints: no per-second limit, no session
+  // cap, and it is not charged to either, so a stretch of ordinary long cycles cannot starve it and it cannot
+  // starve them. (The issue 63 flight had the worst freeze of the session, 1858 ms, in this log only because
+  // the runtime's limit happened not to bite; the graphics log's five-second limiter did, and lost it.)
+  // Every long cycle, printed or not, is counted by size bucket and offered to the worst-five list, whose
+  // entry carries the cycle's own fields so its line at close is the line it had.
+  void noteLongCycle(const FrameCycleStats::Completed& c) {
+    const auto periodNs=boundary.lastPeriodNs();
+    if(periodNs<=0)return; // no real period observed yet to compare against
+    const double periodMs=double(periodNs)/1000000.0;
+    if(c.cycleMs<=2.0*periodMs)return;
+    const bool freeze=c.cycleMs>=kFreezeAlwaysLogMs;
+    // The limiter is asked for every long cycle so its window follows the clock, but only an ordinary one
+    // is held to it and charged to it.
+    const bool limiterAllows=cycleLimiter.allows(GetTickCount64()/1000);
+    const bool write=freezeWritesLine(freeze?FreezeVerdict::Freeze:FreezeVerdict::Long,limiterAllows);
+    if(write&&!freeze)cycleLimiter.charge();
+    const unsigned long long sequence=(unsigned long long)submitSample.sequence;
+    {
+      // The counts are read from the thread that closes the session, so they move under the book's lock.
+      std::lock_guard<std::mutex> lock(cycleBookMutex);
+      ++longCycleCount;
+      if(write)++longCycleLogged;
+      cycleBook.noteLong(c.cycleMs,write);
+      if(cycleBook.wouldKeep(c.cycleMs)){
+        FreezeWorst w;
+        w.ms=c.cycleMs;w.sequence=sequence;w.cycleMs=c.cycleMs;
+        SYSTEMTIME st{};GetSystemTime(&st);
+        _snprintf_s(w.stamp,sizeof(w.stamp),_TRUNCATE,"%04u-%02u-%02uT%02u:%02u:%02u.%03uZ",st.wYear,st.wMonth,st.wDay,st.wHour,st.wMinute,st.wSecond,st.wMilliseconds);
+        size_t len=0;formatLongCycleFields(w.detail,sizeof(w.detail),len,sequence,periodMs,c);
+        cycleBook.offerWorst(w);
+      }
+    }
+    if(!write)return;
+    char line[1024];
+    formatLongCycleLine(line,sizeof(line),sequence,periodMs,c);
+    nativeTracePuts(line);
+  }
+  // The counts every kFreezeCountsEveryMs (native_long_cycle_counts) and, at session close, the summary and
+  // the worst few. `final` also writes the whole worst list; otherwise the list is written only when it
+  // changed since it was last written. The summary keeps the three fields it has always carried at its head
+  // (count, logged, threshold) and adds the buckets after them.
+  void writeLongCycleSummary(const char* reason,bool final) {
+    FreezeBook copy;uint32_t printed=0;uint64_t count=0,logged=0;
+    {
+      std::lock_guard<std::mutex> lock(cycleBookMutex);
+      copy=cycleBook;printed=longCycleWorstPrinted;longCycleWorstPrinted=copy.worstRevision;
+      count=longCycleCount;logged=longCycleLogged;
+    }
+    char line[1100];
+    formatLongCycleCountsLine(line,sizeof(line),final?"native_long_cycle_summary":"native_long_cycle_counts",
+      (unsigned long long)count,(unsigned long long)logged,final?nullptr:reason,copy);
+    nativeTracePuts(line);
+    if(!copy.worstCount()||(!final&&copy.worstRevision==printed))return;
+    for(unsigned i=0;i<copy.worstCount();++i){
+      const FreezeWorst& w=copy.worstAt(i);
+      // The entry's own fields were formatted when it made the list; this line is its head and them.
+      char worstLine[1280];
+      formatWorstCycleLine(worstLine,sizeof(worstLine),i+1,copy.worstCount(),w.stamp,w.detail);
+      nativeTracePuts(worstLine);
+    }
+  }
+  // Called every cycle from reportFrameCycles: the first call arms the clock and says nothing.
+  void maybeLongCycleCounts() {
+    const uint64_t now=GetTickCount64();
+    if(!longCycleCountsMs){longCycleCountsMs=now?now:1;return;}
+    if(now-longCycleCountsMs<kFreezeCountsEveryMs)return;
+    longCycleCountsMs=now;
+    writeLongCycleSummary("periodic",false);
+  }
+  // ---- the vendor instruments (docs/headset-lock-vdxr-2026-10-02.md): events, long xrEndFrame episodes, the slow regime.
+  // All on the owner thread. startInstruments writes the three armed lines; a log without them did not run the code.
+  void startInstruments() {
+    char line[800];
+    VendorEventLog::formatArmed(line,sizeof(line));nativeTracePuts(line);
+    EndFrameEpisodes::formatArmed(line,sizeof(line));nativeTracePuts(line);
+    char vramState[240];
+    if(vramAdapter)std::snprintf(vramState,sizeof(vramState),"available");
+    else std::snprintf(vramState,sizeof(vramState),"unavailable: %s",vramWhy);
+    formatSlowArmed(line,sizeof(line),vramState);nativeTracePuts(line);
+  }
+  // The vendor's events, from SessionState's observer: every one decoded and written within the bounds of
+  // vendor_events.h. A session state change carries its own time, so the line says how long ago the vendor made it.
+  static void vendorEvent(const XrEventDataBuffer& buffer,void* context) noexcept {
+    auto& host=*static_cast<NativeRuntimeHost*>(context);
+    if(GetCurrentThreadId()!=host.ownerThread)return;
+    double lagMs=std::numeric_limits<double>::quiet_NaN();
+    if(buffer.type==XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED&&host.api.convertTime&&host.instance) {
+      const auto& event=*reinterpret_cast<const XrEventDataSessionStateChanged*>(&buffer);
+      LARGE_INTEGER counter{};XrTime now=0;
+      if(QueryPerformanceCounter(&counter)&&XR_SUCCEEDED(host.api.convertTime(host.instance,&counter,&now))&&now>=event.time)
+        lagMs=double(now-event.time)/1.0e6;
+    }
+    char line[640];
+    if(host.vendorEvents.note(buffer,lagMs,GetTickCount64(),line,sizeof(line)))nativeTracePuts(line);
+  }
+  // FrameSink, inside finish()'s timed xrEndFrame region: the TEST hold. advanced.slow_test_ms makes the d3d11 half
+  // ask (frame_flag) for every call to be held this long, for 40 s starting 90 s into the session; 0, the default and
+  // the whole of normal life, is one load and a branch. The hold is the point: xr_end_frame, the episodes and the slow
+  // regime then see it as the vendor's own time.
+  void holdEndFrame() override {
+    const uint32_t ms=endFrameHoldMs();
+    if(!ms) {
+      if(endFrameHoldActive) {
+        endFrameHoldActive=false;
+        nativeTracePrintf("native_end_frame_hold,test=1,state=ended,held_calls=%llu\n",(unsigned long long)endFrameHeldCalls);
+      }
+      return;
+    }
+    if(!endFrameHoldActive) {
+      endFrameHoldActive=true;endFrameHeldCalls=0;
+      nativeTracePrintf("native_end_frame_hold,test=1,state=began,ms=%u,source=advanced.slow_test_ms,inside=timed_xrEndFrame_region\n",unsigned(ms));
+    }
+    ++endFrameHeldCalls;
+    Sleep(ms);
+  }
+  void writeSlowLine(const SlowReport& report) {
+    VramFigures figures;
+    const VramFigures* vram=nullptr;
+    if(vramAdapter){figures=vramRead(vramAdapter.Get());vram=&figures;}
+    char line[1100];
+    formatSlowLine(line,sizeof(line),report,vram);
+    nativeTracePuts(line);
+  }
+  void writeInstrumentSummaries(const char* reason) {
+    char line[800];
+    vendorEvents.formatSummary(line,sizeof(line),reason);nativeTracePuts(line);
+    endFrameEpisodes.formatSummary(line,sizeof(line),reason);nativeTracePuts(line);
+    formatSlowSummary(line,sizeof(line),reason,slowRegime);nativeTracePuts(line);
+  }
+  // Session close: an episode or a regime still open ends here, and the summaries (the proof the instruments ran,
+  // zeros included) are written.
+  void finishInstruments() {
+    endFrameEpisodes.finish(endFrameLines);
+    if(endFrameLines.endLen)nativeTracePuts(endFrameLines.end);
+    slowRegime.finish([&](const SlowReport& report){writeSlowLine(report);});
+    writeInstrumentSummaries("session_close");
+  }
+  // FrameSink: every xrEndFrame the boundary made, the moment it returned (owner thread). Feeds the episodes and the
+  // slow regime with that frame's own figures: the end-frame call, the pose wait, the swapchain calls, our copy and
+  // our treatments, each measured where the runtime calls it. A loading frame, or the empty end of a frame the game
+  // never submitted, has none of the eyes' work: its figures are zero and not the last scene frame's.
+  void endFrameReturned(const EndFrameInfo& info) override {
+    const uint64_t nowMs=GetTickCount64();
+    const double periodMs=double(info.periodNs)/1000000.0;
+    const bool scene=info.layers&&!info.background;
+    const double acquire=scene?submitSample.xrAcquireMs:0.0,wait=scene?submitSample.xrWaitMs:0.0,
+      draw=scene?submitSample.xrDrawMs:0.0,release=scene?submitSample.xrReleaseMs:0.0;
+    // transferWall's producerDispatch holds the producer's acquire and flush, and receiveMs the consumer's: the nested
+    // phases native_submit_phases prints, so the copy is these two and not their sum with the parts.
+    const double copy=scene?transferWall.producerDispatch+submitSample.receiveMs:0.0;
+    EndFrameCall call;
+    call.sequence=scene&&submitSample.sequence?submitSample.sequence:info.sequence+frameSequenceOffset;
+    call.ms=info.ms;call.periodMs=periodMs;call.nowMs=nowMs;call.shouldRender=info.shouldRender;call.layers=info.layers;
+    call.background=info.background;call.turbo=info.turbo;call.overlapped=finishingOverlapped&&!info.background;
+    call.result=int(info.result);
+    call.acquireMs=acquire;call.waitMs=wait;call.drawMs=draw;call.releaseMs=release;call.copyMs=copy;
+    char stateScratch[24];
+    call.sessionState=xrSessionStateName(vendorEvents.lastState(),stateScratch);
+    call.stateAgeMs=vendorEvents.stateAgeMs(nowMs);
+    endFrameEpisodes.observe(call,endFrameLines);
+    if(endFrameLines.startLen)nativeTracePuts(endFrameLines.start);
+    if(endFrameLines.endLen)nativeTracePuts(endFrameLines.end);
+    SlowFrame frame;
+    frame.nowMs=nowMs;frame.refHz=instrumentDisplayHz;frame.periodMs=periodMs;frame.background=info.background;
+    frame.noLayers=!info.layers&&!info.background; // an empty end (clear, drain): the context field tells a load from a slow scene
+    frame.vendorWaitMs=boundary.waitBlockMs()+boundary.pacerBlockMs();
+    frame.vendorEndMs=info.ms;
+    frame.vendorSwapMs=acquire+wait+release;
+    frame.copyMs=copy+draw;
+    frame.edvrMs=scene?submitSample.treatmentMs:0.0;
+    slowRegime.observe(frame,[&](const SlowReport& report){writeSlowLine(report);});
+    if(!instrumentSummaryMs)instrumentSummaryMs=nowMs?nowMs:1;
+    else if(nowMs-instrumentSummaryMs>=kFreezeCountsEveryMs){instrumentSummaryMs=nowMs;writeInstrumentSummaries("periodic");}
+  }
+  // One finished report's cost, microseconds on the frame-cycle clock, into the phase-0 timing. The sink is
+  // the runtime's trace (a "periodic work: ..." line like the graphics half's, whose `at` is local time
+  // while this file's own prefix is UTC).
+  void recordFrameCycleReport(uint64_t us,uint64_t samples) {
+    frameCycleReportWork.record(int64_t(us),int64_t(frameCycleUs()),1000000,samples,
+      []{SYSTEMTIME st{};GetLocalTime(&st);PeriodicWallClock at;at.hour=st.wHour;at.minute=st.wMinute;at.second=st.wSecond;at.millis=st.wMilliseconds;return at;},
+      [](const char* line){nativeTracePrintf("%s\n",line);});
+  }
+  // buildUs: what the caller spent in frameCycles.waitCallerEnd, where this report was built (0 when unknown).
+  void reportFrameCycles(uint64_t buildUs=0) {
+    maybeLongCycleCounts();
+    if(!frameCycleFirstNoted&&frameCycles.firstComplete()) {frameCycleFirstNoted=true;nativeTracePrintf("native_frame_cycle,first_complete=1\n");}
+    FrameCycleStats::Report r{};if(!frameCycles.takeReport(r))return;
+    const uint64_t writeBegan=frameCycleUs();
+    const auto& c=r.cycle;const double validSum=c.mean*double(r.valid);
+    nativeTracePrintf("native_frame_cycle_window,window=%llu,boundary=host_wait_return_to_next_host_wait_return,admitted=%llu,valid=%u,first=%llu,last=%llu,elapsed_ms=%llu,valid_cycle_sum_ms=%.3f,caller_wait_fps=%.3f,valid_sample_fps=%.3f,caller_thread=%u,wait_thread=%u,thread_consistent=%u,input=%ux%u/%ux%u,output=%ux%u/%ux%u,pacing=%u,should_render=%u,scene_ready=%u,generation=%llu,feature_epoch=%llu,missing_clock=%llu,missing_reentrant=%llu,missing_thread=%llu,missing_sequence=%llu,missing_partial=%llu,missing_duplicate_eye=%llu,missing_direct_owner=%llu,missing_scope=%llu,missing_overflow=%llu,late_frames=%llu,frame_end_overlap=%u\n",
+      (unsigned long long)r.window,(unsigned long long)r.admitted,r.valid,(unsigned long long)r.firstSequence,(unsigned long long)r.lastSequence,(unsigned long long)r.elapsedMs,validSum,
+      r.elapsedMs?double(r.admitted)*1000.0/double(r.elapsedMs):0.0,r.elapsedMs?double(r.valid)*1000.0/double(r.elapsedMs):0.0,r.callerThread,r.waitThread,unsigned(r.threadConsistent),
+      r.shape.width[0],r.shape.height[0],r.shape.width[1],r.shape.height[1],r.shape.outputWidth[0],r.shape.outputHeight[0],r.shape.outputWidth[1],r.shape.outputHeight[1],r.shape.pacing,r.shape.shouldRender,r.shape.sceneReady,
+      (unsigned long long)r.shape.generation,(unsigned long long)r.shape.featureEpoch,
+      (unsigned long long)r.missing[FrameCycleStats::BadClock],(unsigned long long)r.missing[FrameCycleStats::Reentrant],(unsigned long long)r.missing[FrameCycleStats::WrongThread],(unsigned long long)r.missing[FrameCycleStats::BadSequence],(unsigned long long)r.missing[FrameCycleStats::PartialStereo],(unsigned long long)r.missing[FrameCycleStats::DuplicateEye],(unsigned long long)r.missing[FrameCycleStats::DirectOwner],(unsigned long long)r.missing[FrameCycleStats::ShapeChange],(unsigned long long)r.missing[FrameCycleStats::Overflow],
+      (unsigned long long)boundary.takeLateFramesWindow(),
+      // Eligibility for this window's shape, not a per-sample count: pacing
+      // 0 is FramePacing::Runtime (frame_boundary.h), the only pacing
+      // frame_end_overlap ever applies to.
+      unsigned(frameEndOverlapEnabled&&separateGraphics()&&r.shape.pacing==0));
+    const auto phase=[&](const char* name,const FrameCycleStats::Dist& d){nativeTracePrintf("native_frame_cycle_phase,window=%llu,name=%s,mean=%.4f,p50=%.4f,p95=%.4f,p99=%.4f,max=%.4f,units=wall_ms,nested=0\n",(unsigned long long)r.window,name,d.mean,d.p50,d.p95,d.p99,d.max);};
+    phase("cycle",r.cycle);phase("game_before_first_submit",r.beforeFirst);phase("first_submit_roundtrip",r.firstSubmit);phase("between_eye_calls",r.betweenEyes);phase("second_submit_roundtrip",r.secondSubmit);phase("post_second_submit_to_next_wait",r.afterSecond);phase("next_wait_roundtrip",r.nextWait);phase("per_frame_residual",r.residual);
+    const auto nested=[&](const char* name,const FrameCycleStats::Dist& d){nativeTracePrintf("native_frame_cycle_phase,window=%llu,name=%s,mean=%.4f,p50=%.4f,p95=%.4f,p99=%.4f,max=%.4f,units=wall_ms,nested=1\n",(unsigned long long)r.window,name,d.mean,d.p50,d.p95,d.p99,d.max);};
+    nested("next_wait_owner_body",r.waitOwner);nested("first_submit_owner_body",r.submitOwner[0]);nested("second_submit_owner_body",r.submitOwner[1]);nested("first_submit_render_park",r.renderPark[0]);nested("second_submit_render_park",r.renderPark[1]);
+    nested("frame_end_owner_body",r.frameEndOwnerBody);nested("next_wait_queue_delay",r.nextWaitQueueDelay);
+    if(r.postValid&&!postSubmitFirstNoted.exchange(true))
+      nativeTracePrintf("native_post_submit,first_complete=1,window=%llu,sequence=%llu\n",
+        (unsigned long long)r.window,(unsigned long long)r.firstPostSequence);
+    nativeTracePrintf("native_post_submit_window,window=%llu,base_valid=%u,valid=%u,single_present=%u,zero_present=%u,multiple_present=%u,present_sync_nonzero=%llu,present_provider=%u,handoff_valid=%u,handoff_missing=%llu,handoff_invalid=%llu,handoff_overflow=%llu\n",
+      (unsigned long long)r.window,r.valid,r.postValid,r.singlePresentValid,r.zeroPresentValid,r.multiplePresentValid,
+      (unsigned long long)r.syncNonzeroPresent,unsigned(timing.presentTraceAvailable()),r.handoffValid,(unsigned long long)r.handoffMissing,
+      (unsigned long long)r.handoffInvalid,(unsigned long long)r.handoffOverflow);
+    for(unsigned i=1;i<FrameCycleStats::PostUnavailableCount;++i)
+      nativeTracePrintf("native_post_submit_unavailable,window=%llu,reason=%s,count=%llu\n",
+        (unsigned long long)r.window,postUnavailableName(i),(unsigned long long)r.postUnavailable[i]);
+    const auto postPhase=[&](const char* name,const FrameCycleStats::Dist& d,unsigned samples,unsigned isNested,const char* units="wall_ms"){
+      nativeTracePrintf("native_post_submit_phase,window=%llu,name=%s,valid=%u,mean=%.4f,p50=%.4f,p95=%.4f,p99=%.4f,max=%.4f,units=%s,nested=%u\n",
+        (unsigned long long)r.window,name,samples,d.mean,d.p50,d.p95,d.p99,d.max,units,isNested);
+    };
+    postPhase("paired_gap",r.postGap,r.postValid,0);
+    postPhase("raw_dxgi_present",r.rawPresent,r.postValid,0);
+    postPhase("edvr_before_real_present",r.edvrBeforePresent,r.postValid,0);
+    postPhase("edvr_after_real_present",r.edvrAfterPresent,r.postValid,0);
+    postPhase("trailing_render_callback",r.trailingCallback,r.postValid,0);
+    postPhase("outside_present",r.outsidePresent,r.postValid,0);
+    postPhase("per_frame_residual",r.postResidual,r.postValid,0);
+    postPhase("present_count",r.presentCount,r.postValid,1,"calls");
+    postPhase("before_single_present",r.beforePresent,r.singlePresentValid,1);
+    postPhase("after_single_present",r.afterPresent,r.singlePresentValid,1);
+    postPhase("post_present_handoff",r.handoffNested,r.handoffValid,1);
+    postPhase("handoff_count",r.handoffCount,r.handoffValid,1,"calls");
+    reportPerformanceMetrics(r.window);
+    recordFrameCycleReport(buildUs+(frameCycleUs()-writeBegan),r.valid);
+  }
+  void reportSubmitStats() {
+    const auto wall=submitStats.distribution(&SubmissionStats::Sample::submitMs);
+    const auto dispatch=submitStats.distribution(&SubmissionStats::Sample::dispatchMs);
+    const auto work=submitStats.distribution(&SubmissionStats::Sample::treatmentMs);
+    const auto& first=submitStats.first();const auto& last=submitStats.last();
+    nativeTracePrintf("native_submit_window,samples=%u,first=%llu,last=%llu,input=%ux%u/%ux%u,xr=%ux%u/%ux%u,callbacks_per_pair=%.2f,scene_srv_creates=%llu,submit_p50_p95_p99=%.4f/%.4f/%.4f,treatment_dispatch_p50_p95_p99=%.4f/%.4f/%.4f,treatment_work_p50_p95_p99=%.4f/%.4f/%.4f,units=wall_ms,gpu=0\n",
+      submitStats.count(),(unsigned long long)first.sequence,(unsigned long long)last.sequence,
+      last.width[0],last.height[0],last.width[1],last.height[1],
+      sizes[0].recommendedImageRectWidth,sizes[0].recommendedImageRectHeight,
+      sizes[1].recommendedImageRectWidth,sizes[1].recommendedImageRectHeight,
+      submitStats.meanCallbacks(),(unsigned long long)(captured.shaderViewsCreated()+previousPair.shaderViewsCreated()),
+      wall.p50,wall.p95,wall.p99,dispatch.p50,dispatch.p95,dispatch.p99,work.p50,work.p95,work.p99);
+    char phases[2048]{};size_t used=0;
+    const auto phase=[&](const char* name,double SubmissionStats::Sample::*field){
+      const auto d=submitStats.distribution(field);
+      if(used>=sizeof(phases))return;
+      const int n=std::snprintf(phases+used,sizeof(phases)-used,",%s=%.4f/%.4f/%.4f/%.4f",name,d.p50,d.p95,d.p99,d.max);
+      if(n>0)used+=(std::min)(size_t(n),sizeof(phases)-used);
+    };
+    phase("producer_dispatch",&SubmissionStats::Sample::producerDispatchMs);
+    phase("producer_acquire",&SubmissionStats::Sample::producerAcquireMs);
+    phase("producer_flush",&SubmissionStats::Sample::producerFlushMs);
+    phase("consumer_acquire",&SubmissionStats::Sample::consumerAcquireMs);
+    phase("consumer_flush",&SubmissionStats::Sample::consumerFlushMs);
+    phase("receive",&SubmissionStats::Sample::receiveMs);
+    phase("xr_acquire",&SubmissionStats::Sample::xrAcquireMs);
+    phase("xr_wait",&SubmissionStats::Sample::xrWaitMs);
+    phase("xr_draw_submit",&SubmissionStats::Sample::xrDrawMs);
+    phase("xr_release",&SubmissionStats::Sample::xrReleaseMs);
+    phase("xr_end_frame",&SubmissionStats::Sample::endFrameMs);
+    phase("wait_frame",&SubmissionStats::Sample::waitFrameMs);
+    phase("pacer_block",&SubmissionStats::Sample::pacerBlockMs);
+    nativeTracePrintf("native_submit_phases,window=%llu,first=%llu,last=%llu,output=%ux%u/%ux%u,treatments=%u/%u,feature_epoch=%llu,trim_stage=%u,trim_factors=%.5f/%.5f,pacing=%u,separate=%u%s,percentiles=50/95/99/max,units=wall_ms,nested=1,gpu=0,frame_end_overlap=%u\n",
+      (unsigned long long)submitStats.window(),(unsigned long long)first.sequence,(unsigned long long)last.sequence,
+      last.outputWidth[0],last.outputHeight[0],last.outputWidth[1],last.outputHeight[1],last.treatments[0],last.treatments[1],
+      (unsigned long long)last.featureEpoch,unsigned(fovTrim.stage()),fovTrim.factorWidth(),fovTrim.factorHeight(),
+      unsigned(last.deferred),unsigned(separateGraphics()),phases,
+      // last.deferred==0 is FramePacing::Runtime, the only pacing this
+      // window's last sample could have taken the overlapped path under.
+      unsigned(frameEndOverlapEnabled&&separateGraphics()&&last.deferred==0));
+  }
+  XrResult compose(XrCompositionLayerProjection& layer) override {
+    LARGE_INTEGER composeBegan{},composeEnded{}; const auto composeClock=QueryPerformanceCounter(&composeBegan);
+    auto* observer=timingFrameActive&&deviceTimingReady?&deviceTiming:nullptr;
+    if(!frameWithheld&&separateGraphics()) {
+      SubmissionWallScope measured(&submitSample.receiveMs);
+      if(captured.completePending(observer,&transferWall)!=S_OK)
+        return XR_ERROR_RUNTIME_FAILURE;
+    }
+    StereoWallTimes wall{};
+    // Explorer Cam's comfort fade, on a replayed pair as much as a fresh one: the level is told to each draw, so a hitch cannot flash the scene. Only a provider
+    // that is here and answered version 5 has one to give (native_frame_client.h zeroes the rest); the menu quad is another layer and is not touched.
+    const float fade=comfortFade();
+    const auto r=frameWithheld?stereo.renderCaptured(previousViews,previousSpace,previousPair,layer,observer,nullptr,previousPlacement,fade):
+      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,&wall,framePlacement,fade);
+    submitSample.xrAcquireMs=wall.acquire;submitSample.xrWaitMs=wall.wait;
+    submitSample.xrDrawMs=wall.draw;submitSample.xrReleaseMs=wall.release;
+    const auto composeClockEnd=QueryPerformanceCounter(&composeEnded);
+    if(composeClock&&composeClockEnd) timingFrame.composeMs=elapsedMs(composeBegan,composeEnded);
+    if(r==XR_SUCCESS)++composedPairs;
+    return r;
+  }
+  bool sceneLayerAvailable() const override {
+    return !frameWithheld || (featureFrame.resubmitEnabled && previousPairValid && previousSpace==frameSpace &&
+      previousReference==poses.read().originGeneration);
+  }
+  void sceneFinished(bool pixels,XrResult result) override {
+    if(result!=XR_SUCCESS){previousPairValid=false;return;}
+    if(frameWithheld) {if(pixels)++replayedPairs;else ++emptyWithholds;return;}
+    if(!pixels||!featureFrame.resubmitEnabled)return;
+    if(captured.exchangeBuffers(previousPair)) {
+      previousViews[0]=frameViews[0];previousViews[1]=frameViews[1];previousSpace=frameSpace;
+      // The kept pair carries the placement it was drawn with; a replay of it
+      // under a changed trim would otherwise stretch those pixels.
+      previousPlacement[0]=framePlacement[0];previousPlacement[1]=framePlacement[1];
+      previousReference=poses.read().originGeneration;previousPairValid=true;
+    } else previousPairValid=false;
+  }
+  XrResult composeBackground(XrCompositionLayerProjection& layer) override {
+    return stereo.renderSkybox(frameViews,frameSpace,skybox,layer,comfortFade());
+  }
+  // The level the provider gave this frame, or 0: no provider, no frame read yet, or an answer that carried none.
+  float comfortFade() const {return features.acquired()&&featureFrameKnown?comfort::sanitize(featureFrame.fadeAlpha):0.f;}
+  SystemRead read() const override {return geometry.read();}
+  void noteProjection(uint64_t sequence,uint32_t eye,float nearZ,float farZ) noexcept override {
+    temporal.noteProjection(sequence,eye,nearZ,farZ); // CPU only; never dispatch/wait on the XR owner
+  }
+  bool locateHead(uint64_t generation,vr::ETrackingUniverseOrigin origin,float prediction,vr::TrackedDevicePose_t& out) override {
+    return locateHeadFor(generation,origin,prediction,HeadCall{},out);
+  }
+  // The pose-gap instrument counts a pose call that never got as far as the owner too (no live session, a bad origin or prediction).
+  void noteHeadCallFailed(const HeadCall& call,float prediction) noexcept override {
+    PoseGapStats::Sample sample{};sample.thread=call.thread;sample.rva=call.rva;sample.predictionSec=prediction;
+    poseGap.note(sample);
+  }
+  bool locateHeadFor(uint64_t generation,vr::ETrackingUniverseOrigin origin,float prediction,const HeadCall& call,vr::TrackedDevicePose_t& out) override {
+    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=locateHeadFor(generation,origin,prediction,call,out);})&&result;}
+    PoseGapStats::Sample sample{};sample.thread=call.thread;sample.rva=call.rva;sample.predictionSec=prediction;
+    const bool located=locateHeadOwned(generation,origin,prediction,call,out,sample);
+    sample.located=located;
+    poseGap.note(sample);
+    return located;
+  }
+  // The instant an Elite "now" call is located at: the latest frame's display time PLUS that frame's display period (head_pose_time.h answerTime;
+  // the arithmetic of the game-pose array, space_pose.h nextPredictionTime). False when there is none -- no frame waited since the origin, session
+  // or geometry was last invalidated, a display time that is not positive, the cached frame more than one display period behind `now`
+  // (displayTimeFresh, judged on the cached frame, not on the target), a frame that reports no period, or a reference-space change between the
+  // display time and the target -- and the call is located at now + prediction as it always was.
+  bool poseTargetFor(bool display,XrTime now,XrTime& target) {
+    if(!display||!latestPoseFrame.valid)return false;
+    return answerTime(latestPoseFrame.displayTime,latestPoseFrame.period,now,
+      [](int64_t shown,int64_t period,int64_t& out){return nextPredictionTime(shown,period,out);},
+      [&](int64_t from,int64_t to){return changes.crosses(from,to);},&target);
+  }
+  bool locateHeadOwned(uint64_t generation,vr::ETrackingUniverseOrigin origin,float prediction,const HeadCall& call,vr::TrackedDevicePose_t& out,
+                       PoseGapStats::Sample& sample) {
+    // Cached reads need no operation lease. Handle-using calls fail promptly
+    // while another operation is in flight or shutdown has been requested.
+    if(GetCurrentThreadId()!=ownerThread)return false;
+    auto operation=gate.tryEnter(runtimeGeneration);
+    if(!operation||generation!=geometryGeneration||!read().connected||
+       !state.running()||state.terminal()||!seated.space()||origin!=vr::TrackingUniverseSeated)return false;
+    XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
+    HeadLocatorStage headLocateStage=HeadLocatorStage::None;
+    XrTime explicitTarget=0;
+    const LocatorDispatch dispatch{api.convertTime,api.locateSpace};
+    // "Now" is read once, and only for a call an explicit instant could answer: it decides whether the cached display time is still good, and if
+    // it is not (or the runtime refuses it) it is the instant the call falls back to. A clock that cannot be read leaves the plain path, which
+    // reads it again and fails the way it always did.
+    XrTime now=0;
+    const bool nowKnown=call.display&&latestPoseFrame.valid&&
+      HeadLocator{}.currentTime(dispatch,instance,headClock,&headLocateStage,boundary.estimateNow(),now)==XR_SUCCESS;
+    bool explicitTime=nowKnown&&poseTargetFor(call.display,now,explicitTarget);
+    const auto locatePlain=[&]{
+      return nowKnown
+        ?HeadLocator{}.locateFrom(dispatch,view,seated.space(),now,prediction,head,&lastHeadTime,&headLocateStage)
+        :HeadLocator{}.locate(dispatch,instance,view,seated.space(),prediction,head,&lastHeadTime,headClock,&headLocateStage,boundary.estimateNow());
+    };
+    if(explicitTime) {
+      lastHeadResult=HeadLocator{}.locateAt(dispatch,view,seated.space(),explicitTarget,head,&lastHeadTime,&headLocateStage);
+      if(lastHeadResult==XR_ERROR_TIME_INVALID) {
+        // The runtime will not locate at that instant (it is no longer one it knows). Only for this answer: located at now + prediction instead
+        // of handing the game an invalid pose, once.
+        ++displayTimeRefusals;
+        if(displayTimeRefusals<=3||displayTimeRefusals%300==0)
+          nativeTracePrintf("head_pose_display_time_refused,target=%lld,total=%llu\n",(long long)explicitTarget,(unsigned long long)displayTimeRefusals);
+        explicitTime=false;head=XrSpaceLocation{XR_TYPE_SPACE_LOCATION};
+        lastHeadResult=locatePlain();
+      }
+    } else lastHeadResult=locatePlain();
+    sample.fallback=call.display&&!explicitTime;
+    if(lastHeadResult!=XR_SUCCESS) {
+      // Diagnostic only (docs/linux-native-openxr-launch-centre-2026-09-22.md):
+      // this per-frame path was silent before this build. Rate-limited so a
+      // persistently failing runtime call cannot flood a whole session's log.
+      ++headLocateFailures;++headLocateConsecutiveFailures;
+      if(headLocateConsecutiveFailures<=3||headLocateConsecutiveFailures%300==0)
+        nativeTracePrintf("head_locate_failed,stage=%s,result=%d,consecutive=%llu,total=%llu\n",
+            headLocatorStageName(headLocateStage),int(lastHeadResult),
+            (unsigned long long)headLocateConsecutiveFailures,(unsigned long long)headLocateFailures);
+      return false;
+    }
+    if(headLocateConsecutiveFailures) {
+      nativeTracePrintf("head_locate_recovered,after_consecutive=%llu,total_failures=%llu\n",
+          (unsigned long long)headLocateConsecutiveFailures,(unsigned long long)headLocateFailures);
+      headLocateConsecutiveFailures=0;
+    }
+    // Said when the fix acts, and for each further distinct Elite caller (a new one after a game update shows up here).
+    if(explicitTime)poseSightings.note(call.rva,[](const char* sighting){nativeTracePuts(sighting);});
+    vr::TrackedDevicePose_t pose{};pose.bDeviceIsConnected=true;
+    pose.mDeviceToAbsoluteTracking.m[0][0]=pose.mDeviceToAbsoluteTracking.m[1][1]=pose.mDeviceToAbsoluteTracking.m[2][2]=1;
+    constexpr auto valid=XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+    pose.bPoseIsValid=(head.locationFlags&valid)==valid;
+    // The instrument: how far this call's instant is from the drawn frame's display time, and how far the pose handed back is turned
+    // from the pose that frame was drawn with.
+    if(latestPoseFrame.valid) {
+      sample.gapKnown=true;sample.gapMs=double(lastHeadTime-latestPoseFrame.displayTime)/1e6;
+      if(pose.bPoseIsValid&&latestPoseFrame.orientationKnown) {
+        const float returned[4]={head.pose.orientation.x,head.pose.orientation.y,head.pose.orientation.z,head.pose.orientation.w};
+        sample.angleKnown=true;sample.angleDeg=quaternionAngleDegrees(latestPoseFrame.orientation,returned);
+      }
+      if(latestPoseFrame.speedKnown){sample.speedKnown=true;sample.speedDegPerSec=latestPoseFrame.speedDegPerSec;}
+    }
+    pose.eTrackingResult=pose.bPoseIsValid?vr::TrackingResult_Running_OK:vr::TrackingResult_Running_OutOfRange;
+    if(pose.bPoseIsValid){double matrix[4][4];detail::rigid(head.pose,matrix);if(!detail::narrow(matrix,pose.mDeviceToAbsoluteTracking))return false;}
+    out=pose;return true;
+  }
+  bool resetSeated(uint64_t generation) override {
+    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=resetSeated(generation);})&&result;}
+    if(GetCurrentThreadId()!=ownerThread)return false;
+    auto operation=gate.tryEnter(runtimeGeneration);
+    if(!operation||generation!=geometryGeneration||!state.running()||state.terminal()||
+       !seated.space()||!changes.active()||!resetEvents.room(generation))return false;
+    // Finish a partial pair before replacing the space referenced by it.
+    lastResetResult=boundary.clear();if(lastResetResult!=XR_SUCCESS)return false;
+    XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
+    lastResetResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lastResetTime,counterNow,nullptr,boundary.estimateNow());
+    if(lastResetResult!=XR_SUCCESS)return false;
+    return applySeatedReset(head,"seated_reset",true);
+  }
+  // Owner-only, with no open frame. Both startup and explicit game resets
+  // use a pose in the natural LOCAL space, so resets never accumulate offsets.
+  bool applySeatedReset(const XrSpaceLocation& head,const char* reason,bool notifyGame) {
+    if(GetCurrentThreadId()!=ownerThread||state.frameOpen()||!seated.space()||
+       (notifyGame&&!resetEvents.room(geometryGeneration))) {
+      lastResetResult=XR_ERROR_CALL_ORDER_INVALID;return false;
+    }
+    XrPosef origin{};
+    if(!seatedOriginFromHead(head.pose,head.locationFlags,origin)){lastResetResult=XR_ERROR_POSE_INVALID;return false;}
+    lastResetResult=seated.replace(origin);
+    if(lastResetResult!=XR_SUCCESS){geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);dropPoseFrame();return false;}
+    if(!invalidateOrigin(reason)){lastResetResult=XR_ERROR_LIMIT_REACHED;return false;}
+    // Verify and attach an event-time sample, not a later cached render pose.
+    TimedHeadPose atReset{};
+    lastResetResult=locateHeadAt(api.locateSpace,view,seated.space(),lastResetTime,true,atReset);
+    if(lastResetResult!=XR_SUCCESS)return false;
+    if(!atReset.pose.bPoseIsValid){lastResetResult=XR_ERROR_POSE_INVALID;return false;}
+    const auto& matrix=atReset.pose.mDeviceToAbsoluteTracking.m;
+    resetPositionError=std::sqrt(matrix[0][3]*matrix[0][3]+matrix[1][3]*matrix[1][3]+matrix[2][3]*matrix[2][3]);
+    resetYawError=std::fabs(std::atan2(matrix[0][2],matrix[2][2]));
+    if(notifyGame&&!resetEvents.push(geometryGeneration,poses.read().originGeneration,GetTickCount64(),atReset.pose)){
+      lastResetResult=XR_ERROR_LIMIT_REACHED;return false;
+    }
+    ++recenters;return true;
+  }
+  // intro_panel.cpp's one-shot ask (frame_flag.h, requestIntroRecentre):
+  // recentre the seated origin to the CURRENT head pose the moment the
+  // player can first see the launch movie or the splash after it, instead
+  // of leaving "the game's forward" wherever centreAtStartup's own
+  // one-shot centre put it from whatever the head was doing near the
+  // very first tracked pose, long before either is visible
+  // (docs/intro-video.md, 2026-09-17). Called between frames only, same
+  // as centreAtStartup; the caller clears the request only when this
+  // returns true, so a poll that cannot act right now (a frame happens
+  // to be open, or the reset-event queue has no room) sees the request
+  // again next frame rather than losing it.
+  bool applyIntroRecentre() {
+    if(GetCurrentThreadId()!=ownerThread||state.frameOpen()||!seated.space()||!changes.active())return false;
+    XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
+    lastResetResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lastResetTime,counterNow,nullptr,boundary.estimateNow());
+    if(lastResetResult!=XR_SUCCESS)return false;
+    return applySeatedReset(head,"intro_recentre",true);
+  }
+  bool centreAtStartup(bool& refresh) {
+    refresh=false;
+    if(!launchCentre.pending())return true;
+    if(GetCurrentThreadId()!=ownerThread||state.frameOpen())return false;
+    auto operation=gate.tryEnter(runtimeGeneration);
+    if(!operation||!state.running()||state.terminal()||!changes.active())return false;
+    const auto now=GetTickCount64();
+    if(!launchCentreSamples)launchCentreBegan=now;
+    ++launchCentreSamples;
+    XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
+    HeadLocatorStage headLocateStage=HeadLocatorStage::None;
+    lastResetResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lastResetTime,counterNow,&headLocateStage,boundary.estimateNow());
+    // A temporarily unavailable current-time pose must not trigger a reset
+    // using a cached/predicted pose or extend startup indefinitely.
+    // XR_ERROR_INITIALIZATION_FAILED joined the tolerated set 2026-09-22:
+    // some Linux/Proton OpenXR stacks (WiVRn observed) return it from the
+    // very first locate of a session instead of TIME_INVALID/POSE_INVALID
+    // for what reads as the same "no tracking data yet" condition
+    // (docs/linux-native-openxr-launch-centre-2026-09-22.md). Diagnostic
+    // build: still traces which call and code it saw, tolerated or not.
+    if(lastResetResult!=XR_SUCCESS&&lastResetResult!=XR_ERROR_TIME_INVALID&&
+       lastResetResult!=XR_ERROR_POSE_INVALID&&lastResetResult!=XR_ERROR_INITIALIZATION_FAILED) {
+      nativeTracePrintf("launch_centre_locate_stage,stage=%s,result=%d\n",
+          headLocatorStageName(headLocateStage),int(lastResetResult));
+      return result("launch_centre_locate",lastResetResult);
+    }
+    if(lastResetResult!=XR_SUCCESS)head.locationFlags=0;
+    auto decision=launchCentre.consider(head.pose,head.locationFlags);
+    if(decision==LaunchCentreDecision::Wait&&now-launchCentreBegan>=2000)decision=launchCentre.expire();
+    if(decision==LaunchCentreDecision::Wait) {
+      if(launchCentreSamples==1)nativeTracePrintf("native_launch_centre,waiting_for_tracking=1,stage=%s,flags=%llu,result=%d\n",
+          headLocatorStageName(headLocateStage),(unsigned long long)head.locationFlags,int(lastResetResult));
+      refresh=true;return true;
+    }
+    if(decision==LaunchCentreDecision::Centre) {
+      nativeTracePrintf("native_launch_centre,applying=1,samples=%llu,position=%.6f/%.6f/%.6f,orientation=%.6f/%.6f/%.6f/%.6f,flags=%llu\n",
+        (unsigned long long)launchCentreSamples,double(head.pose.position.x),double(head.pose.position.y),double(head.pose.position.z),
+        double(head.pose.orientation.x),double(head.pose.orientation.y),double(head.pose.orientation.z),double(head.pose.orientation.w),
+        (unsigned long long)head.locationFlags);
+      if(!applySeatedReset(head,"launch_centre",false)) {
+        result("launch_centre_reset",lastResetResult);return false;
+      }
+      nativeTracePrintf("native_launch_centre,applied=1,position_error=%.6f,yaw_error_rad=%.6f,origin_generation=%llu\n",
+        double(resetPositionError),double(resetYawError),(unsigned long long)poses.read().originGeneration);
+      refresh=true;return true;
+    }
+    nativeTracePrintf("native_launch_centre,tracking_deadline=1,samples=%llu,elapsed_ms=%llu,origin_unchanged=1\n",
+        (unsigned long long)launchCentreSamples,(unsigned long long)(now-launchCentreBegan));
+    return true;
+  }
+  bool pollEvent(uint64_t generation,vr::ETrackingUniverseOrigin origin,vr::VREvent_t& event,vr::TrackedDevicePose_t& pose) override {
+    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=pollEvent(generation,origin,event,pose);})&&result;}
+    if(generation!=geometryGeneration)return false;
+    if(quitEventPending&&quitEventGeneration==generation) {
+      event={};event.eventType=vr::VREvent_Quit;
+      event.trackedDeviceIndex=vr::k_unTrackedDeviceIndexInvalid;
+      event.eventAgeSeconds=0.0f;pose=invalidHeadPose(true);
+      quitEventPending=false;return true;
+    }
+    const bool found=resetEvents.pop(generation,poses.read().originGeneration,origin,GetTickCount64(),event,pose);
+    if(found)++resetPolls;return found;
+  }
+  void unsupported(unsigned slot) noexcept override {nativeTracePrintf("system_unavailable,slot=%u\n",slot);}
+  ~NativeRuntimeHost() {close();}
+  void invalidateEyeTreatments() { temporal.invalidate(); sharpen.invalidate(); fss.invalidate(); deferredEye={}; }
+  void publishFatalFailure(XrResult error,const char* operation) noexcept {
+    clearOverlapHandoff();
+    if(serviceFailed)return;
+    serviceFailed=true;
+    serviceStopped=false;
+    if(runtimeGeneration)gate.requestStop(runtimeGeneration);
+    geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);dropPoseFrame();
+    poses.focus(compositorGeneration,true,false);
+    frameGeometryAvailable=false;frameGeometry={};previousPairValid=false;
+    menu.invalidate();invalidateEyeTreatments();timingInvalidate();
+    queueQuitEvent(error);
+    result(operation,error);
+  }
+  void traceLifecycle(Lifecycle lifecycle) noexcept {
+    if(lifecycle==tracedLifecycle)return;
+    nativeTracePrintf("service_lifecycle,from=%u,to=%u,running=%u,terminal=%u\n",
+      unsigned(tracedLifecycle),unsigned(lifecycle),unsigned(state.running()),unsigned(state.terminal()));
+    tracedLifecycle=lifecycle;
+  }
+  bool applyFrameSequence(Frame& frame) {
+    if(!frame.sequence||frameSequenceOffset>(std::numeric_limits<uint64_t>::max)()-frame.sequence)return false;
+    frame.sequence+=frameSequenceOffset;activeFrameSequence=frame.sequence;
+    if(frame.sequence>lastPublishedFrameSequence)lastPublishedFrameSequence=frame.sequence;
+    return true;
+  }
+  void queueQuitEvent(XrResult r) noexcept {
+    if(quitEventPending&&quitEventGeneration==geometryGeneration)return;
+    quitEventPending=true;quitEventGeneration=geometryGeneration;
+    nativeTracePrintf("openvr_quit_event,generation=%llu,result=%d\n",
+      (unsigned long long)geometryGeneration,int(r));
+  }
+  bool prepareSessionRestart() {
+    clearOverlapHandoff();
+    if(GetCurrentThreadId()!=ownerThread||state.running()||state.terminal()||!session)return false;
+    if(lastPublishedFrameSequence==(std::numeric_limits<uint64_t>::max)())return false;
+    frameSequenceOffset=lastPublishedFrameSequence;
+    if(!invalidateOrigin("session_restart"))return false;
+    frameGeometryAvailable=false;frameGeometry={};previousPairValid=false;
+    activeFrameSequence=0;
+    return true;
+  }
+  bool close() {
+    clearOverlapHandoff();
+    // A pacer wait kicked by the last frame's finish() must not be left
+    // running past this point: stop() below joins the FramePacer thread, and
+    // a still-pending xrWaitFrame would otherwise hang it, or worse, race
+    // xrDestroySession. drain() also closes a frame this boundary still had
+    // open (a close() reached without ever going through STOPPING).
+    if(state.running()&&!state.terminal()&&GetCurrentThreadId()==ownerThread) {
+      // A deferred finish OwnerService::stop() cancelled before it ran (its
+      // job was still queued, not started) leaves pendingFrameEndFinish true
+      // and the pair's frame still open with no xrEndFrame sent: finish it
+      // here, inline, before drain() -- otherwise drain()'s own clear() would
+      // end that already-captured pair empty instead. A finish that DID get
+      // to run already cleared the flag itself.
+      if(pendingFrameEndFinish) {
+        pendingFrameEndFinish=false;
+        ++frameEndInlineAtCloseCount;
+        finishPendingFrameEndBody(pendingFrameEndEye,pendingFrameEndSequence,pendingFrameEndPublished);
+      }
+      const auto drained=boundary.drain();
+      if(drained!=XR_SUCCESS)nativeTracePrintf("native_pacing,drain_result=%d\n",int(drained));
+    }
+    const bool tracing=runtimeGeneration||session||instance||stereo.needsGpuDrain();
+    if(renderSettingsCaptured) {
+      publishRenderSizing(false);
+      renderSettingsCaptured=false;
+    }
+    std::memset(runtimeLabel,0,sizeof(runtimeLabel));std::memset(systemLabel,0,sizeof(systemLabel));
+    projectionModeNoted=false;projectionVerdict=edvr::ppn::Verdict::NotApplicable;
+    const auto menuClosed=menu.close(); // no producer admission or GPU work required
+    if(FAILED(menuClosed))return clean=false;
+    timingInvalidate();
+    deviceTiming.abandon();deviceTimingReady=false; // Release only, including partial frames.
+    producerTiming.shutdown(); // Same contract: release only, safe off the render thread.
+    const auto timingClosed=timing.close();
+    if(FAILED(timingClosed)) nativeTracePrintf("native_timing,close_failure=%08lx\n",(unsigned long)timingClosed);
+    if(FAILED(temporal.close()))return clean=false;
+    if(FAILED(sharpen.close()))return clean=false;
+    if(FAILED(fss.close())||FAILED(features.close()))return clean=false;
+    if(tracing)nativeTracePrintf("native_features_summary,changes=%llu,fss_healed=%llu/%llu,fss_deferred=%llu,withheld=%llu,replayed=%llu,empty=%llu,trim_stage=%u\n",
+      (unsigned long long)featureChanges,(unsigned long long)fssHealedEyes[0],(unsigned long long)fssHealedEyes[1],
+      (unsigned long long)fssDeferredEyes,(unsigned long long)withheldPairs,(unsigned long long)replayedPairs,(unsigned long long)emptyWithholds,unsigned(fovTrim.stage()));
+    if(tracing)nativeTracePrintf("native_pacing_summary,changes=%llu,deferred=%llu,synthesized=%llu,ready_at_wait=%llu,kicks=%llu,drained_frames=%llu,drained_waits=%llu,late_frames=%llu,perf_settings_events=%llu\n",
+      (unsigned long long)pacingChanges,(unsigned long long)boundary.deferredFrames(),(unsigned long long)boundary.synthesized(),
+      (unsigned long long)boundary.readyAtWait(),(unsigned long long)boundary.kicks(),(unsigned long long)boundary.drainedFrames(),
+      (unsigned long long)boundary.drainedWaits(),(unsigned long long)boundary.lateFrames(),(unsigned long long)perfSettingsEvents);
+    if(tracing)nativeTracePrintf("native_frame_end_overlap_summary,overlapped=%llu,synchronous=%llu,inline_at_close=%llu,failures=%llu\n",
+      (unsigned long long)frameEndOverlapCount,(unsigned long long)frameEndSyncCount,
+      (unsigned long long)frameEndInlineAtCloseCount,(unsigned long long)frameEndFailureCount);
+    if(tracing)nativeTracePrintf("native_overlap_handoff_summary,accepted=%llu,completed=%llu,rejected=%llu,invalid=%llu,cancelled_or_failed=%llu\n",
+      (unsigned long long)overlapHandoffAccepted.load(),(unsigned long long)overlapHandoffCompleted.load(),
+      (unsigned long long)overlapHandoffRejected.load(),(unsigned long long)overlapHandoffInvalid.load(),
+      (unsigned long long)overlapHandoffCancelledOrFailed.load());
+    if(tracing)nativeTracePrintf("native_overlap_present_summary,bypassed=%llu\n",
+      (unsigned long long)overlapPresentBypassed.load());
+    if(tracing) { const auto producerGpu=producerTiming.summary();
+      nativeTracePrintf("native_producer_gpu_summary,windows=%llu,samples=%llu,disjoint_invalid=%llu\n",
+        (unsigned long long)producerGpu.windows,(unsigned long long)producerGpu.samples,(unsigned long long)producerGpu.disjointInvalid); }
+    // native_long_cycle_summary: the three fields it has always had, then the counts by size bucket, and
+    // after it the worst few cycles of the session (native_long_cycle_worst).
+    if(tracing)writeLongCycleSummary(nullptr,true);
+    // The vendor instruments close: an episode or a regime still open ends, and their summaries are written.
+    if(tracing)finishInstruments();
+    if(tracing)nativeTracePrintf("native_sharpen_summary,left=%llu,right=%llu,failures=%llu\n",
+      (unsigned long long)sharpenEyes[0],(unsigned long long)sharpenEyes[1],(unsigned long long)sharpenFailures);
+    if(tracing)nativeTracePrintf("native_temporal_summary,frames=%llu,left=%llu,right=%llu,failures=%llu\n",
+      (unsigned long long)temporalFrames,(unsigned long long)temporalEyes[0],(unsigned long long)temporalEyes[1],(unsigned long long)temporalFailures);
+    if(tracing)nativeTracePrintf("native_summary,waits=%llu,submits=%llu,pairs=%llu,copied_eyes=%llu,loading_layers=%llu,menu_left=%llu,menu_right=%llu,menu_failures=%llu,menu_poses=%llu,pose_failures=%llu,graphics_wrong_thread=%llu,skybox_sets=%llu,skybox_clears=%llu\n",
+      (unsigned long long)compositorWaits,(unsigned long long)compositorSubmits,(unsigned long long)composedPairs,
+      (unsigned long long)copiedEyes,(unsigned long long)loadingLayers,(unsigned long long)menuEyes[0],
+      (unsigned long long)menuEyes[1],(unsigned long long)menuFailures,(unsigned long long)menuPosePublications,
+      (unsigned long long)poseFailures,(unsigned long long)graphicsCalls.wrongThread,
+      (unsigned long long)skyboxSets,(unsigned long long)skyboxClears);
+    ShutdownTrace gateStage("host_gate",tracing);
+    if(runtimeGeneration) {
+      gate.requestStop(runtimeGeneration);
+      // The diagnostic joins all operations before destruction. A future
+      // multi-thread host must defer its own lifetime too until this succeeds.
+      if(!gate.canDestroy(runtimeGeneration)) { gateStage.end(false); return false; }
+    }
+    gateStage.end(true);
+    geometry.retire(geometryGeneration);
+    poses.retire(compositorGeneration);
+    resetEvents.retire(geometryGeneration);changes.clear();
+    quitEventPending=false;quitEventGeneration=0;
+    loading={};
+    if(separateGraphics()) {
+      // Rendering may still reference capture outputs. Drain the XR context
+      // first, then retire each shared handoff without a producer callback.
+      ShutdownTrace drainStage("host_owned_graphics_drain",tracing);
+      const auto drained=stereo.drain();drainStage.end(drained==XR_SUCCESS);
+      if(drained!=XR_SUCCESS)return clean=false;
+      const HRESULT eyesRetired=captured.shutdownShared();
+      const HRESULT previousRetired=previousPair.shutdownShared();
+      const HRESULT skyRetired=skybox.shutdownShared();
+      if(eyesRetired!=S_OK||skyRetired!=S_OK||previousRetired!=S_OK){
+        nativeTracePrintf("shared_capture_retained,eyes=%08lx,skybox=%08lx\n",(unsigned long)eyesRetired,(unsigned long)skyRetired);
+        return clean=false;
+      }
+    }
+    ShutdownTrace captureStage("host_capture_release",tracing);
+    skybox.shutdown();captured.shutdown();previousPair.shutdown();captureStage.end(true);
+    ShutdownTrace stereoStage("host_stereo_shutdown",tracing);
+    const auto stereoResult=stereo.shutdown();
+    clean=result("destroy_swapchains",stereoResult)&&clean;stereoStage.end(stereoResult==XR_SUCCESS);
+    if(stereo.needsGpuDrain())return clean=false; // do not invalidate its session/images
+    ShutdownTrace seatedStage("host_seated_shutdown",tracing);
+    const auto seatedResult=seated.shutdown();
+    clean=result("destroy_seated_space",seatedResult)&&clean;seatedStage.end(seatedResult==XR_SUCCESS);
+    // xrDestroySession is allowed in any state once handle users are excluded.
+    // Normal exit ends a STOPPING session in the loop; failed/cancelled startup
+    // may destroy directly, without an invalid xrEndSession in another state.
+    ShutdownTrace bindingStage("host_binding_shutdown",tracing);
+    // Join the pacer's worker before xrDestroySession: an in-flight
+    // xrWaitFrame must return before the session handle it was given goes
+    // away, and stop() blocks exactly as long as that takes.
+    pacer.stop();
+    const auto bindingResult=binding.shutdown();
+    clean=result("destroy_binding",bindingResult)&&clean;bindingStage.end(bindingResult==XR_SUCCESS);
+    view=local=XR_NULL_HANDLE;session=XR_NULL_HANDLE;
+    state.abandonAfterOwnerDestruction();
+    ShutdownTrace graphicsStage("host_graphics_reset",tracing);
+    graphics.reset();externalDevice=nullptr;graphicsStage.end(true);
+    ShutdownTrace instanceStage("host_instance_destroy",tracing);
+    XrResult instanceResult=XR_SUCCESS;
+    if(instance && api.destroyInstance) {
+      instanceResult=api.destroyInstance(instance);
+      clean=result("xrDestroyInstance",instanceResult)&&clean;instance=XR_NULL_HANDLE;
+    }
+    instanceStage.end(instanceResult==XR_SUCCESS&&!instance);
+    ShutdownTrace loaderStage("host_loader_free",tracing);
+    BOOL loaderFreed=TRUE;
+    if(api.module) {loaderFreed=FreeLibrary(api.module);api.module=nullptr;}
+    loaderStage.end(loaderFreed!=FALSE);
+    if(runtimeGeneration) {
+      ShutdownTrace finishStage("host_gate_finish",tracing);
+      const bool finished=gate.finishGeneration(runtimeGeneration);
+      clean=finished&&clean;finishStage.end(finished);
+      runtimeGeneration=0;
+    }
+    return clean;
+  }
+  bool open(const RuntimeOptions& options) {
+    startupSteps=StartupSteps{};
+    auto step=StepClock::now();
+    // SteamVR decides what to call this process at the connect inside
+    // xrCreateInstance, so the loan is in place before the runtime loads and
+    // withdrawn the moment the instance exists (steam_identity.h).
+    SteamIdentityLoan identity; identity.begin();
+    api.module=LoadLibraryExW(options.loader.c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    if(!api.module) {nativeTracePrintf("error,LoadLibraryExW,%lu\n",GetLastError());return false;}
+    api.get=reinterpret_cast<PFN_xrGetInstanceProcAddr>(GetProcAddress(api.module,"xrGetInstanceProcAddr"));
+    if(!api.get) return result("xrGetInstanceProcAddr",XR_ERROR_FUNCTION_UNSUPPORTED);
+    if(!load(api,XR_NULL_HANDLE,"xrEnumerateInstanceExtensionProperties",api.extensions)||
+       !load(api,XR_NULL_HANDLE,"xrCreateInstance",api.createInstance)) return false;
+    std::vector<XrExtensionProperties> extensions;
+    if(!result("extensions",enumerate<XrExtensionProperties>([&](uint32_t c,uint32_t*n,XrExtensionProperties*p){
+      return api.extensions(nullptr,c,n,p);},extensions,{XR_TYPE_EXTENSION_PROPERTIES}))) return false;
+    bool d3d=false,timeConversion=false;
+    displayRefreshExtension=false;
+    api.displayRefreshRate=nullptr;
+    visibilityMaskExtension=false;api.visibilityMask=nullptr;
+    perfSettingsExtension=false;api.perfSettingsLevel=nullptr;
+    perfMetricsExtension=false;api.perfMetricsEnumeratePaths=nullptr;api.perfMetricsSetState=nullptr;
+    api.perfMetricsQueryCounter=nullptr;api.pathToString=nullptr;
+    for(const auto& e:extensions) {
+      d3d|=std::strncmp(e.extensionName,XR_KHR_D3D11_ENABLE_EXTENSION_NAME,XR_MAX_EXTENSION_NAME_SIZE)==0;
+      timeConversion|=std::strncmp(e.extensionName,XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME,XR_MAX_EXTENSION_NAME_SIZE)==0;
+      displayRefreshExtension|=std::strncmp(e.extensionName,XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME,XR_MAX_EXTENSION_NAME_SIZE)==0;
+      visibilityMaskExtension|=std::strncmp(e.extensionName,XR_KHR_VISIBILITY_MASK_EXTENSION_NAME,XR_MAX_EXTENSION_NAME_SIZE)==0;
+      perfSettingsExtension|=std::strncmp(e.extensionName,XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME,XR_MAX_EXTENSION_NAME_SIZE)==0;
+      perfMetricsExtension|=std::strncmp(e.extensionName,XR_META_PERFORMANCE_METRICS_EXTENSION_NAME,XR_MAX_EXTENSION_NAME_SIZE)==0;
+    }
+    if(!d3d) return result("XR_KHR_D3D11_enable",XR_ERROR_EXTENSION_NOT_PRESENT);
+    if(!timeConversion)return result("XR_KHR_win32_convert_performance_counter_time",XR_ERROR_EXTENSION_NOT_PRESENT);
+    XrInstanceCreateInfo ci{XR_TYPE_INSTANCE_CREATE_INFO};
+    // What a runtime shows when it has nothing better: SteamVR's fallback
+    // entry, Pimax's client log. SteamVR also lowercases it into an app key
+    // that names a .vrappconfig file, so no colon.
+    std::strcpy(ci.applicationInfo.applicationName,"Elite Dangerous (EDVR)");
+    std::strcpy(ci.applicationInfo.engineName,"EDVR");ci.applicationInfo.apiVersion=XR_MAKE_VERSION(1,0,0);
+    const char* enabled[6]={XR_KHR_D3D11_ENABLE_EXTENSION_NAME,XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME};
+    unsigned enabledCount=2;
+    if(displayRefreshExtension)enabled[enabledCount++]=XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME;
+    if(visibilityMaskExtension)enabled[enabledCount++]=XR_KHR_VISIBILITY_MASK_EXTENSION_NAME;
+    if(perfSettingsExtension)enabled[enabledCount++]=XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME;
+    if(perfMetricsExtension)enabled[enabledCount++]=XR_META_PERFORMANCE_METRICS_EXTENSION_NAME;
+    ci.enabledExtensionCount=enabledCount;ci.enabledExtensionNames=enabled;
+    const XrResult created=api.createInstance(&ci,&instance);
+    identity.end();
+    // Absent from a log means open() never reached the instance; vrserver.txt
+    // then shows the key: "ProcessConnected BEGIN <pid> ... 9 steam.app.359320".
+    nativeTracePrintf("steam_identity,variable=SteamAppId,source=%s,app_id=%ls,withdrawn=%u,instance=%d\n",
+      identity.sourceName(),identity.appId(),unsigned(identity.isWithdrawn()),int(created));
+    if(!result("xrCreateInstance",created)) return false;
+    // Optional capability: an unavailable query cannot prevent VR startup.
+    if(displayRefreshExtension&&!load(api,instance,"xrGetDisplayRefreshRateFB",api.displayRefreshRate))
+      api.displayRefreshRate=nullptr;
+    if(visibilityMaskExtension&&!load(api,instance,"xrGetVisibilityMaskKHR",api.visibilityMask))api.visibilityMask=nullptr;
+    if(perfSettingsExtension&&!load(api,instance,"xrPerfSettingsSetPerformanceLevelEXT",api.perfSettingsLevel))
+      api.perfSettingsLevel=nullptr;
+    if(perfMetricsExtension) {
+      if(!load(api,instance,"xrEnumeratePerformanceMetricsCounterPathsMETA",api.perfMetricsEnumeratePaths))
+        api.perfMetricsEnumeratePaths=nullptr;
+      if(!load(api,instance,"xrSetPerformanceMetricsStateMETA",api.perfMetricsSetState))api.perfMetricsSetState=nullptr;
+      if(!load(api,instance,"xrQueryPerformanceMetricsCounterMETA",api.perfMetricsQueryCounter))
+        api.perfMetricsQueryCounter=nullptr;
+      if(!load(api,instance,"xrPathToString",api.pathToString))api.pathToString=nullptr;
+    }
+#define LOAD(name,field) if(!load(api,instance,name,api.field)) return false
+    LOAD("xrDestroyInstance",destroyInstance); LOAD("xrGetInstanceProperties",instanceProperties);
+    LOAD("xrGetSystem",getSystem); LOAD("xrEnumerateViewConfigurations",configurations);
+    LOAD("xrGetSystemProperties",systemProperties);LOAD("xrConvertWin32PerformanceCounterToTimeKHR",convertTime);
+    LOAD("xrEnumerateViewConfigurationViews",viewSizes); LOAD("xrEnumerateEnvironmentBlendModes",blends);
+    LOAD("xrGetD3D11GraphicsRequirementsKHR",requirements);
+    LOAD("xrDestroySession",destroySession); LOAD("xrCreateSession",createSession);
+    LOAD("xrDestroySpace",destroySpace); LOAD("xrCreateReferenceSpace",createSpace);
+    LOAD("xrEnumerateReferenceSpaces",spaces); LOAD("xrLocateViews",locateViews);
+    LOAD("xrLocateSpace",locateSpace); LOAD("xrRequestExitSession",requestExit);
+    LOAD("xrPollEvent",frames.pollEvent); LOAD("xrBeginSession",frames.beginSession);
+    LOAD("xrEndSession",frames.endSession); LOAD("xrWaitFrame",frames.waitFrame);
+    LOAD("xrBeginFrame",frames.beginFrame); LOAD("xrEndFrame",frames.endFrame);
+    LOAD("xrEnumerateSwapchainFormats",stereo.enumerateSwapchainFormats);
+    LOAD("xrCreateSwapchain",stereo.createSwapchain); LOAD("xrDestroySwapchain",stereo.destroySwapchain);
+    LOAD("xrEnumerateSwapchainImages",stereo.enumerateSwapchainImages);
+    LOAD("xrAcquireSwapchainImage",stereo.acquireSwapchainImage);
+    LOAD("xrWaitSwapchainImage",stereo.waitSwapchainImage); LOAD("xrReleaseSwapchainImage",stereo.releaseSwapchainImage);
+#undef LOAD
+    XrInstanceProperties ip{XR_TYPE_INSTANCE_PROPERTIES};
+    if(!result("xrGetInstanceProperties",api.instanceProperties(instance,&ip))) return false;
+    nativeTracePrintf("runtime,%.*s,%llu\n",XR_MAX_RUNTIME_NAME_SIZE,ip.runtimeName,(unsigned long long)ip.runtimeVersion);
+    copyLabel(runtimeLabel,ip.runtimeName);
+    XrSystemGetInfo si{XR_TYPE_SYSTEM_GET_INFO};si.formFactor=XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
+    if(!result("xrGetSystem",api.getSystem(instance,&si,&system))) return false;
+    XrSystemProperties properties{XR_TYPE_SYSTEM_PROPERTIES};
+    if(!result("xrGetSystemProperties",api.systemProperties(instance,system,&properties)))return false;
+    copyLabel(systemLabel,properties.systemName);
+    // The name goes last: systemName is up to 256 bytes and may carry commas,
+    // and the fixed fields must not shift. Traced here so the line exists even
+    // when a later step fails, and so the unpaired diagnostic prints it.
+    nativeTracePrintf("system,vendor=%u,max_size=%ux%u,name=%.*s\n",properties.vendorId,
+        properties.graphicsProperties.maxSwapchainImageWidth,properties.graphicsProperties.maxSwapchainImageHeight,
+        XR_MAX_SYSTEM_NAME_SIZE,properties.systemName);
+    // The key the user copies into fix.openxr_resolution, from the same 64-byte
+    // copies the ABI carries; only the first two fields are machine-readable.
+    nativeTracePrintf("headset_key,%s,runtime=%.*s,system=%.*s\n",
+        edvr::native_render::headsetKey(edvr::native_render::headsetToken(runtimeLabel,sizeof(runtimeLabel)),
+            edvr::native_render::headsetToken(systemLabel,sizeof(systemLabel))).c_str(),
+        XR_MAX_RUNTIME_NAME_SIZE,ip.runtimeName,XR_MAX_SYSTEM_NAME_SIZE,properties.systemName);
+    std::vector<XrViewConfigurationType> configs;
+    if(!result("view_configurations",enumerate<XrViewConfigurationType>([&](uint32_t c,uint32_t*n,XrViewConfigurationType*p){
+      return api.configurations(instance,system,c,n,p);},configs))) return false;
+    if(std::find(configs.begin(),configs.end(),XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO)==configs.end())
+      return result("PRIMARY_STEREO",XR_ERROR_VIEW_CONFIGURATION_TYPE_UNSUPPORTED);
+    std::vector<XrEnvironmentBlendMode> blends;
+    if(!result("blend_modes",enumerate<XrEnvironmentBlendMode>([&](uint32_t c,uint32_t*n,XrEnvironmentBlendMode*p){
+      return api.blends(instance,system,XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,c,n,p);},blends))) return false;
+    if(std::find(blends.begin(),blends.end(),XR_ENVIRONMENT_BLEND_MODE_OPAQUE)==blends.end())
+      return result("OPAQUE",XR_ERROR_ENVIRONMENT_BLEND_MODE_UNSUPPORTED);
+    std::vector<XrViewConfigurationView> views;
+    if(!result("view_sizes",enumerate<XrViewConfigurationView>([&](uint32_t c,uint32_t*n,XrViewConfigurationView*p){
+      return api.viewSizes(instance,system,XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,c,n,p);},views,{XR_TYPE_VIEW_CONFIGURATION_VIEW}))) return false;
+    if(views.size()!=2 || !validSize(views[0]) || !validSize(views[1])) return result("stereo_sizes",XR_ERROR_VALIDATION_FAILURE);
+    for(unsigned eye=0;eye<2;++eye) {
+      sizes[eye]=views[eye];
+      renderBounds[eye]={sizes[eye].recommendedImageRectWidth,sizes[eye].recommendedImageRectHeight,
+          (std::min)(uint32_t(sizes[eye].maxImageRectWidth),uint32_t(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION)),
+          (std::min)(uint32_t(sizes[eye].maxImageRectHeight),uint32_t(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION))};
+      nativeTracePrintf("size,%u,%u,%u,max=%ux%u\n",eye,sizes[eye].recommendedImageRectWidth,sizes[eye].recommendedImageRectHeight,
+          renderBounds[eye].maxWidth,renderBounds[eye].maxHeight);
+    }
+    XrGraphicsRequirementsD3D11KHR req{XR_TYPE_GRAPHICS_REQUIREMENTS_D3D11_KHR};
+    if(!result("xrGetD3D11GraphicsRequirementsKHR",api.requirements(instance,system,&req))) return false;
+    startupSteps.instance=stepMs(step);step=StepClock::now();
+    // Without a provider or proxy (bare test rigs) the device comes from
+    // System32's d3d11, never from an import, which beside the game or in
+    // build\ would bind to EDVR's own proxy.
+    decltype(&D3D11CreateDevice) createDevice=systemD3D11CreateDevice();
+    if(options.graphicsProvider || !options.graphicsProxy.empty()) {
+      if(options.graphicsProvider && !externalDevice)
+        return result("paired_graphics_device_missing",XR_ERROR_GRAPHICS_DEVICE_INVALID);
+      graphicsProxy=options.graphicsProvider ? options.graphicsProvider :
+        LoadLibraryExW(options.graphicsProxy.c_str(),nullptr,
+          LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+      if(!graphicsProxy){nativeTracePrintf("error,graphics_proxy_load,%lu\n",GetLastError());return false;}
+      createDevice=reinterpret_cast<decltype(createDevice)>(GetProcAddress(graphicsProxy,"D3D11CreateDevice"));
+      bridgeCounts=reinterpret_cast<BridgeCounts>(GetProcAddress(graphicsProxy,"edvr_selftest_graphics_bridge"));
+      if(!createDevice||!bridgeCounts||!GetProcAddress(graphicsProxy,"edvrAcquireGraphicsBridge")||
+         !GetProcAddress(graphicsProxy,"edvrQueryNativeRenderSettings")||
+         !GetProcAddress(graphicsProxy,"edvrPublishNativeRenderSizing"))
+        return result("graphics_proxy_capability",XR_ERROR_FUNCTION_UNSUPPORTED);
+    }
+    HRESULT hr=E_FAIL;
+    if(separateGraphics()) {
+      if(!externalDevice||!graphicsCalls.invoke([&]{hr=NativeDevice::validate(externalDevice,req.adapterLuid,req.minFeatureLevel);})||FAILED(hr))
+        return result("producer_device_validation",XR_ERROR_GRAPHICS_DEVICE_INVALID);
+      hr=graphics.initializeSeparate(req.adapterLuid,req.minFeatureLevel);
+      // Name the d3d11 module the XR device came from, so a proxy handed back
+      // by a hooked LoadLibraryExW (3Dmigoto/EDHM) is visible above the error.
+      nativeTracePrintf("device_module,route=%s,path=%s\n",graphics.separateModuleRoute(),graphics.separateModulePath().c_str());
+    } else if(!graphicsCalls.invoke([&]{hr=externalDevice?
+        graphics.initializeExisting(externalDevice,req.adapterLuid,req.minFeatureLevel):
+        graphics.initialize(req.adapterLuid,req.minFeatureLevel,createDevice);}))
+      return result("device_render_boundary",XR_ERROR_INITIALIZATION_FAILED);
+    if(FAILED(hr)) {nativeTracePrintf("error,D3D11Device,%08lx\n",(unsigned long)hr);return false;}
+    nativeTracePrintf("device,adapter=%08lx:%08lx,feature=%x\n",(unsigned long)req.adapterLuid.HighPart,(unsigned long)req.adapterLuid.LowPart,unsigned(graphics.device()->GetFeatureLevel()));
+    // The figures beside a SLOW line (slow_regime.h) come from this device's adapter: the game's own adapter, since
+    // the two devices must share one for the eye textures to cross. A stack without IDXGIAdapter3 says so (armed line).
+    {const char* why=nullptr;vramAdapter.Attach(vramAdapterOf(graphics.device(),&why));vramWhy=why?why:"";}
+    if(!captureRenderSettings()) return false;
+    applyRenderScale();
+    if(!validSize(sizes[0]) || !validSize(sizes[1]))
+      return result("scaled_stereo_sizes",XR_ERROR_VALIDATION_FAILURE);
+    if(!publishRenderSizing(true)) return result("native_render_sizing_publish",XR_ERROR_RUNTIME_FAILURE);
+    startupSteps.device=stepMs(step);step=StepClock::now();
+    const BindingDispatch bindingApi{api.requirements,api.createSession,api.destroySession,api.spaces,api.createSpace,api.destroySpace};
+    if(!result("bind_existing_device",binding.initialize(bindingApi,instance,system,graphics.device())))return false;
+    session=binding.session();local=binding.localSpace();view=binding.viewSpace();
+    SystemRead metadata{};metadata.connected=true;
+    for(unsigned eye=0;eye<2;++eye){metadata.recommendedWidth[eye]=sizes[eye].recommendedImageRectWidth;metadata.recommendedHeight[eye]=sizes[eye].recommendedImageRectHeight;}
+    std::memcpy(metadata.runtimeName,ip.runtimeName,sizeof(metadata.runtimeName));
+    std::memcpy(metadata.systemName,properties.systemName,sizeof(metadata.systemName));
+    // The index is resolved from the validated adapter, not from an HMD EDID.
+    Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
+    if(FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))return result("system_adapter_factory",XR_ERROR_RUNTIME_FAILURE);
+    for(UINT n=0;;++n){Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;const HRESULT status=factory->EnumAdapters1(n,&adapter);
+      if(status==DXGI_ERROR_NOT_FOUND)break;if(FAILED(status))return result("system_adapter_enumeration",XR_ERROR_RUNTIME_FAILURE);
+      DXGI_ADAPTER_DESC1 desc{};if(FAILED(adapter->GetDesc1(&desc)))return result("system_adapter_description",XR_ERROR_RUNTIME_FAILURE);
+      if(NativeDevice::matchesLuid(desc.AdapterLuid,req.adapterLuid)){metadata.adapterIndex=int32_t(n);break;}
+    }
+    if(metadata.adapterIndex<0)return result("system_adapter_missing",XR_ERROR_GRAPHICS_DEVICE_INVALID);
+    geometryGeneration=geometry.begin(metadata);
+    refreshDisplayFrequency("session_created");
+    refreshHiddenMasks("session_created");
+    if(!geometryGeneration)return result("geometry_generation",XR_ERROR_LIMIT_REACHED);
+    startupSteps.session=stepMs(step);step=StepClock::now();
+    if(!result("stereo_initialize",stereo.initialize(api.stereo,session,graphics.device(),sizes,
+        separateGraphics()?nullptr:graphicsProxy,separateGraphics()?nullptr:&graphicsCalls,separateGraphics()))) return false;
+    startupSteps.stereo=stepMs(step);step=StepClock::now();
+    nativeTracePrintf("native_submit_path,deferred_consumer=%u,direct_scene=%u,timing_markers=after_submit\n",
+      unsigned(separateGraphics()),unsigned(separateGraphics()));
+    bool capturesReady=false;
+    if(separateGraphics()) {
+      capturesReady=captured.initializeShared(externalDevice,graphics.device(),&graphicsCalls)==S_OK&&
+          previousPair.initializeShared(externalDevice,graphics.device(),&graphicsCalls)==S_OK&&
+          skybox.initializeShared(externalDevice,graphics.device(),&graphicsCalls)==S_OK;
+    } else if(!graphicsCalls.invoke([&]{capturesReady=SUCCEEDED(captured.initialize(graphics.device()))&&SUCCEEDED(previousPair.initialize(graphics.device()))&&SUCCEEDED(skybox.initialize(graphics.device()));}))
+      return result("capture_render_boundary",XR_ERROR_GRAPHICS_DEVICE_INVALID);
+    if(!capturesReady)
+      return result("capture_initialize",XR_ERROR_GRAPHICS_DEVICE_INVALID);
+    nativeTracePrintf("graphics_ownership,mode=%s,producer_thread=%lu,xr_thread=%lu,distinct_devices=%u\n",
+        separateGraphics()?"separate":"borrowed",(unsigned long)graphicsCalls.thread,
+        (unsigned long)ownerThread,unsigned(externalDevice&&externalDevice!=graphics.device()));
+    nativeTracePrintf("swapchain_format,%lld\n",(long long)stereo.format());
+    if(!result("policy_initialize",state.reset(api.frames,instance,session,XR_ENVIRONMENT_BLEND_MODE_OPAQUE)))return false;
+    pacer.bind(api.frames.waitFrame,session);
+    if(!seated.begin({api.createSpace,api.destroySpace},session,local)||!changes.begin(session)||!resetEvents.begin(geometryGeneration))return false;
+    state.setUnhandledEventSink(referenceEvent,this);
+    state.setEventObserver(vendorEvent,this);
+    runtimeGeneration=gate.beginGeneration();
+    compositorGeneration=poses.begin();
+    if(runtimeGeneration&&compositorGeneration&&options.graphicsProvider&&externalDevice) {
+      HRESULT acquired=E_FAIL;
+      if(!graphicsCalls.invoke([&]{acquired=menu.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);})||acquired!=S_OK) {
+        nativeTracePrintf("native_menu,acquire_failure=%08lx\n",(unsigned long)acquired);return false;
+      }
+      nativeTracePuts("native_menu,provider_acquired=1");
+      acquired=E_FAIL;
+      if(!graphicsCalls.invoke([&]{acquired=temporal.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);})||acquired!=S_OK) {
+        nativeTracePrintf("native_temporal,acquire_failure=%08lx\n",(unsigned long)acquired);return false;
+      }
+      nativeTracePuts("native_temporal,provider_acquired=1");
+      acquired=E_FAIL;
+      if(!graphicsCalls.invoke([&]{acquired=sharpen.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);})||acquired!=S_OK) {
+        nativeTracePrintf("native_sharpen,acquire_failure=%08lx\n",(unsigned long)acquired);return false;
+      }
+      nativeTracePuts("native_sharpen,provider_acquired=1,order=after_temporal_before_menu");
+      acquired=E_FAIL;
+      if(!graphicsCalls.invoke([&]{acquired=features.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);})||acquired!=S_OK) {
+        nativeTracePrintf("native_features,acquire_failure=%08lx\n",(unsigned long)acquired);return false;
+      }
+      acquired=E_FAIL;
+      if(!graphicsCalls.invoke([&]{acquired=fss.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);})||acquired!=S_OK) {
+        nativeTracePrintf("native_fss,acquire_failure=%08lx\n",(unsigned long)acquired);return false;
+      }
+      nativeTracePuts("native_features,provider_acquired=1,physical_pose_before_render=1,stereo_transition_replay=1");
+      acquired=E_FAIL;
+      const bool timingAdmission=graphicsCalls.invoke([&]{acquired=timing.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);});
+      if(!timingAdmission) acquired=E_FAIL;
+      if(acquired!=S_OK) nativeTracePrintf("native_timing,unavailable=%08lx\n",(unsigned long)acquired);
+      else {
+        nativeTracePuts("native_timing,provider_acquired=1");
+        if(separateGraphics()) {
+          Microsoft::WRL::ComPtr<ID3D11DeviceContext> immediate;
+          graphics.device()->GetImmediateContext(&immediate);
+          deviceTimingReady=deviceTiming.initialize(graphics.device(),immediate.Get());
+          nativeTracePrintf("native_device_timing,initialized=%u,source=EDVR_on_XR_device,compositor=0\n",unsigned(deviceTimingReady));
+        }
+      }
+    }
+    startupSteps.other=stepMs(step);
+    return runtimeGeneration!=0&&compositorGeneration!=0;
+  }
+};
+} // namespace edvr::openxr

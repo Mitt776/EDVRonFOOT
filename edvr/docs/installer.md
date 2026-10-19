@@ -1,0 +1,442 @@
+# The installer
+
+`edvr-installer.exe` — one executable, carrying the native graphics/runtime
+pair, `openxr_loader.dll`, its license notice, `edvr.ini` and optional NVIDIA
+DLSS runtime as resources. It finds the game, installs or updates EDVR,
+preserves the settings you have changed, keeps other mods working, and can put
+everything back.
+
+This file is why it does what it does. Using it is one paragraph in the
+[README](../README.md).
+
+## Why it exists
+
+The manual install is five steps: place the native pair and bundled loader,
+preserve the original OpenVR DLL, and keep any existing graphics-mod chain.
+
+**Preserve the game's original `openvr_api.dll` for uninstall.** EDVR provides
+the compatibility entry points itself and sends frames to native OpenXR. It
+does not load the original library. Keeping that original lets uninstall
+restore the game without requiring launcher file verification.
+
+**One `d3d11.dll` name, several mods that want it.** EDHM installs as
+`d3d11.dll`. So does anything built on 3Dmigoto. Copying EDVR's file over it
+uninstalls the other mod silently — nothing reports an error, the other mod's
+effects are simply gone. The fix is a rename plus one line in `edvr.ini`, which
+is fine as an instruction and unreliable as a habit.
+
+The installer validates the supported Elite executable profile and native
+payload before writing. An unsupported profile fails closed instead of choosing
+a legacy OpenVR or LibOVR route.
+
+## Finding the game
+
+Nothing is guessed from a fixed path. Each store is asked in its own terms:
+
+| Store | Asked | Then |
+|---|---|---|
+| Steam | `HKCU\Software\Valve\Steam\SteamPath`, then every library in `steamapps\libraryfolders.vdf` | `steamapps\common\Elite Dangerous\Products\*` |
+| Epic | `%ProgramData%\Epic\EpicGamesLauncher\Data\Manifests\*.item` (`InstallLocation`) | `<location>\Products\*` |
+| Frontier | `%LOCALAPPDATA%\Frontier_Developments`, the uninstall registry (both views), and `Frontier\EDLaunch` on every fixed drive | `<root>\Products\*` |
+
+Every answer is then **confirmed by finding `EliteDangerous64.exe`**, and
+anything that fails that test is not offered. A folder the user browses to goes
+through the same confirmation. Odyssey products sort first, since that is what
+EDVR is for. Three storefronts on one machine is not unusual, so when more than
+one install is found the window pre-selects the one that already has EDVR in
+it.
+
+The `Openvr` folder is found by **file, not by name**: `Openvr\win64`, then
+`Openvr`, then the game folder, and whichever holds `openvr_api.dll` *or*
+`openvr_api_orig.dll` is the one. Both layouts are in the field, and after an
+install the renamed original is the only openvr file with a familiar name.
+
+## Whose file is this?
+
+Every decision below depends on telling EDVR's DLLs from the game's, from
+another mod's. That question is answered by **mapping the file read-only and
+parsing its export table** — never by loading it. Loading a stranger's
+`d3d11.dll` to ask what it is runs that stranger's `DllMain` inside the
+installer, and the file we are least sure about is exactly the one we would be
+executing.
+
+The discriminator is the same one `tools/gen_exports.py` uses to refuse
+building a proxy of a proxy: **an EDVR build exports `edvr_*` symbols** and
+nothing else in this world does. It is tested first and unconditionally — an
+EDVR proxy also exports everything the DLL it stands in for exports, so testing
+for `VR_InitInternal` or `D3D11CreateDevice` first would file every one of our
+own installs as the thing it replaced, and the installer would rename our proxy
+aside believing it had found the game's original.
+
+`VERSIONINFO` then gives a foreign file a name — ReShade, 3Dmigoto (which is
+what EDHM ships), or DXVK — which is both what the report calls it and what it
+gets renamed to (`d3d11_edhm.dll`). An unrecognised one becomes
+`d3d11_other.dll` rather than being called by a name it might not deserve.
+
+## The two halves
+
+**`d3d11.dll`**, in the game folder:
+
+| What is there | What happens |
+|---|---|
+| nothing | ours is written |
+| ours, same build | left alone (Repair rewrites it anyway) |
+| ours, older | backed up, replaced |
+| another mod | backed up, renamed `d3d11_<mod>.dll`, ours takes the name, `advanced.real_dll` points at it |
+| another mod, and we were installed here before | the same, reported as "it has replaced EDVR's d3d11.dll" |
+| another mod, and its own older copy is already parked under that name | the older copy goes to the backup folder, the newcomer takes its place in the chain |
+| unreadable (locked, or not a PE) | nothing is touched, and the report says why |
+
+A chain target that has gone away — the other mod was uninstalled properly —
+clears `advanced.real_dll` rather than leaving it naming a file that is not
+there. That question is asked on every run, including one that does not touch
+`d3d11.dll` at all.
+
+Repair is for when another mod's installer overwrites EDVR's files. A common
+case is EDHM's uninstaller running `del d3d11.dll`, which after an EDVR install
+deletes *ours*. Repair puts both back, side by side.
+
+**Native `openvr_api.dll` and the preserved original**, in `Openvr\win64`:
+
+| current | `openvr_api_orig.dll` | What happens |
+|---|---|---|
+| absent | absent or present | native runtime is written; an existing original is preserved for uninstall |
+| ours | present | native update; original remains untouched |
+| ours | absent | native update proceeds; uninstall will require a recoverable original |
+| game/OpenComposite runtime | absent | backed up, renamed to the original slot, then replaced by native OpenXR |
+| newer game runtime | older original | both are backed up; the newer runtime becomes the uninstall original |
+| another readable library | any | backed up before native installation; an existing original is preserved |
+| unreadable destination | any | installation is refused before writing |
+
+The native package does not require or select OpenComposite. The Windows Active
+OpenXR Runtime is selected by the bundled Khronos loader, which the installer
+places beside the native runtime. It does not search for or load a SteamVR or
+vendor loader.
+
+## Keeping your settings
+
+An update ships a new `edvr.ini`: new settings, new defaults, rewritten
+explanations. Copying it over the installed one throws away every value tuned
+in a headset. Leaving the installed one in place means new settings arrive
+undocumented and a changed default never reaches anybody. Both are silent, and
+the second is worse, because the file still looks right.
+
+So the installer keeps a copy of the shipped default of the version it
+installed, in `edvr_install\edvr.ini.base`, and does a **three-way merge**. The
+output is the new file, line for line, with your values written back into it:
+
+| Your file vs the version you had | Result |
+|---|---|
+| you changed a value | your value, in the new file's line |
+| you enabled an expert setting (`#fss_res = 0` → `fss_res = 1`) | stays enabled, at your value |
+| you never touched it | the new default, comments and all |
+| you deleted the line | the new file's line, commented out |
+| the setting no longer exists | carried to the end of its section, with a note |
+| a key that was never ours | carried verbatim |
+| the installer must set it (chaining) | forced, and reported as the installer's doing |
+
+Afterwards it tells you which settings kept your value and which took the new
+default.
+
+Indentation, the shipped spelling of the key, the spacing around `=` and any
+inline comment all survive a rewrite, so a diff against the shipped file stays
+readable. The parser follows `src/common/config.cpp` exactly — sections, `#`
+and `;`, inline comments needing whitespace in front, last value wins, BOM
+skipped — because a merge that disagreed with the game's reader about which
+value is live would write a file whose settings are not the ones it reports.
+
+With no base copy (a hand-installed rig meeting the installer for the first
+time) it falls back to comparing against the new defaults, which keeps
+everything that differs. That over-preserves — a default that moved between
+versions reads as an edit — and the report says so rather than pretending it
+was a three-way merge. In that mode it does **not** infer deletions: a setting
+your older file never had must arrive live, not commented out.
+
+### The flat edition has a settings file of its own
+
+The flat runtime reads `edvr-flat.ini` first and falls back to `edvr.ini` only
+while there is none (`config.cpp`), so the two editions never share tuning. The
+installer follows the same split, for every operation, in both installers:
+
+- **Install, update and repair** merge into the file of the edition being
+  installed -- `edvr-flat.ini` for flat, `edvr.ini` for VR -- and never read,
+  back up, replace or remove the other. The chain decision (`advanced.real_dll`)
+  lands in the file that runtime reads.
+- **A flat install that finds only `edvr.ini`** (one made before the split, or a
+  fresh flat install over a VR one) starts `edvr-flat.ini` from it through the
+  same merge, so the settings the flat runtime was reading carry over and the
+  chain key is forced in; `edvr.ini` is left exactly as it is.
+  `--replace-settings` gives fresh defaults instead. `tools/install_edvr.py`
+  seeds the file too, by copying `edvr.ini` as it stands.
+- **The kept base** (`edvr_install\edvr.ini.base`) is one file for both editions:
+  it is the shipped defaults of whichever edition the record says is installed. A
+  merge into the other edition's own file does not use it as a base (that would
+  read a value you changed as one you never touched); the shared `edvr.ini` a flat
+  install seeds from is the exception, since every earlier edition wrote it.
+- **Uninstall** removes the installed edition's file when asked (`--remove-settings`)
+  and no other. A flat install that never had its own file was reading the shared
+  `edvr.ini`, which the VR profile uses too, and that stays.
+- **The settings screen** shows and writes the installer's own edition's file;
+  under a flat installer with no `edvr-flat.ini` yet it shows what the runtime is
+  reading (`edvr.ini`) and the first change starts `edvr-flat.ini` from it.
+- **The mirror** keeps both files, and an `edvr-flat.ini` alone is enough for the
+  restore offer and the copy back. A restore that could not copy back every
+  settings file it holds says which one failed and reports failure, so a flat
+  file lost behind a shared file that did come back is not a success.
+- **The flat archive** ships its defaults as `edvr-flat.ini`, and its installer
+  carries them under that name.
+
+## The settings screen
+
+The second tab is every EDVR setting, with what it does, the value it ships
+with, and the range it will accept — edited there instead of in Notepad.
+Changes are written straight into `edvr.ini` (`edvr-flat.ini` in the flat
+installer), keeping its layout and comments, and the game re-reads that file
+about once a second, so there is no Apply button: the change is live by the
+time the mouse is up.
+
+**Under each control, one line: the word it is set to, and one link.** A switch
+shows a position, not a word, and nothing else on the row says that on writes
+`steady` and off writes `stock` — so that word sits underneath, quietly. Beside
+it, and only when the value is not the recommended one, a single link: *reset*
+where the recommendation is the shipped default, *try 0.7* where it is not (a
+0.3 curve with a 0.7 distance is a tested pairing, and neither number is the
+default). Only the link is clickable, and the pointer turns to a hand over it.
+
+That line used to name the value instead — "use splash", in the link colour,
+directly under a switch — and the field read it as a label for the switch's
+state rather than as a button, then read "use auto" beside an auto/on/off
+control as the control being wrong about itself. The whole line was one click
+target too, recommendation and "default splash" together, so one line of two
+phrases read as two links.
+
+**The table is generated, not written.** `tools/gen_settings_schema.py` builds
+it from the two places the facts already live:
+
+- the **accessor call** in the code gives the type, the declared range and the
+  compiled default (`getIntInRange("fix.remlok_line_angle", 46, 20, 60)`);
+- the **comment block** above the key in `edvr.ini` gives the explanation, and
+  its first sentence becomes the one-line summary in the row.
+
+Writing that down a third time in C++ would be a fourth list to forget to
+update — which is the failure `tools/check_config_contract.py` exists to catch
+between the other two.
+
+A key is usually read in more than one place, and not always the same way. The
+*typed* read — `getBool`, `getInt`, `getFloat` — is the one that says what the
+value is; a `getString` read of the same key beside it is the raw text wanted
+for a log line or a status echo, and never overrides it. Among typed reads, one
+that declares a range wins, because it is the read that clamps the value to
+those bounds. Two typed reads that disagree, on the kind or on the range, fail
+the build. The rule used to be "the first file walked wins", and that is how
+the Sharpening row shipped as a text box for three releases: the in-headset
+menu echoes `fix.render_sharpness` with `getString` from a file that sorts
+before the pass reading it with `getFloat`, and a text box that shows
+percentages wrote a typed `20` as `20` and showed it back as `2000%`
+([#35](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/35)).
+The generator's `--self-test` holds that shape, and `build.bat` runs it before
+generating.
+
+What neither source can know is added by hand, on one annotation line above the
+key: what to call the setting in a list, which value is recommended (usually
+the default, sometimes a tested pairing like a 0.3 curve with a 0.7 distance),
+the choices where the value is a word, and the bounds where they are documented
+in prose rather than declared in code.
+
+```ini
+# ui: Screen curve (on foot, intro, splash) | recommended 0.3 | range 0..1
+panel_curvature = 0.0
+
+# ui: Sun glare | choices vivid, realistic, stock
+sun_glare = vivid
+
+# ui: Scanner: heal the black squares | choices 1=on, 2=both eyes, 0=off
+fss_eye_heal = 1
+
+# ui: hidden -- the installer sets this when it chains another mod
+real_dll =
+```
+
+**Only `[fix]` is shown.** `[advanced]` and `[experimental]` are safety valves
+and developer instruments — the log names one when it wants you to change it,
+and that is the only way anybody should arrive at them; a list that offers them
+invites changing things nobody asked you to change. The remaining sections
+(`[hotkey]`, `[log]`, `[d3d11]`) are plumbing named after the
+halves of EDVR that read them. A `ui:` line outside `[fix]` is a build error,
+so the rule cannot drift by accident.
+
+**Every row says when it takes effect.** Most settings are live — EDVR re-reads
+`edvr.ini` about once a second — and those that are not are marked *restart the
+game*: at present `share_exposure`, `transition_flash`, `openxr_resolution`,
+and the two `vscreen_res_*` sizes. That fact is not a fourth list either: it
+comes from what the comment block in `edvr.ini` already says ("Live." or the
+sentence naming a restart), and a setting whose prose says neither fails the
+build. Somebody who changes a setting and sees nothing happen otherwise has no
+way to tell a fix that needs a restart from one that is not working.
+
+**A setting that is live in `edvr.ini` must have one of those lines, or the
+build fails.** Uncommenting a key is what promoting a fix to shipped-on looks
+like, and a fix that ships on but never appears in the settings window is
+invisible to everybody who does not edit ini files — while nothing else in the
+build notices, because the game reads it, the log names it, and only the window
+that was supposed to expose it is silent. `hidden` is a valid answer, with a
+reason; forgetting is not. Commented-out expert settings are exempt: annotate
+one and it appears, leave it and it stays where it is.
+
+## Save logs
+
+**Save logs** writes one zip to the Desktop: the most recent session's logs,
+`edvr_breadcrumbs.txt`, any `edvr_FATAL.txt`, `edvr.ini` and the install
+record. That is the list [Reporting a
+problem](../README.md#reporting-a-problem) asks for — four things in three
+folders, named in a paragraph somebody reads while annoyed — collected by the
+program that is already open and already knows which folder the game is in and
+where `log.dir` moved the logs to.
+
+*Most recent session* is meant literally. EDVR names its logs
+`edvr_<gfx|vr>_YYYYMMDD_HHMMSS.log` and writes two a few seconds apart at each
+launch, so the newest stamp and everything within three minutes of it is one
+session; older sessions are left out, because an attachment with six launches
+in it is harder to read, not more informative. The stamp is taken from the
+**name** rather than the write time, since copying a folder, restoring a backup
+or unpacking somebody else's zip rewrites write times — all things that happen
+to a folder on its way into a bug report.
+
+The zip is written by hand (stored, not deflated) rather than by linking a
+compression library or shelling out to PowerShell: logs are small, every tool
+opens a stored zip, and the installer stays one file with nothing behind it. It
+is the one action that stays available while the game is running, which is
+exactly when somebody wants it. `--collect-logs` does the same from the command
+line. Planned enhancements (including bundling flat `shaders/` diagnostic
+dumps, post-crash alert banners, and active process guards) are documented in
+[diagnostic-reporting-automation-2026-09-26.md](diagnostic-reporting-automation-2026-09-26.md).
+
+
+## Doing it safely
+
+- **Nothing happens without a yes.** The plan is worked out in full, shown, and
+  confirmed before a file moves. Both confirmations default to *No*, because
+  Install is the window's default push button and two stray Return presses at a
+  window that has just taken focus should not be able to modify a game folder.
+- **A stale plan does nothing.** The plan records what each file was when it
+  was made; if any of them changed while the confirmation was open — another
+  installer ran, a game update landed, a second copy of this window did the job
+  — the run is refused before the first step rather than executed against a
+  folder it no longer describes.
+- **Names that come from `edvr.ini` are checked to be names.**
+  `advanced.real_openvr_dll` ends up as a rename destination, and a value with
+  a path in it would move the game's runtime somewhere else entirely while the
+  report said otherwise. Anything that is not a plain sibling filename falls
+  back to the default.
+- **Everything replaced is copied into `edvr_backup\<timestamp>\` first.** That
+  is also what makes a lost `openvr_api_orig.dll` recoverable later.
+- **A failed step rolls the run back.** Each step records its own undo, and
+  rollback restores the bytes of files that were replaced or deleted. Writes go
+  to a temp file and are moved into place, so a failure part-way cannot leave a
+  truncated DLL where a working one was.
+- **A file that is busy for a moment does not fail the run.** A real-time
+  scanner, the search indexer or a backup tool has a file it just looked at open
+  for a few milliseconds, and the classic rename refuses to replace a file while
+  ANY handle to it is open. Writing a DLL over another, and moving the game's
+  runtime aside, go through the same replace as the settings writer
+  (`replaceFileAtomic`): a POSIX-semantics rename first, which goes through
+  under a reader that shares delete access, the classic one where the volume
+  cannot do that, and either tried again for up to two seconds while the answer
+  is a sharing violation, access denied or a lock violation. Until 2026-09-29
+  the first refusal failed the run and rolled it back with "Access is denied";
+  the rig, under a stand-in for a scanner, saw it in a few runs in a hundred.
+  Copies, deletes and the rollback itself still do not wait.
+- **Uninstall never leaves the folder without an `openvr_api.dll`.** If the
+  game's original is missing it is restored from an EDVR backup, and if there
+  is no backup either, ours stays where it is with an explanation — removing it
+  would be worse than leaving it.
+- **The install record is written last**, so a run interrupted half way leaves
+  the previous one, which still describes the folder better than a half-true
+  new one.
+- **`asInvoker`.** A Steam library on another drive needs no elevation;
+  demanding it every time trains people to click through a UAC prompt they did
+  not need. When a folder does need it, the installer says so and relaunches
+  itself already confirmed. It asks for administrator rights only if the game
+  is under `Program Files`, and only when it reaches that step.
+- **The game must be closed**, and it says which it is rather than failing on a
+  locked file halfway through. *This* game: the running `EliteDangerous64.exe`
+  is asked where it was launched from, and only a copy running out of the
+  folder being installed into stops the run. A machine with two installs — a
+  Frontier launcher one and a Steam one — plays one while the other is patched,
+  and a refusal that went by the executable's name alone stopped the folder
+  nobody was in. The other install being up is said out loud rather than passed
+  over in silence. A process whose path cannot be read at all counts as this
+  one, since a refusal is the direction somebody can recover from.
+
+## NVIDIA's DLSS runtime
+
+`temporal_aa = dlaa` and `dlss` hand each frame to NVIDIA's history, which
+lives in `nvngx_dlss.dll`. The driver does not ship that file (on the rig this
+was built on the driver store holds the NGX loader and the frame-generation
+library, and NGX keeps an over-the-air model cache under
+`ProgramData\NVIDIA\NGX`, but no super-resolution runtime), so the application
+has to carry it, and the DLSS SDK licence allows exactly that: the runtime may
+be distributed as incorporated into an application, not as a stand-alone
+download. So it rides inside the installer, unmodified, and is placed beside
+the game's executable, where NGX looks for it, under three rules. Only where an
+NVIDIA adapter is present, by DXGI's vendor id (a machine with an AMD
+integrated GPU beside an RTX card counts): it is 59 MB, and on any other card
+the pass falls back to its own history regardless. Only when the slot is empty
+or holds the copy a previous EDVR install placed: a copy you put there
+yourself, or one NVIDIA's updater replaced, is left alone, and the report says
+so. And uninstall removes only the copy EDVR placed, by the hash in the install
+record. A build made without the DLSS SDK ships an installer without the
+runtime, and says so in its window and its report.
+
+## What it does not do
+
+No network access of any kind: it installs what it carries, and "update" means
+running the newer installer. No telemetry. No registry writes — the registry is
+only read, to find the game. No Add/Remove Programs entry, no shortcuts, no
+services, no scheduled tasks. Nothing outside the game folder, `edvr_backup\`
+and `edvr_install\`.
+
+## The command line
+
+The window is the product; the command line is what makes it testable and
+scriptable.
+
+```
+edvr-installer.exe --install [--dir D] [--dry-run]
+edvr-installer.exe --repair [--dir D]
+edvr-installer.exe --uninstall [--dir D] [--remove-settings]
+edvr-installer.exe --collect-logs [--dir D]
+edvr-installer.exe --help
+```
+
+`--replace-settings` does what it says. Without `--dir` it finds the installs
+itself and refuses to guess when there is more than one. `--dry-run` prints the
+plan and touches nothing. It is a GUI-subsystem program, so a command-line run
+borrows the calling console; run it with `start /wait` if the interleaved
+prompt bothers you.
+
+## How it is built and tested
+
+`build.bat` builds the native graphics/runtime pair before the installer.
+`tools/gen_installer_rc.py` validates the native graphics marker/providers,
+native runtime exports, bundled loader and notice before generating resources.
+A missing or mismatched native resource fails the build; there is no half-patch
+installer. The linker's own manifest is turned off with `/MANIFEST:NO` — two
+`RT_MANIFEST` resources in one image is a program Windows refuses to start.
+
+The installed game's exact executable profile is checked separately by the
+installer before any mutation.
+
+`tools/installer_test` is the reason the planner is a pure function of a survey
+of the folder. Every case worth getting right is a state of somebody else's
+machine — EDHM in the `d3d11.dll` slot, another mod's installer having
+overwritten ours, a game update that put the stock `openvr_api.dll` back, an
+original lost to a double rename, an `edvr.ini` full of tuned values — and none
+of them can be produced to order on the machine doing the build. They are all
+written down there instead, along with an end-to-end install, uninstall and
+rollback against real files in a scratch folder.
+
+Two guards exist because the failure they catch is invisible: the resource
+generator refuses a manifest that is not valid XML, and the build runs the
+finished installer with `--help` and fails if it does not start. A bad manifest
+links perfectly and dies before `main()`.

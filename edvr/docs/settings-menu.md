@@ -1,0 +1,1492 @@
+# The in-headset settings menu: a design
+
+## Status
+
+*Updated 2026-10-08 (previously 2026-09-29). Historical findings summarize
+the journal below; the current timing and overlay qualification is linked separately. Dated notes
+and the ruled-out list: "Status detail", straight after this block.*
+
+- **Current code state (2026-10-08; dated notes in Status detail):**
+  - Explorer Cam page (2026-10-08): Eye height / forward / sideways and
+    Head-follow smoothing, live, for everyone. BUILT, NOT FLOWN.
+  - Hotkeys page (2026-10-08): key, pad or HOTAS rebinding of the menu, Explorer
+    Cam, exposure and history keys. FLOWN OK ("worked great"). Sections
+    "Hotkeys page" and "Explorer Cam page" below.
+  - Performance page: one `UI quality` row (`fix.ui_quality`, off / 100% /
+    125%; default 100) drives the cockpit panels' size and the UI layer;
+    BUILT, NOT FLOWN as of its 2026-09-23 entry. Gone: the `HUD quality` row,
+    `advanced.ui_replay` (retired 48ad7689), the Foveation centre row
+    (`experimental.foveation_centre`) and the three `Trim view` rows (ini-only
+    since 2026-09-29). Its `Settlement detail` row: removed 2026-10-08 (claude/remove-settlement-detail).
+  - Monitor page: no rows the compositor's frame timing filled (frame_flag v34).
+  - Single-line overlay: fits its text, keeps its font size across OpenXR
+    resolutions, shows application GPU/CPU timings. Full desktop gates
+    passed; headset checks: [combined test guide](native-render-benchmark-2026-09-15.md).
+- **State:** Supersedes and extends Feature 4 of performance.md
+  (2026-09-05), which now points here. Written 2026-09-07 on branch
+  `claude/ingame-settings-menu-78317d` off main `5e2d545`; claims are
+  marked MEASURED (desk or field log) or BELIEVED (inference, gated in
+  "Phase 0"). Phase A (the menu) was BUILT and UNFLOWN per the 2026-09-07
+  status note, then FLOWN that evening on a Pimax Crystal Super under
+  SteamVR — panel holds still, keys private, rows write the ini — and
+  has taken fixes through 2026-09-11 (see Detail). The 2026-09-07 claim
+  that every Phase 0 gate was open is not revisited later, though gates
+  get dated measurements below.
+- **Open:**
+  - The four items under "Open questions for Sean" (F8 vs a chord as
+    summon key; `keyboard = private` as default; where `developer`
+    lives; which `[fix]` rows get the `menu` token) — "Settings sketch"
+    already ships F8 and `private`, so those two may be settled without
+    this section saying so.
+  - Whether the 2026-09-10 DirectInput8Create-capture fix (see Ruled
+    out) has itself been confirmed by a flight is not stated.
+  - Phase 0 gates with no dated measurement here: G4 (GDI cost and
+    legibility), G6 (`aim = both` tuning), G11 (focus/Alt-Tab), G14 (the
+    leak audit).
+- **Ruled out:** four entries (shared-DirectInput-vtable door, `menu.aim =
+  both` default, `Compositor_FrameTiming` at the modern offsets, the
+  climbing "with EDVR" drop count): "Ruled out" in Status detail.
+- **Environment:** The DirectInput8Create fix is stated
+  runtime-independent ("applies to both SteamVR and OpenComposite"); the
+  first flight (2026-09-07) was a Pimax Crystal Super under SteamVR;
+  later entries (2026-09-08 on) say "the Steam copy" or "Sean's rig"
+  without restating the headset. The shared-vtable door held on the
+  install tested first but not the Steam copy, where Steam's overlay may
+  hand out private per-device tables.
+- **Detail:** "The keyboard gate" for the three doors and fail-open
+  rules; "Navigation and interaction" for the DirectInput finding, the
+  footer fix, "Your Elite keys (2026-09-11)" and the Tab-follows-page-pair
+  fix; "What it shows" for the Monitor page's `Compositor_FrameTiming`
+  finding; "Phase 0 -- what must be measured before code depends on it"
+  for gates G1-G14; "Open questions for Sean"; "Phasing" for phases A/B/C.
+
+## Status detail (moved out of Status 2026-09-29)
+
+Moved verbatim out of the Status block (dated change notes, then the
+ruled-out list); the summary above points here.
+
+### Dated change notes
+
+- **2026-09-29:** the `UI quality` row's shipped value is `100` (it shipped
+  `off`), and the value read when the ini has no line is `100` too, so the
+  row's `R` (reset to the shipped value) writes `100`. A new install, and an
+  update whose file never touched the key, get the interface panels at HMD
+  Quality 1.0's size and, with `fix.temporal_aa` on, the UI layer; a file that
+  set the key keeps its value (docs/ui-layer-2026-09-23.md, journal
+  2026-09-29, says what the merge does and does not distinguish).
+- **2026-09-29:** the Performance page's three `Trim view` rows are gone.
+  `fix.fov_trim_vertical`, `_outer` and `_nasal` are now the ini-only
+  `experimental.fov_trim_vertical`, `_outer` and `_nasal` (each `# dev:
+  hidden`, so not even a developer-tier row), with the same per-headset lists,
+  ranges and live behaviour; an old `[fix]` line still reads through, and the
+  installer's merge moves it (eye-mask-2026-09-16.md, journal 2026-09-29).
+  The generic per-headset row (`isHeadsetRow` and everything only it used)
+  left menu.cpp with them; the `OpenXR res.` row keeps the per-headset
+  machinery it shares (`applyHeadsetChange`, `wornEntryRemovable`,
+  `savedForText`). `tools/gen_settings_schema.py` refuses to emit a row for
+  the three (OFF_MENU).
+- **State: the door GPU bracket retired 2026-09-29 (code removed, e3109af4).**
+  `edvrDoorGpuBegin` and `edvrDoorGpuEnd` (nothing called them once the legacy
+  openvr half went), the per-eye query ring behind them and the Monitor's
+  "EDVR's GPU time at the door" tile are gone. The paragraph on it below is
+  history.
+- **State: `edvrMenuPanel` retired 2026-09-29 (code removed, 6ecbd241).** The
+  export, and `edvrEyeCaptureArm` and `edvrFssTheater` with it, had no caller
+  once the legacy openvr half was deleted. The design text on the export and on
+  the door lambda below is history.
+- **2026-09-24:** the Performance page's Foveation centre row is gone
+  with its key (`experimental.foveation_centre`, retired).
+- **2026-09-23, later:** the Monitor page drops the rows the compositor's
+  frame timing filled -- DROPPED, BY CAUSE and REPROJECTED always, APP GPU
+  and GPU TIME off the native path -- instead of showing "--" for good:
+  that timing crossed from the legacy openvr half, and frame_flag v34
+  retired the channel nothing had written since the proxy went. The drop
+  log line and the last-drop line speak of long frames only.
+- **2026-09-23:** the Performance page's `UI quality` row (`fix.ui_quality`)
+  is one row for the cockpit panels' size and the UI layer; the one-day
+  `HUD quality` row is gone (see the journal's dated entries). Its choices
+  read off / 100% / 125% (the file's `off | 100 | 125`).
+- **Current change:** The smaller single-line overlay fits its displayed text and keeps its font size across
+  OpenXR resolutions and shows application GPU/CPU elapsed timings. Full
+  desktop gates passed; headset checks remain in the
+  [combined test guide](native-render-benchmark-2026-09-15.md).
+
+### Ruled out
+
+- **Ruled out:**
+  - The shared-DirectInput-vtable door, on the Steam install: the menu
+    reported "keys private" while Tab still reached the ship
+    (2026-09-08), confirmed by a 2026-09-10 flight log — fixed by
+    capturing `DirectInput8Create` itself instead of a shared table.
+  - `menu.aim = both` as default: "fought the keys" in the first flight
+    (2026-09-07) — `keys` ships as the default instead.
+  - Reading `Compositor_FrameTiming` at the modern struct's offsets: it
+    is really the 176-byte v0.9.20 layout ("cost four flights and two
+    wrong answers"); two claims are explicitly retracted ("Elite calls
+    WaitGetPoses thirty microseconds before it submits", "the app's GPU
+    time reads 0.2 ms").
+  - The climbing "with EDVR" drop count on the second flight (2026-09-07):
+    a ring-buffer bug (record written to the wrong entry), not real
+    menu-caused drops.
+
+### Dated change notes, continued
+
+- **2026-09-23:** `fix.settlement_detail` added to the Performance page's
+  row list below, alongside its promotion to a first-class fix (README,
+  docs/fixes.md). The `# ui:` annotation that generates its row for the
+  running menu and the installer's settings window landed with the
+  governor's refinements the same day (`Settlement detail | choices game,
+  auto=Auto, reduced | live | menu performance`); its two [advanced]
+  tuning keys appear only in the developer tier.
+- **2026-09-23:** `fix.hud_quality` added to the Performance page's row
+  list below (`HUD quality | choices off, 1.0=HMD Quality 1.0,
+  1.25=HMD Quality 1.25 | live | menu performance`, docs/hud-quality-2026-09-23.md).
+  Generalises `advanced.surface_inflate`'s developer-tier mechanism
+  (fss_res.cpp) to a size the interface-depth pass's own classifier learns
+  (gated on `fix.temporal_aa`) and a float factor derived from the game's
+  live HMD Quality, instead of a named
+  `WxH` and an integer 2..4. BUILT, NOT FLOWN -- gate G9
+  (`crisp-ui-handoff.md`) is still open for every inflation mechanism.
+- **2026-09-23:** `fix.ui_quality` added to the Performance page's row list
+  below (`UI quality | choices off, 1.0=HMD Quality 1.0, 1.25=HMD Quality
+  1.25 | live | menu performance`, docs/ui-layer-2026-09-23.md): the game's
+  post-tonemap UI drawn into a per-eye layer after the upscale (Design A of
+  `crisp-ui-handoff.md`, phase 1). `advanced.temporal_aa_debug` gains the
+  developer-tier value `ui_layer`. BUILT, NOT FLOWN.
+- **2026-09-23 (later):** the `HUD quality` row is gone -- one key,
+  `fix.ui_quality`, now drives both the cockpit panels' size and the layer
+  (docs/ui-layer-2026-09-23.md); `fix.hud_quality` is no longer read.
+  `advanced.ui_replay` (on | off, developer tier) is the A/B for the deferred
+  UI replay of the cockpit HUD.
+- **2026-09-23 (later still):** `advanced.ui_replay` is gone with the
+  deferred UI replay it switched (retired the same day, 48ad7689): the
+  developer tier no longer has the row, and the cockpit HUD stays in the
+  picture the upscaler reconstructs.
+
+### Hotkeys page (2026-10-08)
+
+BUILT, NOT FLOWN. A page after Fixes: `hotkey.menu`, `.explorer_cam`,
+`.toggle_exposure`, `.dump_camera`, and with `menu.developer` also
+`.dump_draws`, `.dump_eyes` (`# ui: ... | hotkey | live` is a row for
+everyone, `# dev: label ... | hotkey` a developer-only one). Enter waits for
+the NEXT input: a key with Ctrl/Shift/Alt held, a pad button or trigger, or a
+HOTAS button or hat. Esc cancels; Delete or Backspace clears, except
+`hotkey.menu` (changed, never cleared). The menu's navigation does not run
+meanwhile. Arrows, Enter, Space, Tab, PageUp/Down, Home, End, R and Esc are
+refused WITH ANY MODIFIER, for every hotkey, the menu key too: the menu reads
+them raw, so CTRL+ENTER would also be its Enter and CTRL+ALT+ESCAPE would
+open the panel and close it in one tick. An exact copy of another hotkey is
+refused, naming it; a press Elite also binds WARNS ("also in Elite"): keys are
+watched, never captured. `hotkey.explorer_cam` is the Explorer Cam switch
+(empty = off), checked against on-foot bindings, locked while a session is on.
+
+Ending a capture PRIMES every live Hotkey (`hotkeysSuspend(false)`): each
+latch takes what is held, key, pad or HOTAS. The menu ticks before Explorer
+Cam's F5 is polled, so the press that ended a capture (a refused duplicate, an
+unchanged F5) was a fresh edge there. The rig runs the real `Hotkey` in that
+poll order for each outcome and each kind of Explorer key.
+
+Values: `F5`, `CTRL+SHIFT+F9`; `GamePad_Back`; `231D0200:Joy_12`,
+`231D0200:Joy_POV1Up` (vendor then product, as Elite's .binds write it). HOTAS
+is watched: input_gate copies buttons and hats out of the game's own
+GetDeviceState/GetDeviceData after they return (joy_watch.h), makes no device,
+and calls only GetCapabilities and GetDeviceInfo. The four diagnostic keys
+re-resolve live. A flight checks the `joystick watch:` log line, the Joy_N
+against the .binds, and no stall.
+### Explorer Cam page (2026-10-08)
+
+BUILT, NOT FLOWN. The `menu explorer_cam` rows of edvr.ini (generator page
+`explorer_cam`), for everyone: Eye height, Eye forward, Eye sideways
+(`fix.explorer_cam_eye_trim_up`, `_forward`, `_right`; -0.5..0.5 m, step 0.01,
+shown "+0.15 m") and Head-follow smoothing (`fix.explorer_cam_follow_smoothing_ms`;
+0..200 ms, step 10, "0 ms (exact)"). They are Sean's personal-preference
+settings, shipped at his tuning (0.15, -0.08, 0.0; 0), live, and they work
+while placed in Explorer Cam. R resets a row to the shipped value. The `ui:`
+line's `step`, `unit`, `signed` and `zero` tokens shape a number row; the
+absolute fallback eye keys stay `ui: hidden` (no row). The Explorer Cam KEY is
+on the Hotkeys page only.
+
+## The ask
+
+*A design document, written before the code. It supersedes and extends
+Feature 4 of [performance.md](performance.md) (2026-09-05), which stays as
+the origin and now points here. Claims about EDVR cite the source; claims
+about the game and about Windows are labelled MEASURED (established at the
+desk or in a field log kept by this repo) or BELIEVED (inference, each with
+a gate below that turns it into a measurement before code may depend on
+it); what can only be settled with a headset on is collected under Phase 0.
+Written 2026-09-07 on branch `claude/ingame-settings-menu-78317d` off main
+`5e2d545`.*
+
+Sean, 2026-09-07: an in-game menu that lets players switch settings
+quickly, "similar to what's in OpenXR Toolkit", fleshed out from the
+Feature 4 sketch, with three additions:
+
+1. **A developer key in the ini** that also exposes the advanced and
+   experimental options.
+2. **Keyboard input that does not pass through to the game.**
+3. **The panel lives in 3D space**, not head-locked the way the toolkit's is.
+
+And the same day: **flag which settings need a restart** when they are
+changed.
+
+## The short version
+
+Feature 4 was built on one assumption it inherited from `hotkey.h`: EDVR
+watches keys and cannot take them, so the menu must be driven by head-aim
+and two carefully chosen chords that the game also receives. That was a
+policy, not a fact. MEASURED at the desk today: Elite reads the keyboard
+through exactly three doors, all of them in this process and all patchable
+without a system-wide hook (the section "The keyboard gate"). So while the
+menu is open **the game sees no keyboard at all** -- every key is released
+from its point of view, and every press belongs to the menu. That single
+change turns the whole toolkit navigation model on: arrows, Enter, Escape,
+page keys, hold-to-repeat, and later typing a value, none of it colliding
+with a ship binding. Head-aim stays, as the hands-free way to pick a row.
+
+Everything else Feature 4 decided survives and is restated briefly:
+world-anchored where you look, type sized in degrees, drawn last at the
+door onto the native-size outgoing frame, every row wearing its measured
+price, the ini as the single source of truth. Two things are new besides
+the gate: a **developer tier** (`menu.developer = on`) that adds the
+Advanced, Experimental and Instruments pages and shows the ini's own key
+names beside the labels, and **restart flagging** that is enforced at build
+time, shown on the row, counted in the footer, and repeated in the log.
+
+## What the toolkit got wrong, restated as the brief
+
+Head-locked text that rode every head movement; pixel-fixed type that came
+out tiny on wide-FOV headsets; three chorded function keys to walk a tree,
+chosen because an OpenXR layer cannot take keys from the game either; and
+no sense of what a setting *cost* beyond watching the FPS counter wobble.
+This design answers each: the panel stays in the world; text is specified
+in degrees; the keyboard is the menu's while it is open, so the keys are
+the obvious ones; and each row shows its measured cost.
+
+## The keyboard gate
+
+### What Elite reads (MEASURED 2026-09-07)
+
+`dumpbin /IMPORTS` on `EliteDangerous64.exe` (the Steam install, the build
+running on 2026-09-07):
+
+| Module | Keyboard-relevant imports |
+|---|---|
+| `DINPUT8.dll` | `DirectInput8Create` |
+| `USER32.dll` | `GetAsyncKeyState`, `GetKeyState`, `GetKeyboardState`, `PeekMessageA`, `TranslateMessage`, `DispatchMessageA`, `ToUnicodeEx`, `MapVirtualKeyExA`, `SetWindowsHookExA` |
+| `XINPUT9_1_0.dll` | `XInputGetState`, `XInputSetState` |
+
+Absent: `GetRawInputData`, `GetRawInputBuffer`, `RegisterRawInputDevices`,
+and every `GetMessage` variant. Elite does not use Raw Input for the
+keyboard (a static-import fact; a dynamic `GetProcAddress` of it would be a
+surprise the probe below would catch as "a key that leaked"). The bindings
+path is DirectInput: `hotkey.cpp` recorded on 2026-08-16 that Elite keeps
+delivering bound keys while its window is not foreground, which only
+DirectInput does. BELIEVED, from the import list's shape: the user32 trio
+serves text fields and UI state, and the message pump's `WM_CHAR` (made by
+`TranslateMessage` from `WM_KEYDOWN`) serves typing. `SetWindowsHookExA` is
+BELIEVED to be the usual game-side low-level hook that disables the Windows
+key; if it is instead a keyboard hook the game reads through, gate G3's
+modal test is where that shows.
+
+### Three doors, one flag
+
+One atomic flag, `g_keyboardPrivate`, set by the menu when it is visible
+and cleared when it is not. Three thin hooks consult it. Each is installed
+once, on the menu's first use, and each degrades to pass-through on any
+doubt.
+
+**Door 1 -- DirectInput's keyboard device (the bindings path).**
+`IDirectInputDevice8::GetDeviceState` (slot 9) and `GetDeviceData` (slot
+10). EDVR reaches the game's device object without ever seeing it: it
+calls `DirectInput8Create` itself, creates its own `GUID_SysKeyboard`
+device, and patches that device's vtable **in place**. BELIEVED: every
+device object dinput8.dll makes dispatches through the same static table,
+so the game's keyboard device arrives at the same thunks (this is the
+standard way overlays reach a game's DirectInput devices, and the
+`vtable_hook.h` comment already states the consequence: "patching a vtable
+hooks EVERY object of that class"). Gate G2 measures it: with the patch in,
+count calls whose `this` is not ours; zero within ten seconds of play means
+the table is not shared or the game reads elsewhere, and the door reports
+"not reached".
+
+Note the mechanism choice against `vtable_hook.h`'s own rule. That header
+picks CopyVptr for a table inside the implementing module, because the
+runtime re-points its own tables; here the shared table IS the mechanism --
+CopyVptr on our dummy device would hook our dummy device and nothing else.
+So this is InPlace, deliberately, with the header's costs accepted:
+`reclaim()` runs on the frame path as for the context hooks, the `this`
+check is in every thunk, and a foreign entry already in the slot is chained
+through, not replaced. The Steam overlay is the foreign entry to expect:
+BELIEVED to hook exactly these slots to block game input while it is shown;
+the install log names which module each slot pointed at before EDVR
+patched it (`dinput8.dll` on the Frontier install, presumably
+`gameoverlayrenderer64.dll` on Steam's), which is gate G2's second half.
+
+Only keyboard devices are filtered. The thunk asks each `this` once, through
+the original `GetDeviceInfo`, whether it is `GUID_SysKeyboard`, and caches
+the answer per object pointer (a small fixed table; an unknown object
+passes through). A HOTAS, a throttle and pedals are DirectInput devices on
+the same table and are never touched: **the ship keeps flying while the
+menu is open**, which is a feature, not a limitation.
+
+Two interfaces exist, `IDirectInputDevice8A` and `...8W`, with separate
+tables. EDVR creates one device of each and patches both; the probe reports
+which one the game's calls arrive on.
+
+**Door 2 -- the user32 key-state trio.** `GetAsyncKeyState`, `GetKeyState`
+and `GetKeyboardState`, patched in the game **executable's import table**
+only (`src/common/iat_hook.h`, new: walk `GetModuleHandle(nullptr)`'s
+import descriptors, find the user32 entries, exchange the pointers under
+`VirtualProtect`, all-or-nothing with rollback, the discipline `vscreen_res`
+uses for code patching). EDVR's own modules import these functions through
+their own tables, so `hotkey.cpp`'s polling is unaffected and keeps reading
+the real keyboard for the menu.
+
+**Door 3 -- the message pump.** `PeekMessageA`, same IAT technique. When
+the original returns a keyboard message (`WM_KEYDOWN`, `WM_KEYUP`,
+`WM_SYSKEYDOWN`, `WM_SYSKEYUP`, `WM_CHAR`, `WM_SYSCHAR`, `WM_DEADCHAR`,
+`WM_UNICHAR`) while the flag is set, the message is rewritten to `WM_NULL`
+in place. No `WM_CHAR` is ever generated because no `WM_KEYDOWN` reaches
+`TranslateMessage`. This is thread-agnostic, which is why it is preferred
+over subclassing the window (`SetWindowSubclass` must run on the window's
+thread, and whether the Present thread is that thread is unmeasured).
+Side effect, accepted: Alt+F4 does not close the game while the menu is
+open, since its `WM_SYSKEYDOWN` is nulled before `DefWindowProc` turns it
+into `SC_CLOSE`.
+
+### The policy: release everything, admit nothing
+
+While the flag is set:
+
+- `GetDeviceState` returns the device's real result code and a **zeroed
+  buffer**: every key up. A key held at the moment the menu opens is seen
+  released, which is what a modal dialog does and what lets the gate be
+  used mid-thrust without leaving thrust latched.
+- `GetDeviceData` returns the **key-up events and drops the key-downs**, so
+  a key the game saw go down before the menu opened still gets its release
+  and no internal toggle is left half-pressed.
+- The user32 trio answers "up" for every key; `GetKeyboardState` zeroes its
+  256 bytes.
+- The pump's keyboard messages become `WM_NULL`.
+
+The game never sees a chord it did not see start, and never sees a key
+stuck down.
+
+### The summon key is private too
+
+The flag is not the only condition. The doors also swallow **the summon
+key itself, whenever its chord is held, even with the menu closed** -- so
+the game never sees the press that opens the menu, and the binding is
+EDVR's alone. This costs one byte comparison per `GetDeviceState` call for
+the whole session (the binding is pre-translated once, at configure, into a
+DirectInput scan code with `MapVirtualKeyW(MAPVK_VK_TO_VSC)` plus the
+extended-key bit for the cursor cluster, and stored as one packed word so a
+live rebind cannot tear it). Where the translation is uncertain the swallow
+is skipped for that key and the collision check below says so.
+
+What this changes about Feature 4's collision check: it still reads the
+player's actual bindings (`elite_binds`, extended with a reverse lookup
+from key to element), but the warning now reads "your menu key masks Elite's
+*X* while EDVR is installed" instead of "double-acts". A masked binding is
+a milder failure than a double-acting one, and it is the player's own
+choice of key that causes it.
+
+### What is deliberately not captured
+
+- **The mouse.** Never touched; the menu has no pointer.
+- **DirectInput joysticks, throttles, pedals.** Never touched; the ship
+  flies. (Since 2026-10-08 their buttons and hats are WATCHED for the Hotkeys
+  page: the gate's wrappers copy what the game's own read returned, after it
+  returns -- see "Hotkeys page (2026-10-08)". The game's data is not altered.)
+- **XInput pads, in v1.** `XInputGetState` is imported and IAT-patchable
+  the same way, and phase B masks the d-pad and face buttons while the menu
+  is open and leaves sticks, triggers and bumpers to the game. In v1 pads are
+  neither watched nor masked.
+
+### Fail-open, in five rules
+
+1. **The gate follows the draw.** The flag may be set only while the
+   native runtime has drawn the panel within the last few frames (the
+   export bumps a stamp; the d3d11 half checks it before setting the
+   flag). A menu that cannot be seen never takes the keyboard. If the
+   native runtime is absent, mismatched or not calling the door, the
+   menu refuses to open and logs once why.
+2. **Every thunk is budgeted.** A fault inside a door drops that door to
+   pass-through for the session (the `guardedBudget` pattern), and the menu
+   footer and the Status page say "keys shared with the game" from then on.
+3. **Idle dismiss, when it is set.** `menu.idle_dismiss` seconds without a
+   key or an aim change closes the menu and clears the flag. It SHIPS AT 0
+   -- the menu stays up until the summon key or Escape puts it down, which
+   is what a settings panel should do (asked for 2026-09-07) -- so this is
+   a belt for someone who wants one, not the safeguard. The safeguards
+   that always run are the two below: the draw stamp and the two keys.
+4. **Escape and the summon key both close it,** and both are read by EDVR's
+   own polling, which no door can affect.
+5. **`menu.keyboard = shared`** turns the flag off entirely: the doors stay
+   installed but pass everything, and the menu runs in Feature 4's original
+   watched-keys mode, with the collision check as its safety.
+
+### Why not the alternatives
+
+- **A low-level keyboard hook** (`WH_KEYBOARD_LL`): process-wide, needs a
+  message loop thread, is what `hotkey.h` refused for good reason, and
+  BELIEVED not to block DirectInput's own reading of the device anyway.
+- **A `dinput8.dll` proxy**: a third file in the game folder, a third slot
+  to collide with other mods that use that slot as their loader, and it
+  only helps if it loads before the game creates its devices. The shared
+  table reaches a device that already exists.
+- **`SendInput` or pose tricks**: injection, which this project does not
+  do (the head-steer design's one exception is gated to a camera mode and
+  still unbuilt).
+
+*2026-09-08, the Steam copy:* "the shared table reaches a device that
+already exists" is the assumption the DirectInput door rests on, and the
+first session on the Steam install put it in question -- the door's
+entries pointed into `gameoverlayrenderer64.dll` before the patch, the menu
+said "keys private", and Tab boosted the ship. If the overlay hands each
+device a private copy of the table, the door sits on our dummy's copy and
+the game's device never arrives. The install line now says whose memory
+the table lives in (dinput8.dll's own image is the shared one), and a line
+prints once when the menu has held the keys a second with no keyboard but
+ours having reached the door; the Status page's doors line shows "not
+reached yet" for the same condition. `dinput8.dll`'s own keyboard device
+is fed by a low-level hook and `GetAsyncKeyState` (its imports say so), so
+there is no import of the runtime's to gate below the vtable; if the table
+is not shared, the door needs the device the game actually holds, which is
+the open question for this module.
+
+## Navigation and interaction
+
+**Keyboard capture update (2026-09-10).** The latest Steam flight
+(`edvr_gfx_20260910_171220.log`, build `6AA33721`) confirmed the private-table
+failure above: no game keyboard reached the dummy hook during 120 menu frames.
+EDVR now intercepts the executable's `DirectInput8Create` import before game
+startup, observes the returned factories, and hooks the keyboard devices they
+actually return. Each distinct table keeps its own forwarding functions;
+Steam's overlay stays in the chain and device identities stay intact. Retained
+COM references keep the restore targets alive until shutdown. The shared-table
+fallback remains for sessions without an observed factory.
+The Steam executable imports both `DINPUT8.dll!DirectInput8Create` and
+`d3d11.dll!D3D11CreateDevice` through its normal startup import table, so the
+DLL's early capture is installed before the game begins creating input devices.
+
+This path is independent of the VR runtime and applies to both SteamVR and
+OpenComposite. `menu.keyboard = private` remains the default. All keyboard
+state reads and buffered presses are suppressed while the menu is drawn,
+except on **Monitor** and **Status**, which pass keys through and say so in
+their footers (adopted Elite keys are inert there, except the next and
+previous tab pair, which follows Tab -- see "Your Elite keys" below); the
+menu summon key remains reserved on every page;
+buffered releases still reach the game, and joystick devices keep their input.
+Keys held when the menu closes wait for release before they can act in Elite.
+No new configuration is required; installing this change requires a game
+restart so the initial DirectInput creation can be captured.
+
+**The footer never fit (MEASURED 2026-09-11).** The 115-character
+navigation footer measured 1520 px in a 770 px line at the default
+`width_degrees = 30` / `text_degrees = 1.1` (`DrawTextW DT_CALCRECT`,
+Segoe UI at the raster's own em; 2518 in 1284 at cap 50, 1107 in 566 at
+cap 22 -- the budget is headset-independent at 25.7 em), and it was drawn
+`DT_SINGLELINE | DT_END_ELLIPSIS`, so it was cut after about 55
+characters: "Tab page", "R twice resets", "Esc close", the pending-restart
+count and KEYS SHARED WITH THE GAME had never been visible. The likeliest
+root of "how do I change tabs". The footer is now **two lines**, its box
+always two lines tall so the panel's height never jumps when a warning
+appears, and it is COMPOSED against the raster's ruler
+(`menuPanelMeasureLine`, `menuComposeFooter` in `menu_keys.cpp`) rather
+than clipped: line 1 is the legend -- `Arrows pick/change  Enter select
+Tab page  Esc close` (53 characters, 702 px at cap 30), or with Elite's
+keys live `W/S pick  A/D change  Space select  Q/E page  Esc close` (55,
+745 px) -- dropping `change`, then `pick`, then `select` where it does
+not fit (a 1600 px card at cap 80 keeps `Space select  Q/E page  Esc
+close`), and never `page` or `close`. The page item names the adopted
+pair on EVERY page and in every keyboard mode (`Q/E page`), because that
+pair follows Tab and acts there; the other items follow the live
+predicate. Line 2 carries one item by precedence: `KEYS SHARED WITH THE
+GAME` (private wanted, gate not private), `keys shared (Monitor)`, `keys
+shared (menu.keyboard)  W/S off` (the adopted pick or change pair, never
+the page pair), `2 changes at next launch`, or `Tab, arrows and Enter
+work too`. Editing reads `Type a value  Backspace deletes  Enter writes
+Esc cancels` (752 px at cap 30, `Type a value` dropped first).
+The fault line wins in every state, typing included: a stalled draw drops
+the gate while a value is typed, and the typing keys are W/A/S/D/Space.
+Each footer line is drawn as its own single-line op in its half of the
+box (MEASURED 2026-09-11: `DT_END_ELLIPSIS` on a multi-line `DrawTextW`
+ellipsises only the LAST line, so one op for both lines clipped line 1 at
+the rect's edge with no `...`). The gate is decided BEFORE the content is
+built each tick, so the open tick's raster reads the gate the menu will
+have (built first, it read the closed menu's 0 and composed the warning
+on every open); the warning is tracked like the legend, so it appears and
+goes with the gate on a rig with nothing adopted too.
+Every string is pinned against real GDI at cap 22, 30, 50 and 80 in
+`menu_test`, and the flight instrument is `menu panel: footer line N
+measures X px in a Y px line` (four per session), which says
+`-- ellipsised` if the measurement above was wrong.
+
+`input_gate_test` exercises independent private factory/device tables, original
+call chaining, shared-table joysticks, buffered peek/read semantics, input loss,
+held closing keys across all three input paths, restoration and reference
+balance. It also creates real ANSI and Unicode DirectInput keyboards through
+the test executable's patched import. The flight log now distinguishes a
+captured keyboard from evidence that the game has actually called its gate.
+These tests do not replace an in-headset confirmation on each VR runtime.
+
+Head-aim and keys coexist; whichever moved last owns the highlight.
+
+**Keys, while the menu is open** (all private to the menu; the "your
+Elite key" column is read from your bindings, stock KeyboardMouseOnly
+names in brackets):
+
+| Key | your Elite key | Does |
+|---|---|---|
+| Up / Down | UI_Up / UI_Down (W / S) | move the highlight; hold to repeat (400 ms, then 12 Hz) |
+| Left / Right | UI_Left / UI_Right (A / D) | step the highlighted row: toggle, cycle a choice, step a number; hold to repeat; Shift steps a number by ten steps |
+| Enter / Space | UI_Select (Space) | activate: flip a switch, next choice, or open a number or string for typing; on an action row, fire it |
+| Tab / Shift+Tab | CycleNextPanel / CyclePreviousPanel (E / Q) | next / previous page (the Elite keys do not repeat when held, and they work on Monitor and Status too, exactly as Tab does there) |
+| PageUp / PageDown | CyclePreviousPage / CycleNextPage (Z / C) | read on through the explanation beside the row, three lines at a time; changes the page when there is nothing to scroll |
+| Home / End | -- | first / last row |
+| R | -- | reset the highlighted row to its shipped default (a confirm on the row, then R again) |
+| Escape, the summon key | UI_Back (Backspace) | close (fade out, keys released); Escape first abandons a value being typed; UI_Back never cancels an edit |
+| the summon key with Shift | -- | recentre: re-anchor the panel where you are looking now |
+
+**Your Elite keys (2026-09-11).** The ten elements that walk Elite's own
+cockpit panels -- `UI_Up`, `UI_Down`, `UI_Left`, `UI_Right`, `UI_Select`,
+`UI_Back`, `CycleNextPanel`, `CyclePreviousPanel`, `CycleNextPage`,
+`CyclePreviousPage` -- are read from the player's `.binds` (both slots of
+each, `eliteBindsLookupSlots`, the same newest-maintained-file rule as the
+camera keys) and become ALIASES of the actions in the table above: the
+same dispatcher (`dispatchNav` in `menu.cpp`), never a second one, and
+never a `Hotkey` binding (the registry holds sixteen and the d3d11 half
+already fills up to twelve). The rules, applied per slot in table order
+(`menuAliasResolve`, `menu_keys.h`), each with the reason it records for
+the log: R9 a gamepad or mouse slot is never adopted; R8 a keyboard key
+this build cannot name is reported with Elite's spelling; R6 a chorded
+slot is refused (the poll is a bare vk; MEASURED: no UI_*/Cycle* keyboard
+slot in the thirty stock schemes or in Sean's file carries a `<Modifier>`,
+and the parser bounds each slot's Modifier by the next slot's tag, where
+the camera parser deliberately scans to the element's end); R4 Shift is
+the menu's own modifier; R3 the summon key, or a Ctrl/Alt that is half of
+its chord, would close what it opens; R1 a key with the SAME meaning as a
+fixed key (stock UI_Select = Space) is left to the fixed key but still
+names the legend; R2 a key with ANOTHER meaning (stock CycleNextPanel =
+End, CycleNextPage = Home) keeps its documented one; R5 a registered EDVR
+hotkey is polled whether or not the menu is open; R7 first in table order
+wins a duplicate. A modifier used as a plain key is admitted (Sean's
+`UI_Back = Key_LeftControl`: Ctrl alone closes the menu; it reaches the
+game only after a release and a fresh press, through the gate's release
+tail). The invariant `menu_test` pins: every adopted vk is unique and none
+is a fixed key, Escape, the summon key or a registered hotkey.
+
+**When they act -- one predicate.** An adopted key acts only when
+`menuAliasMayAct(inputGateHoldsGameKeyboard(), editing, statusPage)` is
+true: the gate PROVABLY holds the game's keyboard (the flag AND a live
+DirectInput door AND the game seen reaching it -- `inputGatePrivate()`
+reports the flag alone, which a retired door does not clear, and on a rig
+whose game device dispatches through a table the door is not on the flag
+is set while every key still reaches the ship), not while a value is
+typed, not on Monitor or Status. Everywhere the predicate is false an
+adopted key IS a game key: on a shared page one press of E would cycle
+the ship's panel AND the menu's page. So they are inert on the shared
+pages, under `menu.keyboard = shared`, on the first tick after open (the
+flag is set at the end of the tick), while the draw is stale, on a
+retired door, on a rig where the game's keyboard has never been seen
+reaching a door (the "Tab boosts" case above; the Status row reads `held
+back (see log)` and the log says so once), and while typing (W, A, S, D,
+Q, E, Z, C, Space and Backspace are typing keys). The fixed keys keep
+their documented shared behaviour on those pages, and `input_gate.cpp`
+gains no swallow and no injection. MEASURED on Sean's rig 2026-09-11: the
+"reached" evidence arrives in the same millisecond as the first open.
+The legend follows the same predicate, never mere adoption, so it never
+names a dead key -- one extra raster on the tick after open.
+
+**The one exception: the page pair follows Tab (2026-09-11, after the
+first flight).** Sean, from the headset: Monitor and Status let keys fall
+through, so Q/E did nothing on exactly the pages a player wants to leave.
+The next and previous tab aliases (`kNavPageNext`, `kNavPagePrev`;
+`menuAliasFollowsTab`, `menuAliasMayActNav` in `menu_keys.h`) now act
+wherever Tab acts: on Monitor and Status, under `menu.keyboard = shared`,
+and on a rig whose game keyboard never reached a door -- and there they
+reach the ship as well, exactly as Tab does there (BELIEVED harmless:
+CycleNextPanel/CyclePreviousPanel move between the tabs of a focused
+cockpit panel and do nothing with no panel up; check by pressing E on
+Monitor with a panel open and closed). Only typing holds them, since the
+arrows and Tab are the editor's then. Every other alias keeps the strict
+predicate: pick, change, select and back on a shared page would move a
+row and the ship at once. The legend names the adopted page pair on every
+page for the same reason; the Status row reads `page keys only (keys
+shared)` or `page keys only; rest held back (see log)` where the rest is
+off. Tested in `menu_test` (`testAliasMayAct`, the status-page and
+shared-mode footers).
+
+**Swallow until release.** Every key -- fixed, typing and alias -- goes
+through one tracker (`keyRepeatStep`): stepped with `act=false` it is
+tracked and PARKED until released, so a key held across a state change
+never fires when the state later allows it, neither the edge nor the
+repeat train. Two primes: at `openMenu` every tracker is seeded from the
+raw key (a W held for thrust when F8 opens the menu moves nothing until
+released; this changes the fixed keys too -- a Down held through the
+summon no longer fires once and repeats), and at `beginEdit` every typing
+key is (a letter held when a Number row opens cannot land in the buffer
+it opened; also the Space-appended-at-open case commitEdit's trim only
+papered over). While typing the aliases are stepped `act=false`; outside
+an edit the typing keys are stepped against their REAL state `act=false`
+(the old poll passed focused=false, which forced every tracker up each
+tick and tracked nothing -- the opposite of what its comment said).
+Fixes -> Monitor by a held E: fired in frame N, gate shared at the end of
+N, E captured into the release tail; edge-only, so the held E fires no
+second time on Monitor even though it acts there. Monitor -> Fixes by Tab
+with W held: W was parked, nothing until release. Page keys are edge-only
+(BELIEVED: Elite's own tab key does not repeat).
+
+**Left out, and why.** `UI_Toggle` (stock `=`): its in-game meaning is
+not measured (BELIEVED: "UI Nested Toggle", expands a nested list item;
+check the label in Options > Controls > Interface Mode); the only
+plausible menu meaning is already UI_Select. `UIFocus` (Sean:
+Key_LeftShift, a hold modifier) -- Shift is the menu's own. `FocusLeftPanel
+/ Comms / Radar / RightPanel` (1/2/3/4) and `QuickCommsPanel` (Enter) would
+be new navigation, the digits are typing keys and Enter is fixed.
+`UI_Back` closes the menu on the BELIEF that it backs out of a cockpit
+panel in Elite; if it does not, drop it from `kMenuUiElements`.
+
+**Re-read, and the gaps.** The keys follow `device_hook`'s bindings
+fingerprint: a rebind applied in Elite is re-read within two 5 s checks
+and logged as `menu keys: your Elite bindings changed -- ...` or `... read
+the same as before` (silence there is indistinguishable from a dead
+mechanism). `hotkey.read_game_bindings = 0` drops them (the same switch as
+the camera keys); the live flip is handled in `menuConfigure`, because an
+unchanged fingerprint would never re-read. A `hotkey.menu` change
+re-resolves the cached slots without a file read. BELIEVED: a player on a
+stock preset has NO `.binds` under `Options\Bindings` (Elite writes
+`Custom.*.binds` only after a rebind; Sean's directory holds only Custom
+files), so the confused majority gets `menu keys: no bindings files were
+found` and only the footer fix helps them -- the
+`ControlSchemes\<preset>.binds` fallback is the follow-up. BELIEVED:
+Elite's `Key_` names are DirectInput scan-code names while
+`virtualKeyFromName` maps letters by VK, so on AZERTY/Dvorak the adopted
+`W` could be a different physical key from the one Elite acts on (the
+camera keys carry the same belief). The log's arc: `edvr_log.py --grep
+"menu keys:"`; exactly one outcome line per session, from an
+unconditional call after the camera keys' adoption, so a log with none
+means the call never ran.
+
+**Not folded in, recorded here.** The pre-existing arrow /
+VanityCameraScroll overlap: `device_hook`'s game-mirrored watchers poll
+their keys while the menu is private, so an arrow bound to the view cycle
+counts a press the game never saw. And `inputGatePrivate()`'s blind spot
+for the FIXED keys on a retired door: they keep acting on the flag alone,
+as before; only the adopted keys ask the stricter question.
+
+**Head-aim.** The head ray (from `headPose()`, the raw pose the native
+runtime publishes every frame) is intersected with the panel in its
+anchor frame; the row under it highlights, with hitboxes one full row
+pitch tall and a hysteresis before the highlight moves, so a resting
+head never flickers it.
+After a key press head-aim is parked until the ray leaves the highlighted
+row's hitbox by more than one row. `menu.aim = keys | head | both`.
+**Flown 2026-09-07: `both` fought the keys** -- a head that drifts back to
+the row it was reading re-selects it under a hand that just moved away --
+so the default is `keys`, and head-aim is an opt-in for a player who wants
+it (gate G6's numbers would tune `both`, and are still unmeasured).
+
+**Dwell-to-select** is off by default and stays a phase C item: it needs
+an aim ray steadier than a head, which means the eye tracker, and
+`docs/eye-tracking.md` records that no field driver publishes a usable one
+today.
+
+**Typing a value** (BUILT 2026-09-07, the gate's whole point): Enter on a
+number or string row opens it for typing. The digits, the letters, the
+numeric pad, `.` `-` `,` space and Backspace edit the buffer -- and
+nothing else, so a stray key cannot corrupt a value; Enter writes it,
+Escape leaves it alone, and moving off the row abandons it. A number is
+checked before it is written: one that does not parse, or falls outside
+the row's own range, is refused with the range named on the Status page's
+last-write line rather than written and clamped silently. While a row is
+being typed the arrows and Tab belong to the editor, no adopted Elite key
+acts (they are typing keys), and head-aim is parked, so a look that
+wanders cannot take the row away mid-value.
+Typing is what the keyboard gate makes possible and Feature 4 could not
+offer.
+
+**Anything with two states is a switch.** A `Toggle` row draws the
+installer's control where its value would be -- an accent track with the
+knob at the end the value is at -- and so does a two-way CHOICE where one
+side is "leave the game alone", by the installer's own rule
+(`twoChoiceToggle` in `settings_view.cpp`): exactly two choices, one of
+them `off` or `stock`. That is most of the fixes, and they read as
+switches now rather than as words to cycle. Where the value written is
+not literally `on`/`off` -- one that writes `steady` against `stock` --
+the word stays beside the switch, because the switch alone cannot say
+it; where it is, the word goes. A row with a pending restart change keeps
+its text (`off -> on`), because a switch cannot show two values at once.
+
+**The tooltip is a card of its own, BESIDE the panel.** The highlighted
+row gets what `edvr.ini` says about that key. **The facts come first** --
+the range or the list of choices, the shipped value, whether the change
+applies at once or waits for a launch, and the key that acts on it --
+and the ini's own comment block follows. That order is deliberate: the
+buffer holds about a thousand characters and forty-six of the comment
+blocks are longer than that (the longest is three and a half thousand),
+so something is cut on those rows, and what is cut must be prose and
+never a fact. The generator carries the full comment block into the row
+table as `detail` for this.
+
+It appears only after `menu.tooltip_delay` seconds resting on one row
+(1.5 by default, 0 for never): an explanation is for someone who has
+stopped, not something to flick past. It is set in a face smaller than
+the rows, and its card is sized to the MEASURED height of its text --
+`DT_CALCRECT` with the same font and the same wrap the draw will use,
+not a character count -- capped by the panel's own height. A rule joins
+it to the row it belongs to. Resting the look on the card counts as
+using the menu, so an idle dismiss set by hand cannot close the panel
+mid-sentence.
+
+**What does not fit is scrolled to, not lost.** PageUp and PageDown move
+the body three lines at a time, with a thumb on the card's edge showing
+how much there is and where in it you are. The raster measures the text
+and publishes how far it can still go (`menuPanelPopupScrollMax`), and
+the model clamps its counter to that, so the scroll cannot run off the
+end of a text only the raster has measured. Those two keys fall back to
+changing the page when there is nothing to scroll; Tab is what changes
+the page deliberately.
+
+**How it sits beside the panel without moving it.** The rasterised bitmap
+is WIDER than the menu card -- the card, a gap, and the tooltip's strip,
+the last two a fixed fraction of the card (`kTipGapFrac` and
+`kTipWidthFrac`, in `menu_panel.h` because both the model and the raster
+must read the same numbers) -- and the strip is transparent whenever no
+tooltip is up. Because the strip is always allocated, the panel's size in
+the world never changes as a tooltip comes and goes, or between pages.
+
+The bitmap is then **slid along its own surface** by `panelShift()`, so
+that the CARD's middle lands on the anchor's forward rather than the
+bitmap's. One value reaches the shader, the hit test and the culling box,
+and the card comes out exactly as it was before the strip existed: the
+same width, the same distance, square to the look.
+
+Two things were got wrong on the way here and are worth keeping written
+down. The first build **turned the anchor** instead. That put the card's
+middle in the right direction but left it facing the old one, so the card
+was seen nine degrees oblique, its left edge 1.50 m away and its right
+1.41 m; and being latched at summon, it went stale the moment the ini was
+edited with the panel up. The second mistake was scaling the panel's
+angle by the strip's ratio: the bitmap maps linearly onto the surface and
+the tangent does not, so the card came out 3.6% wider than
+`width_degrees` asked, and 9% at the widest setting. Both are why
+`panelHalfW()` works in metres and `panelShift()` is recomputed every
+frame.
+
+The head-aim hit test works in the bitmap's own coordinates and
+`menuPanelLineAt` rejects any point in the strip, so a look parked on the
+tooltip selects nothing rather than the row at that height. The toast and
+the fps overlay share the raster and get no strip and no shift.
+
+With the strip, the panel reaches `atan(2.14 * tan(w/2))` to the right --
+29.8 degrees at the default width. Past about 35 the strip leaves one
+eye's frustum on most headsets and the card would be seen by one eye
+only, which is the worst thing to do to text somebody has stopped to
+read, so `menu.width_degrees` is held to 36 while tooltips are on and the
+log says once that it was.
+
+The very first build drew the card over the rows, and it hid the values
+it was explaining (flown 2026-09-07).
+
+**Pads** (phase B): d-pad navigates and steps, A activates, B closes,
+bumpers change page, watched through `xinput_watch` and masked from the
+game through door 4.
+
+## What it shows
+
+Pages, in tab order. Each row is: label, then its value as a switch, a
+number, a choice or a typed string, and where it applies, the restart
+badge. The ini's own explanation is in the tooltip beside the row.
+
+**The tab strip scrolls.** It shows the window of pages that fits the
+panel's width, always including the current one, with a `<` or `>` at
+whichever end has more. Developer mode adds four pages and the strip ran
+off the edge -- the pages past it could not be seen, and nothing said
+they were there (flown 2026-09-07).
+
+1. **Performance.** The rows tagged `menu performance` in `edvr.ini`, in
+   the ini's own order:
+   `temporal_aa`, `temporal_aa_model` (labelled **DLSS preset**, default K),
+   `render_sharpness`, `foveation`,
+   `ui_quality` (labelled **UI quality**, off / 100% / 125%, default 100:
+   the interface panels' size and the UI layer, one row), and `render_scale`
+   when its branch lands. Costs where they are measured:
+   the temporal pass's own timing, NVIDIA's pass per eye, the sharpen's
+   timestamp pair, the pixel fraction under scale. UI/smoke depth and
+   station motion follow the AA mode automatically.
+   **DLSS preset** sits right under **Anti-aliasing** and stays on the page
+   under every mode; it dims and stops responding to Left/Right or Enter
+   whenever `temporal_aa` is not `dlss` or `dlaa` (the only two modes that
+   read it), rather than dropping out of the row list, which had read as
+   the setting vanishing on a mode change.
+   At the BOTTOM of the page, a **Developer mode** switch (`menu.developer`,
+   its `ui:` line tagged `menu performance`), so the extra pages can be
+   turned on from inside the headset; flipping it rebuilds the pages, and
+   the page being read keeps its highlight and scroll through the rebuild
+   rather than jumping back to the first row under the hand that had
+   just reached the last one.
+2. **Fixes.** Every other `[fix]` row tagged `menu`, under the ini's own
+   headings ("When the eyes disagree", ...), scrolling. Restart rows are
+   shown, badged, and editable: the badge is the point of showing them.
+   Pages in order: Performance, Fixes, Explorer Cam, Hotkeys, Monitor, Status
+   (and, in developer mode, Advanced, Experimental, Instruments). Two pages
+   were added on 2026-10-08, between Fixes and Monitor, without renumbering
+   this list:
+   - **Explorer Cam** (everyone): the rows tagged `menu explorer_cam` -- Eye
+     height, Eye forward, Eye sideways (`fix.explorer_cam_eye_trim_up`,
+     `_forward`, `_right`, metres, step 0.01, shown "+0.15 m") and Head-follow
+     smoothing (`fix.explorer_cam_follow_smoothing_ms`, 0..200 ms in steps of
+     10, "0 ms (exact)"). Live, also while placed in Explorer Cam. The key
+     stays on the Hotkeys page only.
+   - **Hotkeys**: the rows of "Hotkeys page (2026-10-08)" above.
+3. **Monitor.** fpsVR's readout, gathered as cheaply as it can be, and
+   where each number comes from:
+   - frame rate, frame time, the 1% low (the 99th-percentile frame time)
+     and the max, over the last ten seconds, from EDVR's own
+     Present-to-Present clock, ringed every frame;
+   - the app's GPU time, the CPU frame interval and dropped frames (the
+     last ten seconds and since launch), from **the native OpenXR timing
+     source** -- read once a frame at the render-to-submit boundary and
+     published on the channel; `advanced.app_gpu_timing = on` by default
+     gates the read;
+   - the display's rate and frame budget, and the eye size;
+   - CPU load (system and Elite's share), RAM, VRAM through
+     `IDXGIAdapter3::QueryVideoMemoryInfo`, and GPU load and temperature
+     through NvAPI where an NVIDIA driver is present (elsewhere "n/a" --
+     fpsVR's AMD path is a vendor library this project does not carry);
+   - EDVR's own passes' measured cost, from the totals they already keep;
+   - **two frame-time strips**, fpsVR's pair: the GPU frame and the
+     render thread's busy time, each the last 120 frames against its own
+     budget line, green within it, amber over it, red at twice it. A
+     frame over budget on the GPU strip is a different problem from one
+     over budget on the CPU strip, which is why they are drawn apart; a
+     frame whose compositor record has not settled is a gap in the GPU
+     strip rather than a zero-height bar.
+   **GPU TIME and CPU TIME are fpsVR's two frametimes.** GPU TIME is the
+   compositor's own GPU frame total -- its record's "time between work
+   submitted immediately after present until the end of compositor
+   submitted work", which is the timeline fpsVR's author describes as the
+   scene, the companion window and the distortion pass. CPU TIME is
+   EDVR's own measurement, not the compositor's: the Present-to-Present
+   period less the time the game's thread spent blocked inside
+   WaitGetPoses and inside Present, which is the render thread's busy
+   time -- a LARGER window than the compositor's, by the work the game
+   does after its second submit, and the more useful of the two when a
+   frame is CPU bound. APP GPU carries the scene's own GPU work, which
+   the record reports directly. The Present period sits on the FRAME RATE
+   tile; frame rate, the 1% low and the strips stay on the period, as
+   fpsVR's do.
+   Both tiles are the **mean over about 200 milliseconds**, fpsVR's own
+   update window, with the ten-second mean on the sub-line.
+
+   **THE RECORD IS NOT THE STRUCT IN openvr.h, AND ITS SIZE FIELD DOES
+   NOT SAY SO.** This cost four flights and two wrong answers, so it is
+   written down in full.
+
+   Elite ships an `openvr_api.dll` that exports `IVRCompositor_014`,
+   which is OpenVR **v0.9.20**. SteamVR fills the `Compositor_FrameTiming`
+   belonging to the interface a process BOUND, not the size the caller
+   asked for: we passed 184, it echoed 184 back untouched, and it filled
+   the 176-byte v0.9.20 record. Decoding that with the modern struct
+   displaced eleven fields. What the Monitor page was actually showing:
+
+   | Tile | Read from | Which is really |
+   |---|---|---|
+   | GPU TIME | byte 40 | `m_flCompositorIdleCpuMs` |
+   | APP GPU | bytes 32+36 | the compositor's own GPU and CPU |
+   | DROPPED | byte 16 | the low half of the record's clock |
+   | REPROJECTED | byte 20 | the high half of the record's clock |
+
+   The clock is what proved it. Read bytes 16 to 23 as one double and
+   they are a plausible uptime that advances by one frame period per
+   frame index, and by exactly the wall-clock seconds between two
+   probes. Nothing else fits.
+
+   So the reader now **measures which layout it is being given** and
+   never asks the size field. The test is that clock: only one candidate
+   offset holds a value that is a plausible uptime AND advances like a
+   frame clock, and the pose confirms it, since an `HmdMatrix34_t` whose
+   rows are unit vectors sits at byte 84 in one layout and 96 in the
+   other. Both must agree before the reader arms, and it says in the log
+   which layout it found and why.
+
+   The real field map, v0.9.20: dropped frames at **12**, the clock at
+   **16**, the scene's GPU work at **24**, the GPU frame at **28**, the
+   compositor's GPU at 32 and CPU at 36, its idle at 40, the WaitGetPoses
+   / poses-ready / frame-ready stamps at 60, 64 and 68, the pose at 84,
+   and the reprojection flags LAST at **168**.
+
+   **GPU TIME** is `m_flTotalRenderGpuMs` (byte 28), which is Valve's own
+   worked example on the `Compositor_FrameTiming` page and what fpsVR
+   shows: 9.51 ms mean across the six probe samples against fpsVR's
+   steady 9.6. **CPU TIME** is that page's other example,
+   `m_flNewFrameReadyMs - m_flNewPosesReadyMs + m_flCompositorRenderCpuMs`
+   (2.47 ms mean), with EDVR's own render-thread figure (3.67 ms) beside
+   it; the 1.20 ms between them is entirely the tail from the second
+   submit to the next WaitGetPoses call, which fpsVR's window excludes
+   and ours includes.
+
+   Two claims from the misdecode are now retracted, in case they are
+   remembered: "Elite calls WaitGetPoses thirty microseconds before it
+   submits" was `compositorRenderStart - compositorUpdateEnd`, two
+   adjacent compositor stamps. It really calls it 7.2 ms before the
+   vsync, gets poses 0.2 ms after it, and submits 2.6 ms after that. And
+   "the app's GPU time reads 0.2 ms" was the compositor's own GPU plus
+   CPU time.
+
+   **The record read is the settled one, two compositor frames back**;
+   with the most recent one (`framesAgo = 0`) the GPU fields have not
+   resolved at the WaitGetPoses boundary. The monitor writes it into the
+   ring entry of the frame it describes, two back, so drops and EDVR's
+   events line up. Twice a session (20 s and 60 s after arming, three
+   frames each) the openvr half logs the four most recent records field
+   by field, and then the newest record's RAW WORDS in hex. That hex is
+   what identified the layout; keep it, because it is the only thing that
+   can be read off any flight's log without another build.
+   Laid out as **sixteen tiles, four across** -- a caption, one big
+   number, one small line each -- after the first flight found rows of
+   sentences full of numbers unreadable in a headset; the last drop and
+   EDVR's events in it are the one line under the tiles. The second
+   flight found the big number clipped and the sub-lines running off
+   the tiles: a four-across tile is about seven degrees wide, sixteen
+   characters of a small face, and the number's box had been sized to
+   its cap height rather than its line box. Now every box is sized to
+   its font's line height, the sub-line wraps over two lines in a
+   smaller face, and no sub-line is longer than about thirty characters.
+   Its cost, by construction: the ring is one clock read and a store per
+   frame; the compositor read is one small copy per frame; the load and
+   memory samplers run once a second and ONLY while the page is showing;
+   the page re-rasterises at 4 Hz on the worker thread. Frame time lives
+   here now and not on Status.
+4. **Status.** Read-only, the README's "checking it worked" as a live
+   panel, and the page a support thread will ask for: EDVR's version and
+   the game build; the native OpenXR runtime's name, read from the
+   runtime's own instance properties; eye
+   texture size and tangents; guard stage; temporal mode and whether
+   NVIDIA's library loaded; the gate's state (which doors are armed, which
+   the game has reached, keys private or shared); the **Elite keys** row
+   (`W/S A/D Space Q/E Z/C L-Ctrl` -- the adopted keys by group -- or why
+   there are none: `none adopted (see log)`, `no bindings files found`,
+   `off (read_game_bindings)`, `not read yet`, `off while keys are shared`,
+   or `held back (see log)` when adopted but the game's keyboard has not
+   been seen reaching a door; the back key is named here and in the log,
+   never on the footer); this panel's own price
+   (bitmap size, raster time, the composite's measured GPU time per eye);
+   the list of changes waiting for a restart; and the result of the last
+   ini write.
+
+**Diagnosing drops caused by the mod** (built 2026-09-07 the same night,
+after the question was asked). A drop count says drops happened, not why,
+and the mod's own one-off work is the class that would explain one: a
+shader compile at first engage, a withhold, a reload parsing the ini on
+the render thread, the menu's own write. So every frame's ring entry now
+carries what EDVR did in it and what it cost, and the page and the log
+read the two together:
+
+- **Events**, ORed into the frame from wherever they happen, both halves
+  (`PerfEvent` in `perf_monitor.h`, the native runtime's crossing on the
+  channel): a reload with its duration, an ini write, a shader compile
+  with its duration (every `shaderSwapCompile*`), NVIDIA's feature
+  creation with its duration, a withhold, a resubmit, a census request, a
+  bitmap upload, a bindings re-read, the menu opening or closing.
+- **EDVR's CPU time**, measured: the frame boundary's body (a clock around
+  `hookedPresent`'s frame work), the door's passes per eye (a clock around
+  the lambdas in `hookedSubmit`, crossing on the channel), and the draw
+  hooks on one frame in sixteen -- the four draw thunks clock themselves
+  and the real call they forward, and the difference is EDVR's own cost in
+  the hook. Two clock reads per draw on a sample frame, one branch on the
+  other fifteen.
+- **EDVR's GPU time at the door**: a timestamp pair per eye around every
+  pass the door runs (`edvrDoorGpuBegin` / `End`, exports the native runtime
+  calls), never awaited, polled on later calls. This is the mod's whole
+  submit-side GPU price in one number, beside the compositor's app GPU
+  figure. What it does not cover: the ui_depth second draws and the
+  theater's draw-path work, which happen inside the game's frame.
+- **The page**: "Dropped frames" now ends with how many of the window's
+  drops coincided with EDVR activity, naming the events, against how many
+  were clean; "Last drop" shows the most recent drop or long frame with
+  its interval and EDVR's events in it; "EDVR CPU" and "EDVR GPU" show the
+  measured per-frame figures.
+- **The log**: a `monitor: DROPPED FRAME` (or `LONG FRAME`, for one over
+  twice the budget by EDVR's own clock when the compositor reports no
+  drop) line with the interval, the compositor's record for the frame
+  (GPU app and compositor, the app's busy time, when the poses came and
+  when the submit landed, from the vsync), EDVR's four costs and its
+  events, at most one every five seconds and sixty a session -- so a
+  field report carries the attribution without the headset on.
+- **The frame the record describes.** The compositor's record is read
+  two frames back (the settled one, above), and it is written into the
+  ring entry of THAT frame, beside the events EDVR raised in it. The
+  first build wrote it into the newest entry, so a drop was blamed on
+  whatever EDVR did two frames after it -- and with the Monitor page up,
+  that was its own bitmap upload four times a second, which is why the
+  "with EDVR" count climbed steadily on the second flight (2026-09-07)
+  while every logged drop said "EDVR events: none".
+- **And the hitch removed**: the menu's ini write (read, merge, write,
+  replace, mirror copy, backup copy) ran on the render thread in the first
+  build; it now runs on a worker, serialised and coalesced while a key is
+  held, and the frame thread only enqueues, shows the value, and drains
+  the results.
+
+What this cannot do is name a cause the ring does not carry. A drop with
+no EDVR event and ordinary EDVR costs is the game's or the runtime's, and
+the page says so by calling it clean.
+
+**The overlay** (`menu.fps_overlay`, off by default, and **a switch on
+the Performance page** since 2026-09-08 -- it is the one thing a player
+wants to turn on from inside the headset, and until then it was reachable
+only by editing the file): a single-line readout with frames per second over
+the last second, then concise GPU and CPU labels averaged over 0.2 seconds.
+Native OpenXR uses application GPU segments and producer-thread CPU wall
+intervals, excluding known runtime and transfer waits. Missing measurements
+show `--`.
+The fixed reference raster preserves apparent size across eye resolutions,
+and `menu.text_degrees` controls its angular text size. See the
+[layout checks](performance-overlay-sizing-2026-09-15.md) and
+[benchmark method](native-render-benchmark-2026-09-15.md).
+It is shown while the
+menu is CLOSED and pinned to the head, the toolkit's overlay, because that
+is what was asked for and a gauge you carry has its uses. `fps_overlay_yaw`
+and `fps_overlay_pitch` put it where you can stop seeing it (default 20
+degrees above the look). `menu.fps_overlay_lock` keeps the readout visible
+while the F8 menu is open, drawing it at the top of the menu panel so you
+can watch FPS while changing settings for A/B tests; it is off by default,
+so the readout clears while the menu is open as before. The lock has no lag:
+the door builds its anchor from each frame's own pose (`setMenuHeadLock` on
+the channel) rather than from a value published a frame earlier. Its price
+is the panel's: one region copy plus a composite over the readout's own
+pixel box per eye per frame, timed by a timestamp pair and printed in the
+graphics log after 240 frames (`menu panel: measured ... ms per eye`), so
+the number is measured and not believed.
+
+With `menu.developer = on`, three more pages and two changes everywhere:
+the ini's dotted key name appears under each label, and each row's hint
+gains the "live" or "restart" word the generator derived.
+
+4. **Advanced** and 5. **Experimental.** Every key the build reads from
+   those sections, automatically: `getBool` reads are toggles, `getInt` /
+   `getFloat` (and their `InRange` forms) are numbers with the declared
+   bounds, and `getString` reads are typed unless the key carries choices.
+   A developer key gets its choices from a `# dev: choices a, b, c` line,
+   or from a full `# ui:` line where it has one.
+   **A `ui:` line is allowed outside `[fix]`** (`UI_SECTIONS` in the
+   generator). It buys the key its LABEL and its CHOICES in this menu and
+   nothing else: the installer's window still shows only `[fix]`
+   (`EXPOSED_SECTIONS`), and for a developer key the page and tier still
+   come from its section. Only `[fix]` and `[menu]` keys may carry a
+   `| menu` token and be ordinary rows (`MENU_ROW_SECTIONS`); the
+   generator refuses the token anywhere else, because everywhere else the
+   section already decides the page. The point is that demoting a setting out of `[fix]` costs it
+   its tier and its page but not the words somebody already wrote for it.
+   Foveated shading was demoted that way on 2026-09-08 -- it ships off,
+   and what it saves does not move the frame rate on Elite -- and kept
+   both its label and its four presets. A key may carry a `ui:` line or a
+   `dev:` line, never both.
+   **Bounds are numbers.** The menu runs a row's bounds through `atof`, so
+   a bound that is a C++ name reads as 0 and one press of Up writes 0. Where
+   the code bounds a read with constants
+   (`getIntInRange("advanced.panel_curvature_segments", kDefaultSegments,
+   kMinSegments, kMaxSegments)`), the key's annotation states the numbers:
+   `# dev: range 1..256`, or `range 1..256` on its `ui:` line. The code's
+   own bounds still win where they are numbers. The generator fails the
+   build, naming the key and the ini line, for a bound that is not a
+   number, a `range` that is not two numbers, a documented default (or
+   `recommended`) outside its bounds, a dotted key that appears twice, and a
+   comment line that starts `# key = ...` (a commented-out setting is
+   written `#key = value`; a sentence that begins that way became a row of
+   its own and cut the paragraph above it off from the real key).
+   Instruments that write files or scan memory are still one toggle away,
+   which is why the tier exists and is off by default.
+6. **Instruments.** Action rows for the things that today need a hotkey
+   bound: dump the camera history (the `PAUSE` key's job), take a draw
+   census with the quad probe, reload `edvr.ini` now and write a marker line
+   to both logs. (A row that reset Explorer Cam's counted view to zero went
+   with the old Explorer Cam route on 2026-10-07.) Each fires the same
+   function its hotkey fires.
+
+**Toasts.** When a live setting changes -- from the menu, the installer's
+window, or a hand edit -- one line fades through the view for a couple of
+seconds: `sharpening 0.30 -- 0.19 ms`, or `vr_handover = early -- takes
+effect at the next launch`. Not head-locked: a toast spawns where you are
+looking at that moment, low in the view, and stays there while it fades.
+With the menu open, toasts are unnecessary (the row itself updates) and are
+suppressed. `menu.toasts = off` for players who want nothing uncommanded
+on screen, ever; the menu itself never appears uncommanded.
+
+## Restart flagging
+
+Sean's addition, made a first-class mechanism rather than a badge:
+
+- **Derived, not declared twice.** `tools/gen_settings_schema.py` already
+  reads "live" or "restart" out of each setting's prose, or from `| live`
+  / `| restart` on the `ui:` line (`when_it_applies()`). The menu's table
+  is generated from the same pass, so a row can never say something the
+  ini does not.
+- **Enforced at build time.** Today the generator already fails the build
+  when a `[fix]` setting shown in the desktop window says neither word
+  (`gen_settings_schema.py`, "do not say when they take effect"), and
+  every `[fix]` row the menu shows is one of those. For the developer tier
+  -- the `[advanced]` and `[experimental]` keys, which were never checked
+  -- the generator prints a WARNING naming each key that does not say, and
+  the row wears a `?` badge with "when it applies is not documented" in
+  its hint, so an unknown is never silently read as live. (As built: 61
+  such keys on 2026-09-07; the error form waits until their comments are
+  written, which is a separate change.) A restart row that reads as live
+  is the failure this exists to prevent.
+- **Shown three ways.** The row wears a `restart` badge always. After a
+  change it shows the running value and the pending one (`stock -> early
+  at next launch`). The panel footer counts them on its second line
+  (`2 changes at next launch`; since 2026-09-11 the count yields to a
+  keys-shared warning, which is shown nowhere else), and the Status page
+  lists them by name and remains the complete list.
+- **Known, not guessed.** At its first parse the d3d11 half snapshots the
+  values of every restart key (the generated table says which). Any later
+  parse -- a menu write, a hand edit, the installer -- diffs against that
+  snapshot; a difference is a pending change. This also gives the config
+  audit a line it has always lacked: `edvr.ini: <advanced key>
+  changed on disk but is read at launch; the running value is still on`.
+  That line ships with this work whether or not the menu is open.
+
+## Placement and rendering
+
+**Anchor.** On summon, the d3d11 half reads the current raw head pose
+(`headPose()`, published by the native runtime before any EDVR offset touches
+it), takes its look direction's yaw and pitch and builds the anchor from
+those with **no roll** -- upright in the world, so the panel's edges are
+level whatever tilt the head had at the summon (the first build latched
+the whole pose, roll included, and a head cocked at F8 got a cocked menu;
+flown 2026-09-07) -- and publishes it on the channel; the panel sits
+`menu.distance` metres (default 1.4) along the anchor's forward, upright
+in the anchor frame, and does not move until recentred or re-summoned. At
+the door, the native runtime computes the per-eye transform exactly as
+`theaterXform` does -- current-head vectors into anchor space, then the
+eye's ray origin with the eye's real lateral offset from
+`GetEyeToHeadTransform` rather than the theater's constant -- and hands it
+to the export. Unlike the theater, the game is fed the LIVE pose
+throughout, so the compositor's reprojection is correct for the panel and
+the frame alike; nothing here needs the theater's world-lock reasoning
+because nothing here lies to the runtime. Under the retired `pose_hold` or
+`shimmer_rest`, whatever pose the submit carries is the pose the export is
+given (gate G7).
+
+**Where at the door.** Last, as [anti-aliasing.md](anti-aliasing.md)'s
+"order at the door" already reserves: after the temporal pass, the crop,
+the scale and the sharpen, onto the native-size outgoing frame. If that
+frame is already an EDVR texture (any of those passes ran) the panel is
+drawn straight onto it, zero extra copies. If it is the game's own texture
+the door first takes the per-eye copy the resubmit shadow already knows how
+to make, draws on the copy, and submits that. The game's textures are never
+drawn on.
+
+**The draw** (as built): a compute pass in the FSS theater's shape rather
+than a quad -- per output pixel, the view ray from the published tangents
+is rotated into the anchor's frame and intersected with the panel, flat or
+on a cylinder (curve `menu.curve`, default 0.2), and the bitmap is blended
+over the frame's pixel. The eye's region is copied into an EDVR-owned
+texture and the dispatch covers only the panel's projected bounding box
+(nine points along its top and bottom edges, so a curved panel's bulge is
+inside it); a panel entirely outside an eye costs that eye nothing at all.
+No depth: the panel draws over the cockpit like the game's own HUD does. A
+150 ms fade in and out is the only animation. The shader is embedded HLSL,
+compiled on first use.
+
+**Type in degrees.** Cap height `menu.text_degrees` (default 1.1, gate G5
+measures it), row pitch twice that, the panel about 24 by 18 degrees. The
+bitmap is sized per headset from the eye size and tangents the channel
+already carries, at the headset's own pixels per degree at the panel, so
+it composites near 1:1 and is native-crisp whatever `render_scale` says.
+
+**Rasterisation.** GDI into a 32-bit DIB section: `CreateFontW` /
+`DrawTextW` with `ANTIALIASED_QUALITY`, white on black, luminance taken as
+alpha -- the installer's own text path (`src/installer/ui.cpp`), and the
+game already imports GDI32, so nothing new enters the process. Redrawn on
+**change only**, on a worker thread, into the back half of a double-buffered
+texture that the frame thread swaps in; per frame the panel costs one draw
+per eye and nothing on the CPU. DirectWrite would give better glyph shapes
+and a build-time SDF atlas would remove the font engine entirely; both are
+noted as the upgrade if GDI's output disappoints at 1.1 degrees (gate G4),
+and neither is needed to start.
+
+## Persistence
+
+The menu writes `edvr.ini` and nothing else; the running configuration
+changes because the file did.
+
+- **The installer's own edit.** `iniedit.cpp` moved from `src/installer`
+  to `src/common` (it already followed `config.cpp`'s grammar exactly and
+  had no installer dependencies; it now lives in the plain `edvr`
+  namespace, which the installer's own namespace finds unqualified); the
+  d3d11 half uses `mergeIni(source, source, &source, {{dotted, value}})`
+  for one value, exactly as `SettingsModel::set` does -- the line where
+  the key already lives, uncommented if it was an expert default, every
+  comment untouched.
+- **Re-read before write**, the installer's 2026-08-28 lesson: the file on
+  disk is the source, never a cached copy.
+- **Atomic write**: `iniedit`'s `writeFileAtomic` (the installer's settings
+  window uses the same one): a temp file beside the ini, flushed, then renamed
+  over it, so `config.cpp`'s size check never meets half a save. The classic
+  rename (`MoveFileExW` with replace-and-write-through) is refused with access
+  denied while ANY handle to the ini is open, one that shares
+  `FILE_SHARE_DELETE` included (measured on Windows 11 build 26200 with cmd's
+  `move /Y`), and the reload the menu asks for after a write holds the ini for
+  microseconds. So the rename is done with POSIX semantics first
+  (`SetFileInformationByHandle`, `FileRenameInfoEx`, replace-if-exists and
+  POSIX-semantics flags; Windows 10 1607+ on NTFS): the ini's name moves to the
+  new file at once and a reader that shares `FILE_SHARE_DELETE` -- which
+  `config.cpp`'s read now does -- goes on reading the old one, so the write
+  lands on the first attempt. Where the OS or the volume refuses that as
+  unsupported the writer falls back to `MoveFileExW` in the same attempt and
+  remembers the refusal for the process. Either way an attempt refused for a
+  reason that passes (a sharing violation, access denied, a lock violation --
+  a reader that does not share `FILE_SHARE_DELETE`, a scanner on the temp file)
+  is tried again, five times, 20 ms apart. A read-only ini goes straight to
+  the classic rename, is left alone, and the failure says so. The installer's
+  apply engine uses the replace half on its own (`replaceFileAtomic`), waiting
+  up to two seconds instead: see `installer.md`.
+- **Apply now**: `Config::get().reloadIfChanged()` is called immediately
+  after the write, so the change lands on this frame instead of the next
+  poll, and through the same configure path a hand edit takes -- no module
+  learns anything new.
+- **Backup once per session** before the first change, to
+  `edvr_backup\menu-<stamp>\edvr.ini`, the settings window's rule.
+- **Mirror.** After each write the ini is copied to the installer's mirror
+  (`%LOCALAPPDATA%\EDVR\<leaf>-<store>\`), so a game update that wipes the
+  folder cannot lose an evening's tuning; `mirrorDirFor`'s naming rule
+  moves to common with `iniedit` so the DLL and the installer cannot
+  disagree about the folder. The copy goes through the atomic writer and
+  replaces the newest generation in place. The mirror keeps three
+  (`edvr.ini`, `edvr.ini.1`, `edvr.ini.2`, in `iniedit`'s `writeGenerations`):
+  an install or repair rotates them, so settings that stood before an install
+  wrote defaults over them (a declined or failed restore, then a fresh
+  install) are still there as `.1`; a menu or settings-window change does not
+  rotate, since three tweaks would push them out. The restore reads the newest
+  generation that is not empty. The file is named for the ini actually
+  written, so the flat profile's `edvr-flat.ini` no longer lands over the
+  mirror's `edvr.ini`.
+- **Log line per change**: `menu: fix.render_sharpness 0.0 -> 0.3 (written;
+  live)` or `(written; takes effect at the next launch)`.
+
+The installer's settings window and the menu can never disagree, because
+neither owns any state the other lacks; the desktop window remains the
+place for everything, the menu the flight-relevant subset plus, for
+developers, the rest.
+
+## Safeguards, gathered
+
+It never appears uncommanded (toasts excepted, and they have an off
+switch). It never takes the keyboard unless it is being drawn. It draws
+only onto EDVR's own copies. A rasterisation or draw failure means no menu
+and one log line, with the game unaffected. A door fault means keys shared
+and the panel says so. Closed, it costs one key poll and one byte
+comparison per DirectInput call; open, it says its own price on the Status
+page.
+
+## Settings sketch
+
+```
+[hotkey]
+# Summon and dismiss the settings menu. Private to EDVR: the game never
+# sees this key while it is bound here. Checked against your own Elite
+# bindings at launch and on every rebind; a clash is named in the log and
+# on the panel. Live.
+menu = F8
+
+[menu]
+# While the menu is open the game sees no keyboard at all (private), or
+# every key reaches the game as well and the menu only watches (shared).
+# Live.
+keyboard = private
+
+# How the highlighted row is chosen: the arrow keys (keys), where your
+# head points (head), or whichever moved last (both). Live.
+aim = keys
+
+# The head-locked readout while the menu is closed, and where it sits.
+fps_overlay = off
+fps_overlay_yaw = 0
+fps_overlay_pitch = -16
+
+# Metres from your head to the panel, and how much it wraps toward you.
+# Live.
+distance = 1.4
+curve = 0.2
+
+# The height of a capital letter, and the panel's width, in degrees of
+# your view. Live.
+text_degrees = 1.1
+width_degrees = 30
+
+# Close after this many seconds without a key or a look; 0 stays open
+# until dismissed, which is what it ships doing. Live.
+idle_dismiss = 0
+
+# Seconds resting on a row before its explanation appears beside the
+# panel; 0 never shows one. Live.
+tooltip_delay = 1.5
+
+# One-line confirmations when a setting changes outside the menu. Live.
+toasts = on
+
+# Adds the Advanced, Experimental and Instruments pages, and shows each
+# setting's ini name. Everything on those pages is a safety valve or a
+# developer instrument; the log names one when it wants you to change it.
+# Also a switch at the bottom of the menu's own Performance page, so the
+# extra pages can be turned on from inside the headset. Live.
+# ui: Developer mode | menu performance
+developer = off
+```
+
+The `[fix]` rows opt in on their existing `ui:` line: `# ui: Sharpening |
+range 0..1 | percent | menu performance` puts a row on the Performance
+page; a bare `| menu` puts it on Fixes. A `[fix]` row with no `menu` token
+stays in the desktop window only.
+
+**The summon default, F8, comes from a measurement** (2026-09-07, all 30
+`.binds` files under the game's `ControlSchemes\`): across every stock
+scheme, 75 bare keyboard keys and 7 chords are used (`CTRL+ALT+SPACE`,
+`CTRL+SPACE`, `SHIFT+W/A/S/D`, and one pad chord); the whole cursor
+cluster (Insert, Home, End, Delete, PageUp, PageDown) is taken by the thrust
+bindings, and the Pause cluster is already EDVR's (`SCROLLLOCK`, `PAUSE`,
+`NUMLOCK` earmarked). F2 through F9 are bound in no stock scheme; F1 is,
+F10 and Alt+F10 are the game's hard-coded screenshot keys, F12 is Steam's,
+Escape is the game menu. F8 is layout-independent and findable blind in
+the F5-F8 group. Because the press is swallowed, a player who has bound F8
+themselves loses only that binding, and the collision check says so at
+launch. `CTRL+ALT+<letter>` would also be free (only Space is chorded that
+way in stock) for anyone who prefers a chord.
+
+## Architecture
+
+**d3d11 half** (new files, `src/d3d11/`):
+
+- `menu_model.cpp` -- pages, rows, highlight, the generated table
+  (`menu_schema_gen.h`, a second output of `gen_settings_schema.py`
+  carrying every section with its tier, kind, bounds, choices, applies and
+  page), the restart snapshot and pending list.
+- `menu_input.cpp` -- the summon key through `Hotkey`, the navigation keys
+  through the same edge-and-repeat polling, head-aim from `headPose()`
+  against the published anchor, idle timing through `timing.h`.
+- `menu_raster.cpp` -- GDI DIB rasterisation on a worker thread, the
+  double-buffered texture, the toast bitmap.
+- `menu_ini.cpp` -- the write path above, on top of `common/iniedit`.
+- `input_gate.cpp` -- the doors: the dinput8 dummy devices and their
+  in-place vtable patches (`VTableHook`, InPlace, `reclaim()` from the frame
+  path), the exe-IAT patches (`common/iat_hook`), the summon-key scan code,
+  the input probe.
+- The export `edvrMenuPanel(outTex, eye, tangents4, xf12, alpha)`: draws the
+  current panel and toast onto `outTex`. Bumps the "drawn" stamp the gate
+  checks.
+
+**native runtime** (EDVR's OpenXR runtime, the door lambda): reads the
+channel's menu flag and anchor, takes the shadow copy if the outgoing
+texture is the game's, computes `xf` per eye as the theater does with the
+real eye offset, calls the export, submits what came back. Publishes one
+new word: the runtime kind, for the Status page.
+
+**Channel** (`frame_flag.h`): `publishMenuAnchor(m12)` / `menuAnchor()`,
+`setMenuVisible(bool, alpha)` written every frame (a heartbeat with a
+moving stamp, so "closed" and "d3d11 stopped saying" stay distinguishable), `bumpMenuDrawn()` / `menuDrawnValue()` the other way,
+and `announceRuntimeKind(k)`.
+
+**Common**: `iniedit` and `mirrorDirFor` move in; `iat_hook.h` is new.
+
+**Tests** (`tools/`): `menu_test` drives the model through keys and aim
+with the test clock (rate-invariant repeat and idle, hysteresis, the
+pending-restart diff); `gate_test`-style fixtures for the doors against a
+fake `IDirectInputDevice8` vtable (the filter policy: zeroed state, ups
+kept, downs dropped, non-keyboard devices untouched, foreign entry chained)
+and against a synthetic import table; `installer_test` already proves the
+one-value merge and gains the atomic-write case.
+
+## Phase 0 -- what must be measured before code depends on it
+
+1. **G1, the input probe** (`advanced.input_probe = on`, an instrument in
+   the gaze probe's style): with the doors installed pass-through, count
+   per five seconds the game's calls to `GetDeviceState` and
+   `GetDeviceData` (A and W), to each of the user32 trio, and the keyboard
+   messages seen by `PeekMessageA`, plus any `WM_INPUT` (which would mean a
+   dynamic Raw Input registration the import table hid). Decides which
+   doors matter and whether one is missing.
+2. **G2, reach and attribution.** The dummy-device table patch is reached by
+   a `this` that is not ours within ten seconds of play (else "not
+   reached", and the menu runs shared). The install line names the module
+   each slot pointed at before the patch, on both installs; the Steam
+   overlay's presence in the chain is the expected finding there.
+3. **G3, the modal test.** Hold a thrust key, summon: thrust stops. Close
+   with the key still held: thrust resumes. Type in the galaxy map search
+   with the menu open: nothing lands. A key that leaks names the fourth
+   path (the game's own `SetWindowsHookExA`) and gets a door of its own.
+4. **G4, GDI beside the game.** Cost of one full re-raster at the Pimax's
+   bitmap size (expected 1-3 ms, off the frame thread), no loader
+   surprise at first use, and whether the glyphs satisfy at 1.1 degrees.
+5. **G5, legibility in degrees**, both rigs -- performance.md's item 9.
+6. **G6, head-aim comfort** -- item 10.
+7. **G7, anchoring.** The panel holds under head translation and rotation
+   on both rigs; it holds under `pose_hold`; the FSS theater and the menu
+   coexist; the menu over the loading screen and the main menu.
+8. **G8, the collision check.** The stock sweep is done (above); the live
+   check runs against a real player's binds file with F8 deliberately
+   bound in Elite, and the panel shows the warning.
+9. **G9, the write round trip.** Write, immediate reload, mirror refreshed,
+   the installer's window reopened reading the same value; a hand edit
+   while the menu is open lands on the panel within the poll; the atomic
+   replace never trips `config.cpp`'s size check.
+10. **G10, fail-open.** Force the export to fail (a debug key): the flag
+    clears within the stamp window and the game has its keyboard back; a
+    forced fault in a door retires that door only.
+11. **G11, focus.** Alt-Tab away with the menu open: idle dismiss closes it;
+    the overlay (Shift+Tab) opens and closes cleanly with the menu up.
+12. **G12, the restart snapshot.** Change a launch-time key by hand and by
+    menu; the pending list, the footer count and the new audit line agree.
+13. **G13, your Elite keys** (first flight on Sean's rig, 2026-09-11's
+    change): W/S, A/D, Space, Q/E and L-Ctrl respond on Fixes;
+    `menu: closed (UI_Back).` appears (the proof that
+    `GetAsyncKeyState(VK_LCONTROL)` polls on this rig); `menu panel: footer
+    line` says no line is ellipsised; on Monitor press E -> the menu's
+    page changes (and E reaches the ship as Tab does there; with a cockpit
+    panel open its tab cycles, with none open nothing happens -- the
+    BELIEVED half); on Monitor press W -> nothing in the menu; hold E on
+    Fixes so the page lands on Monitor -> one page change only, and the
+    ship does nothing until E is released and pressed again; hold W, press
+    F8 -> the highlight does not move; open a Number row with Enter while
+    holding a letter -> the buffer is unchanged; hold W on Status, press
+    Tab -> nothing fires on Performance.
+    Desk half, no headset: with Elite at its main menu, rebind
+    CycleNextPanel in Options > Controls > Interface Mode and Apply; within
+    15 s the log shows `hotkey: your Elite bindings files changed...`
+    followed by exactly one `menu keys: your Elite bindings changed -- ...`
+    line naming the new key.
+14. **G14, the leak audit** (G3's shape): every adopted and fixed key
+    pressed on Fixes moves nothing in the ship; `advanced.input_probe`
+    counts zero game-side downs.
+
+## Phasing
+
+- **A, the menu** (this design's v1): the three doors, the model, pages
+  1-3, head-aim plus keys, toasts, the ini write path, restart flagging
+  with its build gate, the developer tier with pages 4-6. Ships default
+  on with `keyboard = private`, because the whole point is that it is safe
+  to.
+- **B, the extras**: typing a value, pad navigation and door 4, the
+  performance monitor's "move it here" row (Feature 5), per-row measured
+  costs as each pass gains a timestamp pair.
+- **C, gaze**: aim by eye and dwell-to-select, the day a driver publishes a
+  usable centre; the highlight then becomes the tracker's live sanity
+  check, as Feature 4 hoped.
+
+## Open questions for Sean
+
+1. **F8 as the summon default**, or a chord? The sweep says either is free;
+   a single key is easier blind.
+2. **`keyboard = private` by default.** The design assumes yes; `shared` is
+   there for a rig where a door misbehaves.
+3. **`developer` under `[menu]`** rather than `[advanced]`, since it changes
+   what the menu shows and nothing else. And whether the Instruments page
+   should fire the dev hotkeys' functions at all, or only show them.
+4. **Which `[fix]` rows get the `menu` token** in the first cut. The
+   proposal above is the Performance list plus every live-editable fix
+   with a choice or a toggle; the metre offsets stay desktop-only as the
+   generator's comment argues.

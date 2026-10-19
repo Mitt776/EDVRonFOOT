@@ -1,0 +1,1605 @@
+# The Full System Scanner in VR
+
+## Status
+
+*Written 2026-09-15 from the entries of 2026-08-24 to 2026-08-27; the
+2026-09-16 items are from a log read, not a journal entry. Restates the
+journal below; update it whenever this doc changes. The status as it stood
+before 2026-09-29 is kept in "Status detail".*
+
+- **Retired 2026-09-29:** the theater (`experimental.fss_theater`, 6ecbd241;
+  the latch's tick is now `fss_mode_latch`, 73b31d3f; latch, `fss_res`,
+  `fss_eye_sync` and the rest stay) and the black-square-hunt instruments
+  (`fix.fss_scan`, `advanced.fss_scan_level`, `experimental.fss_ring_feed`,
+  `advanced.fss_composite_probe`; c61c43af, code at `c61c43af^`;
+  `fss_eye_sync` superseded all four). Full lists in "Status detail".
+- **State:** SOLVED and shipped, field-verified 2026-08-27. Findings 1-2
+  (zoomed body mono, half eye resolution) are addressed by the opt-in
+  `fix.fss_res`. The "black squares" hunt ran ~48 rounds to round 33's
+  finding: for ~10 frames at each zoom's arrival, the primary (left) eye's
+  submitted image carries not-yet-resolved tiles the right does not.
+  Shipped and on by default: `fix.fss_eye_heal = 1` + `fix.fss_reveal_sync
+  = on`. Bug is ring-only.
+- **Fixed 2026-09-16 (Quest 3 / VirtualDesktopXR, native path, DLSS on),
+  all flown;** receipts in "Status detail" and the journal entries named there:
+  - Body double ghost while zooming with `fix.fss_eye_sync = on` (fill's
+    donor was the previous frame's right eye): same-frame donor, 10705da /
+    main e08e899, flight 3 "looks good".
+  - FSS UI shimmer under DLSS, in steps: interface on the head's path
+    (3799899 / 36a9fa1, 18:20); scene-draw floor 8 (79b1879 / cc10e79,
+    18:40); tracker learn (b43e3ce, 19:00, idle, WRONG); graph under the
+    alpha floor (653671d, 19:40, CONFIRMED); chrome depth down to one alpha
+    step (3277ba6, on main, 20:26). Sean: "while head still it was crisp".
+- **Open:**
+  - Re-verify the healed pair with the OpenXR Toolkit ON (proven Toolkit-off).
+  - `fix.fss_res` stays opt-in; a default-on ship is a release-train call.
+  - The flash detector withholds frames at every fresh FSS zoom (own arc).
+  - The census still misses `GenerateMips`, `ClearUnorderedAccessView*` and
+    command-list contents.
+  - Sky ~+0.4 px/frame more than the camera rows predict under a head turn
+    (dump 202857, not 194158): unexplained, small. "The screen follows the
+    head" is withdrawn (194158's label shortfall not reproduced).
+- **Ruled out:** eleven items with reasons in "Status detail"; the
+  refutations (rounds two to fourteen, 31, 33, Method notes 3-4) are in
+  the journal chapters of those names, the ghost ones in "2026-09-16: the
+  Quest 3 ghost under the native path".
+- **Next flight:** none owed; each 2026-09-16 flight did what it said.
+  Known, not fixed ("Status detail"): the ~220 m remap under head sway;
+  the "scanner is up" bit and one-step floor firing on the loading
+  screen's panel; the sky's ~+0.4 px/frame. Toolkit-ON check stands.
+- **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
+  confounded many rounds; the fix is proven Toolkit-OFF only. Reproduces
+  under OpenComposite and native SteamVR (also via Steam Link), two
+  headsets, eye 4340x4284, 16x16-tile (272x268) grid; the body layer
+  defaults to half that and `fix.fss_res` doubles it.
+- **Detail:** "Finding 1", "Finding 2", "The fix: `fix.fss_res`" (mono,
+  half-res). Hunt: "Round four" to "Rounds forty-five through forty-eight";
+  decisive "Round thirty-three: the arrival window, measured"; shipped
+  state "The ring, and the shipping state"; "Method notes" is process
+  lessons, read first. Companion: frontier-fss-bug-report.md.
+
+## Status detail (moved out of Status 2026-09-29)
+
+*Verbatim from the Status block as it stood before 2026-09-29; the
+Status block above summarises it.*
+
+- **State: the theater retired 2026-09-29 (code removed, 6ecbd241).**
+  `experimental.fss_theater`, fss_theater.cpp and the export `edvrFssTheater`
+  are gone: the theater could only run from a door call the deleted openvr half
+  made. The FSS mode latch, `fss_panel_rect`, `fss_eye_sync`, `fss_res`,
+  `fss_panel`, `fss_dump` and `fss_reveal` stay; the latch's frame tick, once
+  `fss_theater`, is `fss_mode_latch` (73b31d3f).
+- **State: the black-square-hunt instruments retired 2026-09-29 (code removed,
+  c61c43af).** `fix.fss_scan`, `advanced.fss_scan_level`,
+  `experimental.fss_ring_feed` and `advanced.fss_composite_probe` are gone with
+  fss_scan, fss_probe and fss_ring (1,608 lines). `fss_eye_sync` (heal and
+  lockstep) superseded all four. The entries below that flew them are history;
+  the code is at `c61c43af^`.
+- **State:** SOLVED and shipped, field-verified 2026-08-27. Findings
+  1-2 (the zoomed body renders mono, at half eye resolution) are
+  addressed by the opt-in `fix.fss_res`. The "black squares" hunt ran
+  ~48 rounds to round 33's finding: for ~10 frames at each zoom's
+  arrival, the primary (left) eye's submitted image carries
+  not-yet-resolved tiles the right does not. Shipped and on by
+  default: `fix.fss_eye_heal = 1` + `fix.fss_reveal_sync = on`. Bug is
+  ring-only.
+- **Open:**
+  - 2026-09-16, Quest 3 / VirtualDesktopXR, native path, DLSS on: a
+    slight double ghost on the body while zooming in with
+    `fix.fss_eye_sync = on`. Flight 1 (heal toggled live) put it in the
+    heal half; flight 2 on build 0522215 (heal on the DLSS output, no
+    temporal skip) fixed the blur while moving but not the ghost.
+    Cause, from eye dump 154720: the fill's donor was the PREVIOUS
+    frame's right eye (the left submits first) and the view moves 4-20
+    px per frame while zooming, so every hard-black pixel beside the
+    limb took a displaced copy of it. Journal entry "2026-09-16: the
+    Quest 3 ghost under the native path". FIXED by the same-frame donor
+    (10705da, merged to main as e08e899): flight 3 "looks good",
+    receipts `first_healed_eye=0,...,donor=pair`, `fss_healed=4009/0,
+    fss_deferred=4009`, `native_temporal_summary left=19776
+    right=19776`, `donor_refusals=0`.
+  - 2026-09-16, Quest 3, DLSS: the FSS's own UI (the bottom bar, its
+    text, the signal markers) shimmers on the initial screen while
+    panning. MEASURED from eye dump 170752, not fixed: the raw frame
+    draws the UI crisp and static in the eye (0 px/frame), DLSS returns
+    it doubled BEFORE the UI resolve touches it (`DlssBeforeUi` = `L0`
+    at the marker), and the vector DLSS was given at the UI pixels is
+    the scene camera's (-3.8 px at the marker, -5.5 px on the bar) while
+    the head was still (`headR` 0.01 deg against `cameraR` 0.23 deg that
+    frame, 2.1 and 1.5 deg on the next). In the FSS the camera EDVR
+    reads is the scanner's panning view, which the panel's UI does not
+    follow; the "interface keeps the camera's path" rule
+    (temporal_shader_source.h ~359) is right for a camera that is the
+    head and wrong here. Journal entry "2026-09-16: the FSS UI under
+    DLSS". FIXED for the interface (journal entry "2026-09-16: the
+    scanner's interface on the head's path", 3799899 / main 36a9fa1):
+    while the scanner's screen is up (the chrome tracker's stamp moved
+    this frame), every interface-marked pixel takes the head's delta at
+    whatever depth it reads, in both copies of the world/ship split;
+    `probe.w` bit 128. FLOWN 2026-09-16 18:20 (`edvr_gfx_20260916_
+    181837.log`, eye dump 182049): the note fired, the header carries
+    0x91, the bar's pixels read +0.07/+0.13 px under a 0.2-1.6 deg/frame
+    pan with the head at 0.02 deg, and the text is as crisp as the raw
+    in all 16 treated crops. Sean: "still blurs with head still" -- and
+    the same dump names the blur: the SKY (the scanner's grid, the
+    signal dots, the stars) read +0.09 px too, because the world path
+    stood down on 4 frames in 5: `sceneDraws` 49 against the 50-draw
+    floor (50 on every 5th frame, `w 1`; the registration line said
+    24.1% world-path pixels in the scanner against 94.8% twenty
+    seconds later), and the treated crops show the grid and dots smeared
+    against the raw. Journal entry "2026-09-16: the scanner's sky at 49
+    draws". The floor is 8 now (`kTemporalSceneDrawFloor`, shared by the
+    world path, the camera follow score and the menu depth; 79b1879 /
+    main cc10e79) and FLEW 2026-09-16 18:40 (dump 184002): `w 1` on
+    every frame at 35-36 draws, the sky at -7 px under the pan, the bar
+    at -0.10 px, its text crisp. Sean: "still blurred" -- and the dump
+    shows what: "FILTERED SPECTRAL ANALYSIS" and the graph's strokes,
+    which are NOT in the interface mask (94% zero at the text), read no
+    depth, and so take the world path's far-plane pan (-5.04 px) while
+    they stand still in the raw (0-1 px): a 3-4 copy smear in every
+    treated crop. Journal entry "2026-09-16: the spectral graph is not
+    interface". The "unlearned stratum" cause (b43e3ce: the tracker
+    hands the surface to `uiDepthLearnScannerChrome`) FLEW 2026-09-16
+    19:00 (dump 190129) and was WRONG: no learn note, the strokes still
+    unmasked at +2.06 px, and the mask in both dumps is a clean
+    threshold on the composite's brightness (luma 80+ masked, under 60
+    never) -- the alpha floor, not classification. CAUSE, as far as two
+    dumps can say: both strata are learned and reissued, and the graph
+    is drawn DIM, below `advanced.ui_depth_alpha` = 0.5, so
+    `clip(a - floor)` drops its strokes and its label. Journal entry
+    "2026-09-16: the graph is under the alpha floor". CONFIRMED by the
+    instrument build's flight (653671d, 19:40, `edvr_gfx_20260916_
+    193918.log`, dump 194158, ini at 0.004): `already learned when the
+    tracker offered it (9 surfaces known)`, `Chrome0` (2479x1394)
+    written, the label and every stroke in the mask (493/493 bright px
+    at 129, MV = the head's path) and crisp in the treated crops; the
+    chrome itself reads alpha 51-77 at the dim strokes, 166+ at the
+    labels, zero everywhere else (97.7%; nothing translucent). Sean:
+    "mostly fixed, it only slightly shimmers when both moving the panel
+    via the controls and moving my head". FIXED (3277ba6, on main):
+    the scanner's chrome writes depth down to one alpha step while the
+    tracker holds its surface (`kChromeFloorSlot`,
+    `samplesScannerChrome`); the general floor is untouched and the
+    Frontier ini is back at `#ui_depth_alpha = 0.5`. FLOWN 2026-09-16
+    20:26 (`edvr_gfx_20260916_202609.log`, dump 202857, ini at its
+    defaults): both family lines say `the scanner's chrome; ...
+    down to one alpha step`, the whole chrome is in the mask at the 0.5
+    general floor (label, ticks, bar, cursor, brackets, markers, the
+    right-hand texts) with the grid and stars out of it, and Sean:
+    "while head still it was crisp". Journal entries "2026-09-16: the
+    chrome at one alpha step" and "...: the one-step floor flown".
+    Under a head turn: dump 194158 had the label moving 3-6% LESS than
+    the head path (+0.23..+0.84 px/frame), which read as "the screen
+    follows the head"; dump 202857 does NOT reproduce it -- the label
+    and the bar's text follow the head path within +-0.3 px/frame (mean
+    ~0) at 0.25-0.5 deg/frame, and the treated crops at 3x show them as
+    crisp as the raw. What 202857 does show is the SKY moving ~+0.4
+    px/frame MORE than the camera rows predict (the grid and stars
+    slightly soft under the turn; not the UI). Nothing owed on the
+    strokes; the sky's 0.4 px is unexplained and small.
+  - Re-verify the healed pair with the OpenXR Toolkit ON (proven so
+    far only Toolkit-off).
+  - `fix.fss_res` stays opt-in; a default-on ship is a release-train
+    call.
+  - The flash detector withholds frames at every fresh FSS zoom (its
+    own arc).
+  - The census still misses `GenerateMips`, `ClearUnorderedAccessView*`
+    and command-list contents.
+- **Ruled out:**
+  - "The eyes sweep the ring in opposite directions": died to a
+    single-eye look.
+  - A write landing between the two composite reads: zero writes found
+    in a q-ordered capture (round two).
+  - A per-eye fill-rate difference and a desynced per-eye resolve map
+    (Method notes 3-4): a "working" fix changed nothing under a
+    magenta control; the map proved an unrelated screen-space grid.
+  - The composite draw itself (constants, depth, blend, discard):
+    every probe (rounds three-four, seven-thirteen) came back null;
+    the two draws are byte-equivalent.
+  - "Harmless mono scan-resolve art, symmetric in both eyes" (round
+    six): superseded by round seven's monocular re-test, a genuine
+    per-eye split.
+  - "The second eye's reveal is the smoothed, wrong one" (round 31):
+    superseded by round 33 -- the PRIMARY eye carries the defect.
+  - A carried/stale temporal accumulator: round fourteen's pair-sync
+    was null; the left eye regenerates its squares every frame.
+  - The Quest 3 ghost as an asymmetric-frustum error in the heal's
+    shift (2026-09-16): the game renders the guard's symmetric lie and
+    0 px is the infinity shift for that image (receipts above). "Not
+    on the Pimax" is untested on the native path: no Pimax session in
+    the last 60 Frontier logs reached the heal (`snapshots=0` in every
+    one), and the only two native heals on record were both Quest 3
+    rigs at 0 px (today, and 2026-09-14 via Steam Link).
+  - The lockstep half lending a differently-jittered body layer: one
+    `temporalJitter(frameCounter)` serves both eyes, so the lent
+    texture carries the jitter the receiving eye rendered with. And
+    the lockstep half at all: flight 1 (sync-only) had no ghost.
+  - The healed eye's temporal skip as the ghost (2026-09-16): flight 2
+    on 0522215 kept the DLSS frame in the healed eye
+    (`native_temporal_summary left=12192 right=12192`, `skipped=10`,
+    `native_fss,first_healed_eye=0,...,source=temporal`) and the ghost
+    stayed. The skip was the blur while moving, which that build fixed.
+  - "The stale donor is null on a zoom-in" (claimed 2026-09-16 before
+    the dump was read): wrong. The fill reads the donor at the SAME
+    pixel, and after a frame of motion that pixel holds content that
+    has since moved; the simulated fill on dump 154720 paints the limb
+    into the black gap, displaced by one frame's motion.
+- **Next flight:** none owed for the ghost: flight 3 (2026-09-16
+  17:05, `edvr_gfx_20260916_170514.log`, the pre-commit build of
+  10705da, version string `0522215-dirty`) confirmed the same-frame
+  donor and it is on main (e08e899). The head path (18:20) and the
+  8-draw floor (18:40) both flew and did what they said; the learn
+  (19:00) flew and was idle; the instrument build (19:40) flew and
+  confirmed the floor; the one-step build (20:26) flew and did what it
+  said (receipts under Open). None owed for the scanner's UI. Known
+  and not fixed: the ~220 m remap under head sway (194158 says it is
+  NOT what moves the label: a panel at 1 m would move MORE than the
+  head's rotation); the "scanner is up" bit and the one-step floor
+  also fire on the loading screen's panel (same composite family) --
+  nothing translucent is in that surface under `loading_dim = screen`,
+  where the scrim is withheld, and under a stock scrim the ship model
+  beneath it takes interface depth for that dialog's duration; and the
+  sky's ~+0.4 px/frame against the camera rows under a head turn in
+  202857 (not seen in 194158). The Toolkit-ON confirmation under Open
+  still stands.
+- **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
+  confounded many rounds until identified and excluded; the shipped
+  fix is proven Toolkit-OFF only. Reproduces under OpenComposite and
+  native SteamVR (also SteamVR-via-Steam-Link) on two headsets, at eye
+  size 4340x4284 with a 16x16-tile (272x268) grid; the body layer
+  defaults to half that and `fix.fss_res` doubles it.
+- **Detail:** "Finding 1", "Finding 2" and "The fix: `fix.fss_res` --
+  the body layer at full eye resolution" cover the mono/half-res bug.
+  The black-squares hunt runs "Round four" through "Rounds forty-five
+  through forty-eight"; the decisive measurement is "Round
+  thirty-three: the arrival window, measured", the shipped state is
+  "The ring, and the shipping state". "Method notes -- five theories
+  died here, and how" is process lessons worth reading first.
+  Companion: frontier-fss-bug-report.md.
+
+## The report (moved out of Status 2026-09-29)
+
+Investigated 2026-08-24, from a field report: zooming the Full System Scanner
+onto a planet **with rings** looks wrong in a headset. The ring "tiles in" over
+a few frames and the two eyes appear to disagree about how far that build has
+got — one eye still filling while the other is already solid.
+
+Two findings came out of the first day. A third section, added 2026-08-25,
+reopens the part of the conclusion the field then contradicted, and records
+what was built to decide it. The process of the first day is kept at the end
+because it was expensive and the lessons are reusable.
+
+> **STATUS: SOLVED, field-verified 2026-08-27.** The black squares are
+> ring-only, appear during the ~10-frame zoom-arrival window in the
+> primary eye's submitted image, and are healed by the shipping pair
+> `fix.fss_eye_heal = 1` + `fix.fss_reveal_sync = on`. The final
+> mechanism and the fix are in the chapters from round thirty-three
+> onward; the vendor-facing writeup is
+> [frontier-fss-bug-report.md](frontier-fss-bug-report.md). Everything
+> between here and there is the road, kept because its receipts and
+> retractions are the reusable part.
+
+## Finding 1: the zoomed body is rendered MONO
+
+**In VR, the Full System Scanner renders the zoomed body once, into a single
+shared render target, and hands both eyes the same pixels.** There is no
+per-eye render of the body at all — no stereo, no disparity, no depth. The
+planet you are "zoomed into" is a flat picture pasted in front of you, inside
+an otherwise stereo scene.
+
+Field-confirmed from the other direction on 2026-08-25: at the eyepiece the
+zoomed body reads as **a 2D sprite of a projected 3D model**, slightly
+pixelated against what the same body looks like approached in the ship. That
+is this finding and Finding 2 seen without instruments — flat because mono,
+pixelated because half resolution upscaled.
+
+Measured three independent ways, all from one draw census taken in the scanner
+with `advanced.census_offscreen = 1`:
+
+1. **One target, drawn once per frame.** The body is produced by ten draws into
+   a single `2170x2142` target, issued *after* both eye blocks, identically in
+   every captured frame:
+
+   ```
+   EYE @19  (first eye)   1 clear + 10 draws
+   EYE @23  (second eye)  1 clear + 10 draws
+   HALF-RES @79           10 draws   <- once, not per eye
+   ```
+
+2. **Both eyes composite from the same source.** Exactly two draws sample the
+   half-res target, one per eye, and their bound resources are identical:
+
+   ```
+   DC 0 #36  r=@61 (eye A)  s=@38,@103,@104,@105
+   DC 0 #60  r=@74 (eye B)  s=@38,@103,@104,@105
+   ```
+
+3. **Suppressing that target removes the body and nothing else.**
+   `advanced.census_skip_offscreen = 2170x2142` leaves the scanner's chrome —
+   body name, object type, reticle arcs, spectral scale, COMMS — and deletes
+   the planet and its rings entirely.
+
+The geometry going into it is real: index counts of 36864, 15360 and 5334.
+
+Reproduced identically under OpenComposite and native SteamVR, so none of this
+is runtime-side.
+
+## Finding 2: the body renders at exactly half eye resolution
+
+`2170x2142` against eye textures of `4340x4284` is **exactly 2.0x down on both
+axes**, then upscaled for display. This is the measured cause of the separate
+field complaint that FSS bodies "look lower resolution", and of the pixelated
+sprite look above.
+
+Note it is derived from the eye size, not from the panel: an earlier reading in
+this investigation attributed the softness to `3408x1917` (which *is* the panel
+resolution divided by 1.5023) — that target is the scanner's **chrome** layer,
+confirmed by probe, and the attribution was wrong.
+
+The clean 2.0 relationship makes this the same shape of problem
+`vscreen_res.cpp` already solves for the on-foot panel: a size chosen in game
+code that can be recognised by shape and raised. Not built yet, and now
+deliberately sequenced AFTER the build capture below: raising the target means
+every writer that addresses it in pixel coordinates has to be known first, and
+the capture is what produces that inventory.
+
+## The ring split, REOPENED (2026-08-25)
+
+The first day ended by explaining the two-eye report as misfusion: the eyes
+receive the same pixels, so a difference between them "cannot" be real, and a
+flat zero-disparity image carrying a thin high-contrast edge inside a stereo
+scene is genuinely hard to fuse. The field then said no: tested one eye at a
+time, **the left and right eye render differently while the ring section is
+loading**. A perceptual explanation does not survive a monocular observation.
+The conclusion, not the observation, had to give.
+
+Rereading the evidence, the impossibility argument has a hole a measurement
+never closed:
+
+**Both eyes sampling the same texture is not both eyes sampling the same
+content.** The two composite draws are ~24 draws apart within the frame. If
+anything writes the body texture **between** them, eye B reads newer content
+than eye A — every frame of the build, converging the moment the build
+finishes. That is precisely the reported shape: it needs the build, it needs a
+feature where one step of progress is conspicuous (an edge-on ring), and it
+needs per-eye inspection to see. A static census diff can never show it,
+because by the time anything is steady the eyes agree.
+
+And the ordering evidence was never taken during the build. The "ten draws
+after both eye blocks" pattern comes from censuses armed by keypress — which,
+with human reaction, means the settled scanner, ~20 frames after the moment
+that matters at 90Hz. The build phase, the only frames the bug exists in, was
+never captured. Worse, the instrument could not have seen the writers even if
+the timing had landed:
+
+- **Copies were recorded on their own counter**, so a copy's position among
+  the draws was implicit in log line order and nothing else; nobody read it
+  that way.
+- **`UpdateSubresource` was unhooked** — the classic CPU path for streamed
+  tile uploads, which is what a build that "tiles in" most resembles.
+- **`ResolveSubresource` was unhooked** — the only call that turns an MSAA
+  render into a sampleable texture. The body is DRAWN into @79 while the
+  composites SAMPLE @38, and no recorded event connects them; a resolve is
+  the likeliest bridge, and its position in the frame is the whole question.
+- **Compute dispatches were not recorded** — the third way a texture changes
+  without a draw — even though the exposure fix has always owned the Dispatch
+  hook.
+- **The census interned views, not resources**, so even asking "is @79 the
+  same texture as @38" was unanswerable from a log.
+
+### What EDVR itself is ruled out of
+
+The one EDVR mechanism that could split the eyes — the transition-flash
+withhold, which declines Submits per eye — was checked in code and is
+latch-protected against exactly this: `SubmitPairLatch` samples the verdict
+once per frame at whichever eye submits first and the second eye follows,
+reset at WaitGetPoses (frame_flag.h, "CONSISTENT-LATE BEATS SPLIT"). The
+resubmit shadow substitutes per-eye copies of the *last forwarded frame*, so
+even a substitution/fallback disagreement shows both eyes same-age content.
+The split is game-side content, or it is nothing.
+
+### The instruments built to decide it
+
+All census-side, all free when off, shipped in the DLL as of this commit:
+
+- **`q=` on every recorded line** — one shared per-frame ordinal across
+  draws (DC/DCO), copies (DCC), and dispatches (DCX). "Did anything write the
+  body between the two composites" becomes a grep: find the two composite
+  draws' q values, look for DCC/DCX lines whose dst falls between them.
+- **`res=` on the interned-id table** — the underlying resource pointer, so
+  an SRV and an RTV over the same texture finally show one identity. This is
+  what connects (or separates) @79 and @38.
+- **DCC kind `U`** — `UpdateSubresource`, with the destination box: a tiled
+  CPU upload names its tile.
+- **DCC kind `V`** — `ResolveSubresource`, with the format: dst, src, and
+  where in the frame it ran.
+- **DCX lines** — every compute dispatch while a census runs, with the
+  compute shader's content hash (`ch=`) and what UAV slots 0–3 resolve to.
+  Recorded through the exposure fix's existing Dispatch hook; no new patch.
+- **`advanced.census_frames` / `advanced.census_lines`** — a census can now
+  span 30 frames and 16384 lines, because a build outlives three frames and
+  a 4096-line cap drops the tail of an offscreen capture exactly where the
+  build finishes.
+- **`advanced.census_auto = WxH`** — the decisive one. The census arms
+  ITSELF on the first draw into a target of that size after two quiet
+  seconds, as if the key were pressed at that moment, and records offscreen
+  draws regardless of `census_offscreen`. The FSS body target is drawn every
+  frame while zoomed and not at all otherwise, so this fires exactly once
+  per zoom-in — on the first build frame, which no keypress can catch. At
+  most 8 firings a session; re-saving the ini resets the allowance.
+
+Also fixed on the way: `tools/diff_draw_census.py` could not parse a single
+census from the current DLL — the emitter grew `off=`/`copies=`/`offscreen=`
+fields on 2026-08-24 and the tool's anchored regexes still demanded the old
+text, so a field log yielded "0 complete censuses" while the tool's self-test
+stayed green on its own synthesized old-format lines. The regexes now
+tolerate additive fields and the self-test carries one census in each
+vintage.
+
+### The field procedure
+
+One session, one ringed body:
+
+```ini
+[advanced]
+census_auto = 2170x2142
+census_frames = 30
+census_lines = 16384
+```
+
+(2170x2142 is the body target on the measured headset — eye size / 2. On the
+other headset, take any FSS census with `census_offscreen = 1` first and read
+the body target's size from the interned table, or just compute eye/2 from
+the log's published eye size.)
+
+Then: open the FSS, zoom onto a ringed body, hold still until the ring is
+solid. The log should show "census auto: a draw landed in a 2170x2142 target
+…" followed by a 30-frame census. Do it twice (leave the FSS, wait a few
+seconds, zoom again) for a second capture free. Send the gfx log.
+
+### Round two: the capture came back, and the texture channel is CLOSED
+
+Flown 2026-08-25 (log `edvr_gfx_20260825_103005`). The auto-arm fired on
+both zooms — thirty build frames each, q-clocked, with copies, uploads,
+resolves and dispatches all visible. The measurements:
+
+- **The body target IS the composite's source.** `res=` identity: the RTV
+  the six body draws render into and the SRV both composites sample carry
+  one resource pointer. There was never a copy or resolve to find between
+  "@79" and "@38" — they were two views of one texture, which the old
+  census had no way to say.
+- **The body renders complete before either eye reads it.** Per frame, on
+  the q clock: six body draws (q=106–111 in the recorded frame), then eye
+  A's composite (q=112), then eye B's (q=137). The first capture's "issued
+  after both eye blocks" was the same position read without the cycle —
+  end of frame N is start of frame N+1.
+- **Zero writes to any composite input between the two reads.** The watch
+  covered all four sampled resources (the 6x1 strip, the 135x133 and
+  542x535 downsample pyramid, the 2170x2142 body) across 60 frames, both
+  zooms: nothing. The pyramid rebuild, the strip copies, and both
+  per-eye exposure dispatches (`F1FB2EEFB662F3AA`, q=146/157) all land
+  after composite B; next frame's composites read them settled.
+- **The "tiling in" is not geometry and not body-target writes.** The six
+  draws carry identical index counts (36864, 5334×2, 15360, 5334×2) from
+  the first captured frame to the last, both zooms. What distinguishes the
+  first zoom is a burst of 2,986 copies — texture streaming into the
+  families the body render samples. The visible build is the body's INPUT
+  textures arriving (plus any shader-side reveal), re-rendered fresh each
+  frame — identically for both eyes.
+- **EDVR's withholds are pair-symmetric in practice, not just by design.**
+  The vr log shows every withheld frame replaced for eye 0 and eye 1
+  together, same millisecond, consecutive counters. And notably: the flash
+  detector trips ON the FSS zoom itself — the body-render camera sits
+  ~9,880 units out and reads as a teleport until "parked" certification
+  catches it, costing a few reprojected frames per zoom-in. A judder lead
+  worth its own arc, but it cannot split the eyes.
+
+**What is left is the one input the census never recorded: constant-buffer
+CONTENTS.** Both composites bind the *same* 208-byte object at VS b0
+(`c=@70` — the engine's camera block, bound by body draws and UI draws
+alike), which is therefore rewritten between the two eye passes through
+Map/Unmap the census cannot see; pixel-stage buffers were not recorded at
+all. A scan-reveal progress value that advances per *write* rather than per
+*frame* would compose eye B a more-revealed body every frame of the build —
+the reported split exactly, through a channel every capture so far was
+blind to. This is also the mechanism class this game keeps exhibiting: the
+exposure pass runs "once per eye, first eye then second", RemLok draws into
+per-eye passes from shared state, and the particle ring showed one buffer
+serving many draws through a moving offset.
+
+### The third instrument: the CB watch
+
+`advanced.census_cb_watch = <vh hash>` (2026-08-25). While a census runs,
+every recorded draw running that vertex shader dumps `DCW` lines: the
+current contents of its VS b0 and PS b0 — refreshed CPU-side from the
+Map/Unmap and UpdateSubresource tees, so a dump is exactly the bytes the
+GPU reads for that draw — with the draw's q.
+
+### Round three: the constants are clean too, and the game side is CLOSED
+
+Flown 2026-08-25 (log `edvr_gfx_20260825_125743`), 59 frame-pairs of DCW
+dumps across two zooms. The composite binds **no pixel-stage b0 at all**;
+its 208-byte VS block was rewritten between the two eye passes every frame,
+and the diff of eye A's bytes against eye B's says the rewrite is exactly
+what it should be:
+
+- f[16..19] — one matrix row plus translation, the ±35-unit eye offset —
+  differs every frame: the per-eye placement transform.
+- f[39], f[43], f[47] — the same offset expressed in two more spaces.
+- A handful of frames differ at 1e-7 in shared fields: float jitter from
+  recomputing the same pose, not content.
+- **Nothing else, ever.** No reveal field, no progress scalar, nothing
+  steps across the build, and the eye order never swaps (first composite
+  is the +35 eye in 59 of 59 frames).
+
+With round two this closes the game side end to end: both eyes composite
+the same completed body texture through correct per-eye transforms, every
+frame, all the way through the build. **The split the headset shows is not
+in what the game renders. What no CPU-side capture can see is WHEN the
+compositor samples each eye's texture** — Elite reuses one texture per eye
+with no fence, the second eye's GPU work is issued last, and under build
+load (the streaming burst is exactly that) the compositor can catch eye A
+finished and eye B still drawing: one eye persistently a frame ahead,
+monocularly real, needing the build and a headset. Every part of the
+report, one channel left.
+
+### The candidate fix: snapshot submission
+
+`experimental.submit_snapshot = 1` (2026-08-25, openvr side, live-
+reloadable). Every forwarded frame is delivered to the compositor as a
+per-eye COPY taken at Submit — the same copies the transition-flash
+resubmit already makes every frame, now handed over instead of the live
+textures. The two copies are enqueued back to back behind the frame's
+rendering, so whatever the compositor's timing, both eyes' delivered
+content is latched at the same point: split staleness becomes symmetric
+staleness, the pair latch's CONSISTENT-LATE-BEATS-SPLIT rule applied to
+pixels. Any refusal (shape change, fault, budget) falls through to the
+live texture for that eye-submit, exactly as stock.
+
+**Flown 2026-08-25 (log `edvr_gfx_20260825_133008`): NULL.** A full A/B/A —
+ON at startup, OFF at 13:32:30, ON again at 13:33:25, receipts in the vr
+log, no shadow faults, and the same copies visibly correct through fifteen
+withholds — and the split did not move. The delivery channel is closed with
+the other two.
+
+### Where every measurement converges: the resample
+
+What survives all three rounds AND the snapshot null is not a channel that
+delivers different content — it is the one legitimate per-eye operation in
+the whole pipeline: **each eye resamples the same half-resolution mono
+image through its own placement transform** (the ±35 row the DCW dumps
+measured). A ring seen near edge-on is a feature a fraction of a pixel
+thick in a 2170-wide image; two sample grids that differ by a per-eye
+homography catch and miss its pixels DIFFERENTLY — segments present in one
+eye and absent in the other. Monocularly real. Worst exactly while the
+ring is faint and partial (the streaming build), converging as it
+saturates — "one eye still filling while the other is already solid".
+Needs the ring (thin), needs the build (low contrast), needs the headset
+(two resamples), immune to latching (content identical by construction).
+It is also Finding 2 wearing the report's clothes: the pixelated sprite
+and the ring split are one under-resolution with two symptoms.
+
+## The fix: `fix.fss_res` — the body layer at full eye resolution
+
+Built 2026-08-25, off by default. Three identity-tracked moves:
+
+1. **CreateTexture2D**: a single-mip, non-MSAA render-target or depth
+   texture asked for at exactly eye/2 per axis is created at double the
+   requested size. The auto-census's own trigger measured that NOTHING
+   else ever draws at that size — it waited 15,654 frames of menus,
+   flight and supercruise for the first such draw.
+2. **RSSetViewports**: a viewport of exactly the requested half size, set
+   while an inflated texture is bound, is scaled ×2 — plus a draw-time
+   backstop for a viewport set before the bind. Receipts logged, counted.
+3. **The eye test**: the inflated textures are now exactly eye-sized and
+   are excluded by identity — the panel-size collision, solved the same
+   way.
+
+The composite needs nothing: it samples through normalized UVs and simply
+receives a sharper image. Round two's writer inventory (draws only, no
+copies, no compute, no resolves into the body target) is what makes the
+whole fix this small. Cost: 4× the pixels for one offscreen layer, only
+while zoomed. Live — a flip applies at the next zoom, because the textures
+are created per zoom.
+
+The A/B doubles as the ring-split test: at full resolution the ring has
+four times the pixels, and the per-eye grids agree about a feature two
+pixels wide where they disagreed about one. Sharper body either way; if
+the split dies with it, the aliasing story is confirmed. If the split
+survives full resolution, what remains is the observation procedure — a
+sequential monocular check during an evolving build sees different build
+moments in each eye by construction, so the decisive re-test is one
+deliberate check with the eye order reversed.
+
+## The layers, as measured
+
+| target | contents | confirmed by |
+|---|---|---|
+| `2170x2142` | **the zoomed body and its rings** | skip removes body, leaves chrome |
+| `3408x1917` | scanner framing UI / chrome | skip removes framing UI |
+| `4089x3578` | body icon atlas, zoom UI circles | skip removes pre-zoom icons; `vs:E508648660A352B2` removes zoom circles |
+| `4340x4284` | the eye textures | published by `openvr_api.dll` |
+
+Shader families that appear **only** inside the scanner (from a diff of a
+census taken outside the FSS against one taken inside):
+
+```
+26FC402B1274EE7B  X n=36864  -> 2170x2142    9FFA5D5E79F04873  X n=15360  -> 2170x2142
+B12F7A618E1BDE98  X n=5334   -> 2170x2142    203DF51758AADC4D  X n=5334   -> 2170x2142
+E508648660A352B2  X n=6  x24 -> eye          889A5279E68F0672  X n=13248  -> eye
+953C8123AD8DC13B  N n=6       -> eye         B018D143700AB803  X n=6      -> eye
+DC937A645B8DB067  N n=6       -> eye
+```
+
+## Method notes — five theories died here, and how
+
+Recorded because each died to a *measurement*, and the same traps are latent in
+any future hunt on this codebase.
+
+**1. "The eyes sweep the ring in opposite directions."** Died to the cheapest
+test available and one that should have been first: closing one eye at a time.
+The report changed from "opposite directions" to "one solid, one filling",
+which are different bugs. *Ask for the single-eye observation before theorising.*
+
+**2. "The eyes catch a shared texture at different points mid-frame."** Died to
+a census: the two eye blocks are identical draw for draw, and the body's draws
+are issued after both of them. **Half-revived 2026-08-25**: the census that
+killed it was of the settled state, and could not see copies-in-order,
+uploads, resolves, or compute at all. The revival is narrower than the
+original — not "the eyes read mid-write", but "a write lands between the two
+composite reads during the build" — and it is now instrumented to live or die
+on a q=-ordered capture rather than an argument.
+
+**3. "The eyes sample per-eye textures that fill at different rates."** A fix was
+built, and its counters were perfect — 10,988 matched draws in each eye, 10,988
+snapshots, 10,988 substitutions. It changed nothing. A positive control that
+substituted flat **magenta** over those 11,000 draws produced no visible magenta
+anywhere, proving the matched draws were invisible. *A counter that climbs is
+not evidence that the right object was found. Build the positive control first.*
+
+**4. "A per-eye resolve map is copied out of sync."** `CopyResource` and
+`CopySubresourceRegion` were hooked for the census, and the first capture found
+two distinct `272x268` R8_UINT textures packed side by side into one `544x268`
+buffer and into slices 0/1 of an array — a stereo pair by construction. A fix
+substituted the second half's source; 30,575 substitutions, no change. Two
+things killed it, both findable beforehand:
+- `ceil(4340/16) x ceil(4284/16) = 272 x 268` **exactly**. It is a 16x16 tile
+  classification map of the *eye* texture — a screen-space engine fixture, not
+  scanner state. Its aspect "matches" the eye because it is *derived* from it.
+- The substitution counter climbed to 3,419 **while the game was still in a
+  menu**, seventeen seconds before it drew a scene at all.
+
+**5. "The difference is misfusion, not pixels."** Died in the field to the
+monocular report above, after shipping in the first version of this document
+as a conclusion. It was the only theory of the five that was never given a
+falsifiable test before being written down. *An explanation that makes the
+observer the mechanism needs the same standard of evidence as one that makes
+the renderer the mechanism.*
+
+**The instrument was the bottleneck throughout.** The census recorded only
+draws into eye-sized targets, which is why the body — rendered offscreen at
+half resolution — was invisible to it for most of a day. Three separate
+`census_skip` probes came back "nothing changed" and were read as "wrong
+family" when they meant "wrong render path". The decisive test, when it finally
+ran, was trivial: `census_skip_range = 1-9999` suppressed **every** eye draw for
+six seconds (122,040 draws) and neither the mirror nor the headset changed at
+all.
+
+**Two traps worth naming for next time:**
+- The **desktop mirror is not the eye textures.** Screenshots of it cannot
+  validate an eye-path probe; six probes were run through it before that was
+  checked, and their results were void.
+- **`foreignContext()` declines silently, and in `CopyVptr` mode it cannot see
+  other devices at all** — a second device's contexts keep the runtime's own
+  vtable and never reach EDVR's thunks. The declined-draw counter added here
+  reports what is refused, but only for contexts that dispatch through our copy.
+
+## Instruments this left behind
+
+- `advanced.census_offscreen` — the census records draws into non-eye targets
+  as `DCO` lines. Without this the scanner is invisible.
+- `CopyResource` / `CopySubresourceRegion` hooks (slots 47 / 46), census-only —
+  copies recorded as `DCC` lines with source, destination, subresource,
+  destination x/y and source box.
+- `UpdateSubresource` / `ResolveSubresource` hooks (slots 48 / 57),
+  census-only — `DCC` kinds `U` and `V` (2026-08-25).
+- `DCX` dispatch lines through the exposure fix's Dispatch hook, with compute
+  shader hash and UAV resolutions (2026-08-25).
+- The shared `q=` event ordinal and the `res=` resource identity column
+  (2026-08-25).
+- `advanced.census_skip_offscreen = WxH` — suppress draws into an offscreen
+  target by size. This is what identified every layer in the table above.
+- `advanced.census_frames`, `advanced.census_lines`,
+  `advanced.census_auto = WxH` — long censuses, and the self-arming capture
+  for builds too brief to catch by hand (2026-08-25).
+- `advanced.census_cb_watch = <vh>` — DCW dumps of a watched draw's b0
+  constant contents, VS and PS, at the draw, from the Map/Unmap tee
+  (2026-08-25).
+- The `vScreen declined` totals line, and a note when a **second D3D11 device**
+  is created and not hooked (EDVR hooks the first device only).
+
+## Round four: the black squares, and the per-eye tile stack
+
+Flown 2026-08-25 (log `edvr_gfx_20260825_140928`, five captures — four at
+stock geometry, one inflated). The field first: `fss_res` is confirmed
+sharper and confirmed INNOCENT — the black squares appear at stock
+resolution too. And the report sharpened into its final shape: the right
+eye's inner-radius-outward sweep is the reveal working as designed; the
+left eye showing BLACK 16-pixel squares within the ring AT ALL is the
+defect. (Outlined squares animating in both eyes during the
+pixelated-to-sharp resolve are symmetric and almost certainly the game's
+own scan-tile art.)
+
+What the extended captures measured:
+
+- **Every paired eye draw samples identical resources in ALL EIGHT
+  recorded slots** (the x= extension). The per-eye state does not enter
+  through sampler identities 0–7.
+- **The tile stack exists and is per-eye**: twice per frame, once per eye,
+  `9347F8FC2DCE0248` (34,34,16 groups → a 543x536 f60 map) feeds
+  `22786F6DE290C577` (272,268 groups → an **eye-sized R16_UINT surface
+  written one thread-group per 16x16 tile**) — the black squares' exact
+  granularity, refreshed before both composites. Alongside:
+  `E65498AE6C2C9F1B` writing THREE 272x268 f62 maps each frame, and two
+  shaders (`074CB657FDBD43E6`, `76BFC737F1F8CB83`) writing a 101 MB pool —
+  the moving-offset record class this game keeps using.
+- The consumer is therefore in a channel still unrecorded: PS slots 8+,
+  another shader stage's SRVs, or per-draw offsets into the pool carried
+  in constants b1+ (the DCW watch read b0 only).
+
+## Round five: the dispatch probe, and what it taught about probing
+
+`advanced.census_skip_dispatch` (2026-08-25): compute dispatches named by
+hash are not forwarded while the spec is set — the draw skips' completing
+half. `HASH:N` narrows it to the Nth occurrence per frame (one eye of a
+per-eye pair); `experimental.dispatch_pair_sync = HASH[:r]` copies the
+first occurrence's UAV0 over the second's, probe and equaliser in one.
+
+The first probe flight produced five nulls and one lesson, and the log
+voided the nulls: the session's only zoom preceded every skip window, and
+the squares exist only during a build — every skip probed a settled body
+with nothing left to change. *A probe against a transient must bracket the
+transient: set the spec, THEN trigger the build.* The flight still paid:
+four of the five candidates can be skipped for thousands of dispatches
+without visibly harming the settled scene, and `E65498AE6C2C9F1B` cannot
+be skipped at all — it runs at the top of every frame and the engine
+stalls presentation waiting on something derived from it (recovered on
+clearing the spec). It is struck from every candidate list.
+
+## Round six: cinema mode, and what the squares turned out to be
+
+The probe redo never needed to fly. Two field observations and two
+measurements closed it:
+
+1. **The black squares appear in HMD Cinema Mode** — a mono pipeline, one
+   render, both eyes shown the same panel. The squares are born in the
+   single render, not in per-eye machinery.
+2. **They replay on every re-zoom.** The four back-to-back phase-A
+   captures carry identical, flat copy traffic (544/544/540/540 — no
+   cold-streaming burst), and the squares showed on each. They are not
+   asset arrival.
+3. **The streaming moves whole mips, not tiles** — 64 of 544 copies carry
+   boxes at all. Sixteen-pixel black squares cannot be missing content
+   tiles; sixteen pixels is the granularity of the game's tile
+   classification systems and of its scan-effect art.
+4. The outlined squares animating in both eyes during the resolve are
+   unambiguously styled scan art — the same visual family.
+
+**Conclusion: the black squares are, with high confidence, part of the
+game's designed scan-resolve tile animation**, playing in the mono body
+layer and composited identically to both eyes. *(Superseded — the
+monocular re-test and rounds seven through thirteen, below.)*
+
+## Where that leaves the original report
+
+Five instrument rounds measured every objective channel between the game
+and the two eyes, and all of them came back symmetric:
+
+- the body texture: one resource, rendered before both composites, zero
+  writes between the reads (round two);
+- the composite constants: pure per-eye camera placement, no reveal
+  field, stable eye order (round three, the DCW dumps);
+- the delivery: pair-latched withholds in practice, and a snapshot-
+  submission A/B/A that changed nothing (the null that closed it);
+- the sampled inputs: identical resources in all eight recorded slots
+  (round four);
+- the squares themselves: mono-origin, designed (round six).
+
+What remains is the stimulus itself: a rapid, high-contrast, tile-
+granular animation playing on a ZERO-DISPARITY mono plane inside a stereo
+scene — the hardest case binocular fusion has. Day one's misfusion
+explanation died, correctly, for being asserted without evidence; it
+survives at the end because five rounds of evidence eliminated everything
+else and named the exact stimulus. The percept is real; the pixels are
+the same in both eyes.
+
+What EDVR ships from this arc: **`fix.fss_res`** — the body at full eye
+resolution, field-confirmed sharper, which softens the whole effect by
+giving the animation four times the pixels — plus the instrument suite
+(q=, res=, x=, DCC U/V, DCX, DCW, census_auto, census_frames/lines,
+census_skip_dispatch with :N, dispatch_pair_sync, submit_snapshot), every
+piece of which the next hunt inherits.
+
+## Rounds seven through thirteen: the split is real, the composite is innocent
+
+The monocular re-test round six asked for was done: viewed one eye at a
+time, **the left eye shows black squares filling in and the right eye a
+smooth inner-to-outer reveal, and it never swaps sides.** A percept
+cannot survive a monocular observation; the split is in the pixels, and
+the second conclusion gave the way the first one had to.
+
+Six probe rounds then eliminated the composite draw itself, every one
+with an engaged receipt in the log:
+
+- **Slot probes** (`advanced.fss_composite_probe = SLOT:COLOUR`): each of
+  the four sampled layers held flat magenta/black/white for exactly the
+  composite's draws. Every layer is visible in both eyes; none carries a
+  per-eye difference. (`black:2` blanked the whole body in BOTH eyes —
+  slot 2 is the planet's visible base; a lead that went nowhere, twice.)
+- **Constant sync** (`fix.fss_reveal_sync = steady`): the second eye's
+  composite drawn with a byte snapshot of the first eye's PS b1 scene
+  block — the dissolve's progress values forced identical. Engaged, null.
+- **Depth off** (`fss_composite_probe = depth`): the composite drawn with
+  depth test disabled — per-eye depth culling. Engaged, null.
+- **Opaque** (`fss_composite_probe = blend`): the composite drawn with
+  blending off — per-eye destination showing through dark output.
+  Engaged, null.
+- The composite's PS disassembly contains **no discard** — every covered
+  pixel writes.
+
+Identical inputs (res-proven), identical constants (forced), no depth, no
+blend, no discard: **the two composite draws are byte-equivalent. The
+squares are not painted by the composite.** They are painted after it, by
+something the draw census cannot see — and re-mining the round-four
+capture with that question found it.
+
+**The per-eye temporal reconstruction pipeline**, every frame, in q=
+order: `E65498AE6C2C9F1B` writes three 272x268 R8_UINT tile maps; copies
+assemble a 544x268 stereo map; `22786F6DE290C577` runs **once per eye**
+expanding them to two full-eye 4340x4284 R8 masks (@74/@97) — one thread
+group per 16x16 tile, the squares' exact granularity; the two composites
+draw; a full-eye HDR copy follows **each** composite (per-eye history
+snapshots); then per eye, `E861F611375E7ECC` writes a 5426x5356 f11
+**temporal accumulator** (@235/@240) and `B74273EC13F7CD59` writes the
+5426x5356 f24 output — the reconstruction that upscales 4340 to the
+submitted 5426. No recorded draw ever samples the masks or accumulators:
+the consumers are compute, which is why eleven rounds of draw-side
+instruments could not see the writer.
+
+The elimination already run maps onto that pipeline: the wholesale 2278
+skip and the 2278 pair-sync both flew and nulled — **the masks are
+exonerated**. The one per-eye state never touched is the **accumulator**:
+if the left eye's history holds black at freshly-changed tiles while the
+right's holds converged content, the reconstruction paints black squares
+in exactly one eye, filling in as accumulation converges — the field
+report, verbatim. Round thirteen is the staged-and-never-flown arm from
+the freeze-aborted batch: `dispatch_pair_sync = E861F611375E7ECC:r`
+(both eyes keep one accumulator). Squares dying in the left eye convicts
+its history; squares growing into the right under the un-reversed
+direction confirms the mapping.
+
+## Round fourteen: the first hard asymmetry — a constant buffer bound for one eye
+
+The accumulator pair-sync (`E861F611375E7ECC:r`) came back engaged-and-null
+(receipts: ARMED and first-copy lines), which with the mask nulls means the
+left eye REGENERATES its squares every frame from per-frame inputs — no
+carried state involved. And the post-composite draw sequences are fully
+paired across all 30 captured frames: the draw side is exhausted outright.
+
+So round fourteen taught the census the one binding class it never carried:
+what a dispatch READS. DCX lines gained `s=` (CS SRVs 0–7) and `cb=` (CS
+b0–b1), and one auto-census flight measured, 30/30 frames:
+
+- `E861`/`B742` (accumulate + output): symmetric end to end — per-eye
+  3-deep input rings, one shared 80-byte cb.
+- `E654` (tile maps): symmetric.
+- **`22786F6DE290C577` (the mask builder): CS b0 per-eye as expected — and
+  CS b1 BOUND for one occurrence (a 480-byte parameter block) and UNBOUND
+  for the other.** An unbound constant buffer reads as zeros: one eye's
+  per-pixel masks are built with default parameters every frame. This is
+  the first hard per-eye difference in bound state the hunt has measured,
+  it sits at exactly the pass whose output granularity is the squares, and
+  it explains why syncing the mask OUTPUTS never healed anything — the
+  divergence re-enters through the parameters each frame.
+
+## Round fifteen (armed): equalise b1, both directions
+
+`experimental.dispatch_cb1_lend = 22786F6DE290C577` — a dispatch arriving
+with b1 empty runs with the buffer the same shader last ran bound with,
+restored to empty after. If the squares survive, the flip side
+(`dispatch_cb1_strip`) runs the bound eye parameterless instead. Whichever
+direction heals names the good state; the healing arm is the fix's shape
+(gated, shipped as a fix key) if Frontier's own binding is the bug.
+
+## Rounds fourteen through thirty-one: the hunt below the game, and the ending
+
+The short version of eighteen further rounds: every layer between the ring
+draws and the headset panels was instrumented, forced identical, or
+pixel-dumped, and the black squares survived all of it -- because the
+question was wrong. The arc's ending, in the field's own words: the
+squares are the game's intended scan-resolve animation of its PRIMARY
+view, and the anomaly is that the second eye shows a smoothed variant.
+*(Superseded -- round thirty-three's arrival measurement, below,
+inverted this: the primary eye carries a genuine defect the second eye
+does not.)*
+
+What the long road measured, for whoever walks near it again:
+
+- The census gained: what dispatches read (CS SRVs/CBs), DispatchIndirect
+  and indirect draws, CopyStructureCount, foreign-context work, eight UAV
+  slots, and the hard lesson that tokens interned PER VIEW so one resource
+  could wear two ids (@36==@115 proved it; pointer-keyed joins are the
+  law now).
+- The FSS frame is fully mapped: per-eye ring G-buffer (budgeted tile
+  subsets per frame over a cleared target -- the 50/50 arrive/vanish
+  oscillation in the two-pass dumps), the ring quad's three black
+  mechanisms (flag bit 4, the cb2[46] fade, the t3 illumination-map
+  exposure), the segment mesh's vertex-driven fade, the GPU-driven tile
+  passes behind DispatchIndirect, the tonemap/LDR chain, and the
+  reconstruction pair (E861 accumulate -> B742 pack, alias-closed by
+  pointer).
+- Every mechanism was neutralized -- transcribed shaders through the new
+  ps/cs compile paths, GPU-side constant patches, an injected compute
+  hold -- with receipts, and the VISIBLE squares survived every one:
+  they are painted into BOTH submitted eye images equally (measured
+  three times: early build, mid build, strict-black, clustered), and the
+  flat screen shows them too, because the flat screen mirrors the
+  primary view.
+- The percept asymmetry (left crisp, right smooth) reproduces on a stock
+  install, across OpenComposite AND SteamVR-via-Steam-Link, on two
+  headsets. It is the engine's own presentation of its second eye, below
+  every lever a proxy DLL owns; the mono-submit probe (both eyes shown
+  one image) moved the squares into both eyes, proving the display chain
+  faithful.
+
+What ships from the arc: `fix.fss_res` (the body at full eye resolution,
+field-confirmed sharper), the transcription/compile machinery
+(shaderSwapCompilePs/Cs), the ring shader disassemblies
+(docs/shaders/fss-ring-ps.asm, docs/shaders/fss-ring-mesh-ps.asm, docs/shaders/fss-chrome-ps.asm),
+the checkpointed eye-image dump with two-pass blink analysis, the frame
+pacing log, and a census that can no longer be lied to by omission.
+`fss_ring_feed` stays stock: its arms are probe-grade history, kept for
+the next hunt.
+
+The evidence package here -- stock reproduction on two stacks, symmetric
+submitted images, the monocular field reports -- read at the time like a
+complete Frontier bug report: the second eye's FSS scan animation does
+not match the primary view's. *(Superseded -- the next chapter's
+measurement flipped which eye carries the defect, and the report that
+was eventually filed says the opposite.)*
+
+## Round thirty-three: the arrival window, measured
+
+The instrument that ended the stalemate was the smallest one: a per-frame
+tile-luminance series over both **submitted** eye textures, folded on the
+GPU into ~14 MB of atlases so it could run every scanner frame without
+hitching. It caught what every earlier capture had missed by aiming at
+the wrong moment:
+
+**For roughly ten frames at each zoom's ARRIVAL — before the body-layer
+gate opens — the primary (left) submitted image carries hard-black
+(0.000-luma) not-yet-resolved tiles the right does not: 16 versus 2 on
+the worst frame, resolving in unison when the gate opens.** Every earlier
+symmetric dump had measured the build proper, after arrival; the squares
+live in the arrival, and the arrival had never been captured.
+
+That one measurement inverted the round-thirty-one ending. The right
+eye's smooth reveal is not a smoothed variant of the primary view — it
+is the correct image, and the primary view briefly shows tiles its
+amortized renderer has not reached yet. The flat screen mirrors the
+primary view, so flat players see the same tiles; on a monitor they read
+as part of the dissolve art, which is why the defect survived flat QA
+for years.
+
+Two corrections landed with it. First, the eye images ARE genuinely
+different at arrival — the round-30b "both submitted images equal"
+reading was true of the build but not of the arrival window. Second,
+mid-campaign the OpenXR Toolkit was found enabled and disabled: the
+E861/B742 "reconstruction" pair that rounds 13-21 had hunted was almost
+certainly the Toolkit's scaler (it vanished from sessions with the
+Toolkit off), and the squares survive without it. The arrival content's
+real producer, measured Toolkit-off by a census armed on the player's
+own zoom press, is the game's own GPU-driven amortized tile renderer:
+`DispatchIndirect` compute (`5998146D464F5C0E` + `EB0245DE0BB23BB6`),
+per-eye argument buffers and tile lists, one thread group per 16x16
+tile, per-frame history copies — and **zero body-composite draws in the
+arrival frames**. The entire draw-level campaign had been structurally
+blind to the frames that matter.
+
+## Rounds thirty-four through forty-four: the roads not shipped
+
+Kept short, because each closed cleanly:
+
+- **Arrival mono** (submit the right's image to both eyes for the
+  window) worked mechanically and was rejected on comfort grounds: "the
+  eyes must not see a difference" cuts both ways — a stereo scene going
+  flat for 10 frames is itself a difference.
+- **The heal, first attempt** (fill the left's hard-black pixels from
+  the right at the optical-infinity shift) removed the squares — the
+  only intervention that ever had — but its classifier misfired on menu
+  text and dim ring content through four gate revisions, and was
+  retired to await better scoping.
+- **The theater** (rounds 40-44): the whole scanner as a world-anchored
+  virtual screen showing the flat renderer's image — built through five
+  versions (screen-in-space, whole-mode, void-only, panel-rect crop
+  with homography rectification and a dual-eye nose-shadow stitch, a
+  probe-calibrated centering servo) and **parked as a feature**
+  (`fss_theater = 0`), superseded for the bug by the heal. Its
+  panel-rect deriver survives in the shipping fix as the heal's spatial
+  scope.
+- **Cinema-mode automation**: the game's own HMD Cinema mode
+  (`StereoscopicMode 5`) was investigated as a lever. The game writes
+  its settings file on menu-apply but never re-reads it mid-session;
+  the only trigger is the game's own menu code, and injection was
+  declined on principle (a proxy shims, it does not patch). The field
+  A/B then made it moot: cinema mode still shows the VR-variant FSS —
+  the flat renderer's extras are gated on HMD-session-active, not
+  presentation mode.
+
+## Rounds forty-five through forty-eight: the pair that shipped
+
+The composite-level channel closed first. `steady` re-flown Toolkit-off
+with clean receipts: engaged, null — the constants alone are not the
+composite's split. `redraw` (re-issue the first eye's composite after
+the second's, its own transforms with the late content) bought the
+frame-order fact that retired it: the game draws the first eye's UI
+BETWEEN the two body composites, so any late repaint buries that UI —
+there is no safe moment. `lockstep` inverted the direction — the second
+eye's composite drawn reading byte-identical CopyResource'd copies of
+the first eye's four input textures and its scene block — and round
+forty-six gave it the verdict: the composite-drawn resolve is identical
+in both eyes, fused, fully native stereo. That is half the fix.
+
+The arrival half could not be fixed at the dispatch layer. The surgery
+ladder closed structural: overwriting the accumulator poisons the
+temporal feedback (artifacts, cockpit bleed as history decays);
+overwriting the resolve output arrives pre-consumed (the per-eye chains
+INTERLEAVE — the first eye's consumers read between the two
+dispatches); the previous-frame reverse still artifacts. The loop
+defends itself, so the only safe layer is the submitted image — and the
+heal came back with the scoping it had lacked:
+
+- **One test, no gates** (v6): a left pixel under 0.004 luma takes the
+  right eye's pixel at the infinity shift, dx = W(outer-inner) /
+  (outer+inner) ≈ 1053 px at 5424 wide, computed from the headset's own
+  published eye tangents. Every added cleverness (bright-region taps,
+  interior gates) had only vetoed real fills and speckled.
+- **The window is the arrival, 600 frames from the player's own zoom
+  press** — the killer timing insight: the zoom TRANSIT takes ~3
+  seconds and the squares appear at its arrival; every earlier
+  30-frame window had covered only the departure. The press is read
+  from the player's adopted Elite binds (keyboard and XInput pad), the
+  window is journal-gated on `GuiFocus 9` so a stale jump or an
+  ignored keypress can never open it in the cockpit.
+- **Only inside the screen's own rectangle**: the theater's panel-rect
+  deriver publishes the scanner screen's corners per engage; the fill
+  exists only inside that AABB. Unscoped, the heal had doubled the
+  near-field neon frame's lines — content at sub-metre depth where the
+  infinity disparity is the wrong shift.
+
+Field-verified 2026-08-27: no squares, no artifacts, stereo intact.
+
+## The ring, and the shipping state
+
+A field fact sharpened the whole story after the fix landed: **the
+black tiles only ever appear on ringed bodies — no ring, no bug.** It
+fits the mechanism exactly: the ring is the temporally amortized
+content (its offscreen buffers render as a budgeted subset of 16x16
+tiles per frame — the round-27 oscillation measurement), so only ring
+pixels ever have not-yet-reached tiles to expose. A ring-less body has
+no amortized layer and arrives whole in both eyes.
+
+The shipping state, both repo-ini defaults:
+
+- `fix.fss_eye_heal = 1` — the arrival window's fill, scoped as above.
+- `fix.fss_reveal_sync = on` — the composite-drawn resolve held
+  byte-identical (the campaign's "lockstep" mechanism).
+
+The campaign's scaffolding was removed once the fix stood alone (the
+survey probe, the press census, the pair-sync's indirect extensions,
+the redraw mode); the instruments that earn their keep stay. The
+vendor-facing report — stock repro on two stacks, the ring-only fact,
+the mechanism, three fix directions — is
+[frontier-fss-bug-report.md](frontier-fss-bug-report.md).
+
+## 2026-09-16: the Quest 3 ghost under the native path
+
+Report: on the Frontier install, Quest 3 via VirtualDesktopXR, zooming
+into a planet in the FSS shows a slight double ghost on the body with
+`fix.fss_eye_sync = on`; not seen on the Pimax. Sean suspected the
+asymmetric frustum. Two flights and one eye dump later:
+
+- Frustum: ruled out from the logs before any build. The cull guard's
+  Symmetric mode has the game render +-1.2799 horizontally
+  (`projection_query m02=0`), so the heal's 0 px infinity shift is right
+  for that image, and the panel centre projects to the same u in both
+  eyes (`fss panel rect ... uA=0.496 uB=0.496`).
+- Flight 1 (`edvr_gfx_20260916_151842.log`, build e8c5bfe, heal
+  toggled live): heal on = ghost, off = clean. The heal half owns it;
+  the lockstep half does not.
+- Build 0522215: until then the native heal read the raw source and
+  the healed eye skipped the temporal pass, so for the 600-frame window
+  after a zoom press the left eye reached the headset as the raw
+  jittered 2307x1652 input beside a 3550x2542 DLSS right
+  (`native_temporal_summary left=19125 right=22322`, the difference
+  exactly `healed=3197`). The host now runs the temporal pass first and
+  heals its output. Flight 2 on it: `left=12192 right=12192`,
+  `skipped=10`, `source=temporal`; the blur while moving is gone, the
+  ghost is not.
+- Eye dump 154720 (16 consecutive treated left crops, 2155^2, INSERT
+  during the zoom): the phase-correlated shift between consecutive
+  frames is +208 (the dump hitch), +76, +16, +20, +16, +16, +4, 0, -4,
+  -4, -4, -8, -12, -16, -16 px horizontally, and the body's lit radius
+  is constant to 0.3%: the whole panel translates (head motion; the
+  text moves with the planet), it does not grow. Per frame 30-100k
+  pixels are hard black now and lit a frame earlier. A simulated fill
+  (the previous frame as the donor at the same pixel, which is what
+  the provider did with the previous right; the panel is mono at 0 px)
+  paints a second copy of the limb into the black gap, displaced by one
+  frame's motion: the ghost. My earlier claim that a one-frame-old
+  donor is null on a zoom-in was wrong; it would be null only for a
+  pure scale-up with no translation, and the view translates.
+- Fix: the FSS provider no longer heals at the left's submit with the
+  previous frame's right. `treatEye` snapshots only; the new table
+  entry `healPair` delivers the heal once both of this frame's eyes are
+  snapshotted, and the host defers the target eye's later stages
+  (sharpen, menu, capture) to the other eye's submit when the provider
+  reports the heal pending. Same frame, same pose: the donor pixel is
+  where the target's black is. The mirror mode (`fss_eye_sync =
+  mirror`, developer value) rides the same entry and needs no
+  deferral, the right is the target and it submits second.
+- Flight 3 (17:05, the built tree of 10705da before its commit, so the
+  version string reads `0522215-dirty`; DLL linked 22:59:35 UTC):
+  "looks good". `native_fss,first_healed_eye=0,sequence=13748,
+  source=temporal,donor=pair`; `native_features_summary ...
+  fss_healed=4009/0,fss_deferred=4009`; `native_temporal_summary
+  frames=19791,left=19776,right=19776`; `native fss totals:
+  snapshots=21358, healed=4009, gated_out=18194, donor_refusals=0`.
+  Merged to main as e08e899 and pushed.
+
+## 2026-09-16: the FSS UI under DLSS
+
+Sean, after flight 3: the FSS's own UI shimmers on the initial screen
+"when moving the UI around" (panning the scanner). Eye dump 170752
+(17:07:52, before the first zoom of that session, Quest 3, DLSS
+quality, preset K, `ui_depth = on`, `ui_depth_reactive = 0.5` in his
+ini, which preset K ignores). Read offline; the scripts are in the
+session scratchpad, the numbers are the evidence:
+
+- The UI covers 2.33% of the input pixels (0.20% solid): the bottom
+  bar and its text, the signal markers, the reticle and the panel's
+  grid lines are all interface-projection composites. The UI surface
+  itself did not change in the dumped frame (`UiEdits` 0.00% at 1,
+  0.21% decaying), so the UI resolve's edits are small (0.14% of the
+  output over 8/255).
+- Raw against treated on the marker at input (1290-1390, 925-995): the
+  raw crops C00-C04 draw the marker crisp and static, 0 px/frame (one
+  (-3,-2) reading at a correlation of 0.42); `DlssBeforeUi` already
+  holds it doubled and `L0` matches it, so the doubling is DLSS's
+  reconstruction, not the UI resolve; the treated crops T00-T03 show it
+  doubled, doubled, cleaner, clean: the shimmer.
+- The vector DLSS was given at the marker's UI pixels: x -3.84 px; on
+  the bottom bar: x -5.5 px. The sky beside them at depth 0: +316/+229
+  px (history refused there, harmless on a dark sky). `motion.csv`
+  frame 16269: `cameraR` yaw 0.23 deg (5 px at this eye) while `headR`
+  is 0.01 deg; the next frames 0.01, 2.1 and 1.5 deg of camera against
+  0.21, 0.07 and 0.00 deg of head. In the FSS the camera EDVR latches
+  is the scanner's panning view, which moves the sky inside the panel
+  and nothing else; the panel's UI moves with the head only. The
+  "interface keeps the camera's path at the pixel's depth" rule
+  (temporal_shader_source.h, the note above `uiEvidence`) assumes the
+  camera is the head, true in the cockpit, false here.
+- Ruled out: the UI resolve (identical before and after), the bias
+  mask (preset K ignores it, and the mask is 0.49-0.51 over the whole
+  coverage either way), the heal and the deferral (the gate was closed:
+  no zoom press yet, `first_healed_eye` comes 4 s later).
+
+Candidate fix, not built: a head-path kind for interface-projection
+composites. ui_depth already tells the temporal pass the path per
+family through the mask value's parity (even rides the body's path, odd
+keeps the camera's); a third kind would reproject with the head delta,
+which the pass already computes for `motion.csv` (`headR/headTv`,
+`temporalHeadDelta`). The flight HUD's world-tracking strokes (the
+station brackets that "track the station's centre") keep the camera's
+path. Before the kind is applied outside the FSS, check what the
+cockpit's read camera is relative to the head there (the HUD is clear
+in flight today, so either the read camera is already cockpit-relative
+or something else carries the ship's motion); the FSS alone can gate
+the kind on the panel rect being live. Testable in the FSS first, then
+on a rolling ship with the HUD up.
+
+## 2026-09-16: the scanner's interface on the head's path
+
+Built on Sean's "build the head path", not flown. What was built is
+the FSS-gated form of the candidate above, not a new mask kind: a
+kind would need ui_depth to know which composites are the scanner's,
+and the scanner's own screen is already tracked per frame.
+
+- The gate. `readFssPanelRect` was the first thought and is the wrong
+  signal: it returns true forever after the first publish
+  (`fssPanelRectSeq != 0`, frame_flag.cpp:379), a "was ever" not an
+  "is". The per-frame word is the chrome tracker in
+  `beginPanelOverride` (vscreen.cpp ~1496): on every frame it sees the
+  scanner's screen composited by the two world-quad pipelines it bumps
+  `fssChromeStamp`, before the eye is submitted. The temporal pass
+  (`fssInterfaceLive`, temporal_pass.cpp) treats a stamp that moved
+  this frame or last as "the scanner is up" -- last, because the heal's
+  deferred eye is finished at its partner's submit and the boundary
+  can land between. The tracker ran only for the heal, the census jump
+  and the theater; `temporalPassWantsFssChrome()` now keeps it running
+  whenever the pass is on, so a rig with `fix.fss_eye_sync = off` still
+  gets the path.
+- The flag. `probe.w` bit 128 (bit 64 was taken by the eye dump's
+  header, which ORs "separated" into the same word). The `uiFlags`
+  lambda sets it for both `p.probe[3]` sites, and `wantUi`/`uiOwn`
+  bind the interface mask when it is set, so the shader can ask
+  `uiCovered` even on a frame nothing else wanted the mask.
+- The shader. Both copies of the world/ship split -- `fetchHistoryT`
+  and the mv pass -- take `&& !scannerUi` on the world branch, where
+  `scannerUi` is the flag and `uiCovered` at the pixel. An interface
+  pixel then falls through to the head's rows at its own depth
+  (`dp * z + tvUsed`), or the rotation-only head path when it reads no
+  depth. The sky beside a stroke keeps the pan, as before; the body
+  path's `!uiCovered` exclusion already skipped these pixels.
+- The receipts. A once-note in the gfx log when the flag first sets,
+  with the frame; the eye dump's header `uiFlags` carries the bit on
+  every engaged frame; `g_fssInterfaceFrames` counts left-eye frames
+  (not printed yet; add it to a summary line if a flight needs it).
+  If the pass never ran the new code there is no note and no bit.
+- Not a rig test: no rig runs the split (the shader rigs extract
+  single functions), and `fetchHistoryT` drags in every layer texture.
+  The eye dump is the test; brief in the Status block.
+- Seen in passing, not folded in: `uiCovered(q)` indexes the
+  region-sized `UM` with the full-target coordinate its callers pass
+  (`region.xy + p`), while every other `UM` read subtracts `region.xy`
+  or uses the local index. Harmless where `region.xy` is 0 (the native
+  path, a whole-texture submit), a one-region offset otherwise.
+
+## 2026-09-16: the scanner's sky at 49 draws
+
+Flight on 36a9fa1 (`edvr_gfx_20260916_181837.log`, right build), eye
+dump 182049 taken on the initial FSS screen while panning with the head
+still. Sean: "still blurs with head still".
+
+What the head path did: the once-note fired at frame 5633; the dump's
+header `uiFlags` reads 0x91 (bit 0x80 set, with the holo bit and
+ui_depth's bias bit); the interface mask holds 9,332 solid pixels (value 129,
+~220 m) and 131,022 faint ones (125, 0.7 m); the solid pixels' `MV` is
++0.07/+0.13 px (p10-p90 +0.06..+0.12) while `motion.csv` has the camera
+at 0.12-1.57 deg/frame and the head at 0.014-0.095 deg. The bar text
+("STEPPED ZOOM ?? |") in the 16 treated crops has 0.93-1.00 of the
+raw-upsampled crop's edge gradient and the same peak luma: not doubled,
+not blurred. The head path is right and is not what Sean sees.
+
+What blurs: the sky. The no-UI pixels' `MV` p50 is +0.09 px under the
+same pan (a 0.21 deg/frame pan is ~5 px at this width, 1.5 deg ~40
+px), because the world path was OFF on the dumped frame and on 12 of
+the 16: `cameraTv3` (the shader's `tvCam.w`) is 1 only on frames 12488,
+12492, 12497, 12502, and those are exactly the frames `sceneDraws`
+reads 50; the rest read 49, one under the `sceneDraws >= 50` floor that
+stood in for "a real scene, not the main menu's one-or-two-draw
+backdrop". Dump 170752 (the previous flight, another system) had 64
+draws on every frame and the world path on, which is why THAT dump
+showed the pan vector at the sky and the UI doubled by it. The
+registration line at 18:20:58 covers the scanner: "the world path took
+24.1% of pixels" (one frame in five); the next one, at 18:21:18, says
+94.8%. In the crops, a 160x100 sky window with 111 star-like
+points shows the treated grid lines and the orange signal dots smeared
+to near nothing against the raw's (`ui_sky_182049.png`): DLSS given
+zero motion for content moving 5-40 px a frame. The same floor also
+turned on the menu's assumed depth for the sky (`split.w`), a wall a
+few metres off under head sway, and `temporalCameraFollowScore`'s
+"trust the bound rows in a populated scene" short-circuit, which is
+why the log has 36 s of "the world path waits for the scene camera"
+right after the scanner opened (18:19:21 to 18:20:06).
+
+The fix, built, not flown: the floor is 8 (`kTemporalSceneDrawFloor`
+in temporal_math.h, used by the world path, the follow score and the
+menu depth). The menu was measured at one or two draws; a scene at 49
+in the sparsest system seen so far and hundreds in the cockpit; the
+floor sits between with margin on both sides. A counter on the
+registration line's second half says when the floor alone stood the
+path down and with what count, so the next log tells a floor still in
+the way from a menu. temporal_test checks 49 is a scene and 2 is not.
+
+- Ruled out: the interface's own path as this flight's blur (the
+  numbers above); the UI resolve (identical to `DlssBeforeUi` at the
+  bar, as before).
+- Not measured: whether the scanner's draw count varies with the
+  system's body count (64 in 170752's system, 49 here). If a system
+  ever draws under 8, the floor is in the way again and the counter
+  says so.
+
+## 2026-09-16: the spectral graph is not interface
+
+Flight on cc10e79 (`edvr_gfx_20260916_183753.log`, right build), eye
+dump 184002, the initial FSS screen, panning with the head still. Sean:
+"still blurred".
+
+The floor did its job: `sceneDraws` 35-36 this time (a third system),
+`cameraTv3` 1 on all 16 frames, the sky's `MV` p50 -7.09 px under a
+0.29 deg/frame pan (the camera at 0.25-2.10 deg/frame, the head at
+0.014-0.056), the bar's solid pixels at -0.10 px and its text at
+0.94-0.99 of the raw's edge gradient in the treated crops. And the
+"scene camera accepted" note came 13 s after the scanner opened instead
+of 36.
+
+What still blurs, from the star-dense window the sky script picked
+(input x 1215-1375, y 1329-1429): the "FILTERED SPECTRAL ANALYSIS"
+label and the graph's strokes, crisp in the raw and a three-to-four
+copy smear in every treated crop (`ui_sky_184002.png`). At the text
+(x 1180-1400, y 1318-1350, 181 bright pixels): the interface mask is
+zero on 94% of them (the 6% at 129 are the bar's edge), `Z`, `SceneZ`,
+`HoloCoverage` and `PrevZ` all zero (the far plane), `UiEdits` zero,
+`MV` -5.04 px on every one -- the world path's far-plane pan -- while
+the raw crops move the window's content by 0 to 1 px (jitter). So the
+label is static on the panel, unmarked, depthless, and reprojected as
+sky. Before the floor fix it happened to be still on four frames in
+five; before the head path it was doubled with the bar. It was the
+visible part of the original complaint all along.
+
+Why unmarked. docs/fss-panel.md has the anatomy: the chrome is two
+persistent 3408x1917 surfaces updated damage-style, a draw or two a
+frame across four families (`1012E00B3CB44469`, `666EF0C4C616F67E`,
+`A3E5D3FCBC1165F8` = the GUI icons family, `019E81F4EECFB371`), and
+composited by the general world-quad pipeline (vs A888D51024D9798E, the
+menu panel's) sampling them at PS slot 1; B018D143700AB803 is the
+position-only depth prepass of the same quad, and is on ui_depth's
+built-in exclude list for its own reason. ui_depth's offscreen learner
+asks a newly bound target's vertex shader sixty-four times for a GUI
+family and then leaves it alone for 600 frames; the graph's stratum is
+drawn by the other three families and its labels once, so it is never
+learned, its composite is never a "composite of a learned surface", and
+nothing is logged because nothing was declined (the `ui depth totals`
+line's "left alone" counters read 0.0 through the scanner). The bar's
+stratum IS learned (its text changes, the GUI renderer draws into it),
+which is why the bar is marked at 129 and ~220 m through the interface-
+projection remap (family line `vs A888... ps 015EF9349EC097E8:
+interface projection; alpha-aware depth`, 18:39:52).
+
+The fix, built, not flown: the chrome tracker in `beginPanelOverride`
+already recognises the composite by content hash and the slot-1
+surface's size, before `uiDepthOnEyeDraw` sees the same draw; it now
+hands the surface to `uiDepthLearnScannerChrome` (ui_depth.cpp), which
+adds it to the learned set and overwrites the view memo (which would
+otherwise answer "not a surface" for a hundred frames). From that draw
+on the composite is classified like the bar's: the A888 family's
+transcription reads t1, so a pixel shader this build has no name for
+stands in by slot. The label and the strokes then carry the mask, my
+scanner exemption gives them the head's path, and the remap's ~220 m
+is harmless under a still or turning head.
+
+- Ruled out: the world path's own vectors (right at the sky and the
+  bar), the head path (right at the bar), the UI resolve (`UiEdits` 0
+  at the text -- it never touches an unmarked pixel).
+- Known, not fixed: the ~220 m remap under head SWAY (above, Next
+  flight).
+
+## 2026-09-16: the graph is under the alpha floor
+
+Flight on 90553bc (`edvr_gfx_20260916_185845.log`, right build), eye
+dump 190129, the initial FSS screen, panning with the head still.
+Sean: "still blurred".
+
+Everything the previous builds fixed held (`uiFlags` 0x91 on every
+frame, `w 1` at 41 draws, the bar's solid pixels at +0.09 px, the sky
+at +2.9 px under the pan), and the learn note never came. What the
+dump says about the graph, at the same window as before (input x
+1180-1400, y 1318-1350, which this time holds the graph's bars, its
+frame lines and a bright cursor line rather than the label):
+`ui_stroke_probe.py` finds 845 blue stroke pixels of which 833 are
+unmasked and carry the pan (+2.06 px); the 66 masked pixels in the
+window are the cursor line, at +0.05 px and ~225 m. And the mask is
+a THRESHOLD, not a per-element verdict: `ui_thresh.py` on 190129
+gives luma 20-60 masked 0.0% (2499 px), 60-80 44%, 80+ 100%; on
+184002 (the label's window) 20-60 0.0% (1334 px), 60-80 0.6%, 80-100
+83%, 100+ 100%. The masked pixels of the label were its brightest
+glyph cores. A composite that was never classified would mask nothing
+at all; a composite reissued through `kPanelDepthHlsl` masks exactly
+the pixels whose surface alpha clears `advanced.ui_depth_alpha` (0.5),
+and over a black sky the composite's brightness IS that alpha times
+the stroke's colour. So both strata were learned and reissued all
+along, and the graph -- its bars, its frame, its label -- is drawn
+dim, under the floor that exists so the loader's 40% scrim over the
+ship model writes no depth. The bar's strokes and labels are bright
+and clear it; the cursor line clears it; nothing else in the graph
+does.
+
+Why the learn was silent, in hindsight: the only silent early return
+in `uiDepthLearnScannerChrome` was "already learned"; the other three
+(no view in the shadow, not a texture, wrong size) are ruled out by
+the census lines of the same frame (`s=@652,@653` and `s=@652,@663`
+on both A888 composites, read off the same shadow slot). The
+19:01:17 family line for the tinted composite is the FSS opening
+(the orbital-line note is 19:01:04), not a late learn.
+
+The next build is instruments, not a fix, since the floor's role is
+inferred through the composite and the fix wants a number: the learn
+says its outcome once, four distinguishable lines; and an eye run
+staged while the tracker holds the chrome writes both surfaces whole
+as `eye_<stamp>_Chrome0.bin` / `Chrome1.bin` (EDVRTEX1, RGBA8,
+3408x1917 expected; `tools/eye_inputs.py` reads them). The tracker
+now hands ui_depth the view and the resource it already resolved,
+held for the frame (a reference each, released at the frame
+boundary), and the copies are taken at the pass. The Frontier ini
+carries `ui_depth_alpha = 0.004` for this one flight -- the knob is
+live and the same in effect, on the scanner, as the fix candidate (a
+scanner-scoped floor of one alpha step, the precedent being the screen
+composites' `min(floor, 1/255)` for the comms panel's inactive
+icons); what it also does is put depth under the graph's translucent
+box, so the stars seen through it ride the head's path and ghost
+under the pan, and the loader's scrim moves the ship model with the
+dialog. Both are the flight's to judge, with the chrome's alpha
+histogram in hand for a floor between the box and the strokes if one
+exists.
+
+- Ruled out: the graph's chrome stratum unlearned (b43e3ce's premise),
+  because the learn had nothing to add and the mask follows a
+  brightness threshold inside one composite.
+- Ruled out: the composite declined after classification, because
+  every classified draw wrote (`22.8 wrote = 17.7 composites + 5.1
+  direct`, "left alone" 0.0 through the scanner).
+- Noticed, not fixed: the "scanner is up" stamp fires on the loading
+  screen (18:59:53 this log, 13-16 fps, the loader's panel is the same
+  world-quad family with a big slot-1 surface); the head's path is
+  right there too, so it is harmless, but the note's wording dates the
+  loader, not the scanner.
+
+## 2026-09-16: the chrome at one alpha step
+
+Flight on 653671d (`edvr_gfx_20260916_193918.log`, right build), eye
+dump 194158, the initial FSS screen, panning WITH the head moving
+(0.3-0.7 deg/frame of yaw in the dump), the Frontier ini at
+`ui_depth_alpha = 0.004`. Sean: "mostly fixed, it only slightly
+shimmers when both moving the panel via the controls and moving my
+head at the same time".
+
+The floor was the cause. The learn said the expected line (`the
+scanner's chrome surface (2479x1394, DXGI format 27) was already
+learned when the tracker offered it (9 surfaces known)`), the run
+wrote `Chrome0` (2479x1394 this session; the 3408x1917 of the earlier
+census was another session's size, and only one surface was held this
+run), and at the label's window (input x 1520-1830, y 1255-1290)
+`ui_stroke_probe.py` finds every bright pixel masked (493/493 at 129)
+with the head path's vector, the graph's strokes, frame lines, ticks
+and cursor likewise, and the box's dark background NOT masked -- the
+feared trade-off (stars through a translucent box riding the head's
+path) does not arise, because there is no translucent box. The chrome
+itself says why, in one histogram (`ui_chrome.py`): 97.7% of the
+surface is alpha 0; the dim strokes (luma 20-40) sit at alpha 51-77 of
+255, the mid tones (40-80) at 78-221, the labels (140+) at 166-254;
+colour never exceeds alpha (premultiplied); no pixel is translucent
+fill. Under the 0.5 floor the dim strokes and the graph's label were
+clipped and took the sky's path; at one step everything drawn is a
+stroke and writes.
+
+The fix, built on this branch and NOT flown: a fifth floor buffer
+(`kChromeFloorSlot`) at `min(advanced.ui_depth_alpha, 1/255)` and the
+interface proper's floating parity, selected for a composite whose
+surface resolves to one the scanner tracker holds this frame
+(`samplesScannerChrome`: identity through the view's resource against
+`g_chromeHeld`, released at the frame boundary; both eyes and both
+strata; zero cost on a frame the tracker matched nothing). The general
+floor stays 0.5 for the loader's scrim, and the Frontier ini is back
+at `#ui_depth_alpha = 0.5` (the "put back" owed since 19:32). Receipts
+are in the Status block's next-flight brief.
+
+The residual, measured in the same dump with `ui_parallax.py` (the
+window's content correlated between consecutive raw crops at quarter
+pixels, this frame's jitter delta removed -- sign calibrated on the
+still-head dump 190129 to <=0.1 px -- against the shift the head rows
+predict for a world-fixed point at infinity, 1 m and 220 m):
+
+- The sky (x 900-1900, y 450-690, predicted from the camera rows)
+  matches the camera's rotation to +-0.2 px on every frame: the
+  projection, the tangents and the rotation are exact.
+- The label moves LESS than the head's rotation predicts by
+  +0.23..+0.84 px/frame (mean +0.4) at 0.3-0.7 deg/frame of yaw -- a
+  3-6% shortfall. A world-fixed panel at 1 m would move MORE than the
+  rotation (parallax adds; a flipped translation sign was argued
+  against -- `headTv` and `cameraTv` both carry +x for a right turn --
+  not proven), so this is not the 220 m remap. The reading at the
+  time: the screen itself follows the head a little (a damped follow,
+  as Elite's map screens do), which the head path (a world-fixed
+  panel) cannot know. Effect: <=1 px/frame of vector error at the
+  strokes while the head turns, seen in crop 6 as ~1-2 output px of
+  horizontal softening of the moving text; nothing with the head
+  still. WITHDRAWN the same evening: the next flight's dump (202857)
+  has the label following the head path within +-0.3 px/frame -- see
+  "2026-09-16: the one-step floor flown".
+- A root-cause fix, had the follow been real, would take the screen's
+  own per-frame motion off its composite draw (the post-VS
+  screen-motion machinery) instead of the head's delta. Not started,
+  and not owed on 202857's reading.
+
+- Ruled out: the projection or rotation scale as the residual, because
+  the sky matches the camera rows to +-0.2 px in the same frames.
+- Ruled out: the 220 m remap as the residual (in its naive form),
+  because a nearer world-fixed panel moves MORE than the rotation and
+  the label moves less.
+- Ruled out (again, by the chrome itself): the graph's stratum
+  unlearned, and the composite declined -- both composites are
+  classified and the strokes' alpha is simply under 0.5.
+- Noticed: `cameraTv` z (+0.35 mm) and `headTv` z (-0.23 mm) carry
+  opposite signs in the same frame; not chased, the residual is a
+  rotation-scale effect.
+- Noticed, not fixed: the one-step floor rides the tracker, so it
+  also reaches the loading screen's panel (see the Status brief).
+
+## 2026-09-16: the one-step floor flown
+
+Flight on 3277ba6 (`edvr_gfx_20260916_202609.log`, right build), the
+Frontier ini at its defaults (general floor 0.50 in the ON line), eye
+dump 202857 taken while turning the head (0.25-0.5 deg/frame of yaw
+after a 4 deg/frame flick at the start) and panning. Sean: "while head
+still it was crisp".
+
+Receipts, all present: at 20:27:59 the chrome was learned FROM the
+tracker this time (`is learned from the screen's composite ... down to
+one alpha step while the surface is held`; the offscreen learner had
+not reached it yet, 17 surfaces known by the second offer, which said
+`already learned ... one alpha step rather than the general floor
+(0.500)`), and both composites got the new family line -- vs A888 with
+ps 9107E72CB016CC02 and with the tinted 015EF9349EC097E8: `interface
+projection, the scanner's chrome; alpha-aware depth down to one alpha
+step into private scene copy for AA`. `Chrome0` (2479x1394) written
+with the dump.
+
+The mask, at the general floor: `ui_stroke_probe.py 202857 900 1900
+850 1160` shows every element of the chrome masked -- "FILTERED
+SPECTRAL ANALYSIS", the spectral bar, its ticks, "HIGH", the cursor
+line, the target brackets, the signal marker's ring, "NAV BEACON" and
+its icon, "SIGNAL ANALYSIS / HIGH METAL CONTENT WORLD", "FSS SCANNER"
+-- and the grid, the stars and the bar's translucent band out of it
+(the band is not in the chrome's alpha: an eye-level layer, like the
+loader's backing). The treated crops at 3x (`ui_zoomk.py 202857 6
+1760 1560 360 70`, and crop 12) show the ticks and the label as crisp
+as the raw while the head turns at ~10 px/frame; the star beside them
+is slightly softer (world path).
+
+The head-turn residual, re-measured with `ui_parallax.py` on this
+dump: the graph's label (x 1010-1185, y 965-995) against the head
+rows reads measured minus predicted of +0.16, +1.07, +0.01, -0.30,
+-0.12, -0.17, +0.01, -0.34, +0.24, +0.06, +0.20, -0.21 px (mean ~0);
+the bar's text (x 1000-1300, y 1150-1195) -0.46..+0.38 with one +2.0
+at the end of the flick's deceleration. So the 3-6% shortfall of
+194158 (+0.23..+0.84 px/frame, all one sign) is NOT reproduced: in
+202857 the panel follows the head path to the measurement's noise,
+and "the screen follows the head" is withdrawn as a mechanism -- two
+dumps disagree, and the smaller reading is the later one. Meanwhile
+the SKY here (x 900-1900, y 1250-1450, camera rows) moves +0.3..+0.57
+px/frame MORE than predicted on eleven consecutive frames at corr
+0.95-0.98, where 194158 had it exact to +-0.2. Both effects are under
+half a pixel a frame and change between dumps; a pose-timing offset
+between the rows and the render would do that. Not chased: the UI's
+strokes, the complaint, are within noise of the head path.
+
+- Confirmed: the alpha floor was the cause; at one step the whole
+  chrome writes and the graph is crisp with the head still.
+- Withdrawn: "the screen follows the head" (194158's label shortfall)
+  as an established mechanism, because 202857's label and bar text
+  follow the head path within +-0.3 px/frame.
+- Noticed, not chased: the sky against the camera rows, +0.4 px/frame
+  in 202857 under a head turn, exact in 194158.
+
+## Open
+
+- Re-verify the pair with the OpenXR Toolkit ON: the fix was proven
+  Toolkit-off; the Toolkit's scaler re-makes per-eye content downstream
+  and deserves one confirmation flight.
+- The theater is parked, not dead ("2.0 to return"): the virtual-screen
+  treatment, the homography stitch and the centering servo are whole in
+  the code behind `fss_theater = 0`.
+- The flash detector withholds a couple of frames at every fresh FSS
+  zoom (the body camera at ~9,880 units until parked-certification) — a
+  real hitch on exactly this transition, and its own arc.
+- `fix.fss_res` is still opt-in; promoting it to a shipped default is a
+  release-train decision (cost: 4x the pixels for one layer, FSS only).
+- The census still does not record `GenerateMips`,
+  `ClearUnorderedAccessView*`, or the contents of command lists
+  (`ExecuteCommandList` is seen, its interior is not). The 272x268 tile
+  maps are now known to be written by compute (`22786F6DE290C577`, visible
+  as DCX) — the 2026-08-24 mystery of "nothing writes them" is resolved by
+  the dispatch recording.
+- The CB watch reads b0 only. A reveal value living in a later CB slot
+  would need the watch widened — one more slot pair, same tee.
