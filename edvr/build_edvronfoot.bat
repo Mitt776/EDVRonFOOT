@@ -37,5 +37,10 @@ if not exist "%EDVRONFOOT_TMP%" mkdir "%EDVRONFOOT_TMP%"
 set "TEMP=%EDVRONFOOT_TMP%"
 set "TMP=%EDVRONFOOT_TMP%"
 
+REM Тяжёлые GPU-стенды (native_motion_rigs) здесь идут 100-200 с при лимите
+REM 180 с и иногда не укладываются. Штатный множитель лимитов EDVR для
+REM медленной или загруженной машины; на сами проверки не влияет.
+if not defined EDVR_RIG_TIMEOUT_SCALE set "EDVR_RIG_TIMEOUT_SCALE=2"
+
 call "%~dp0build.bat" %*
 exit /b %errorlevel%
