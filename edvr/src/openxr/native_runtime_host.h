@@ -2808,6 +2808,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
          !GetProcAddress(graphicsProxy,"edvrQueryNativeRenderSettings")||
          !GetProcAddress(graphicsProxy,"edvrPublishNativeRenderSizing"))
         return result("graphics_proxy_capability",XR_ERROR_FUNCTION_UNSUPPORTED);
+      // EDVRonFOOT, experimental.native_vr_swap_eyes: optional, a graphics DLL without it swaps nothing.
+      const auto swapEyes=reinterpret_cast<EyeSwapQuery>(GetProcAddress(graphicsProxy,"edvrNativeVrSwapEyes"));
+      setEyeSwapQuery(swapEyes);
+      nativeTracePrintf("native_vr_swap_eyes,export=%d\n",swapEyes?1:0);
     }
     HRESULT hr=E_FAIL;
     if(separateGraphics()) {

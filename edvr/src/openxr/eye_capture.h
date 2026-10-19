@@ -11,6 +11,11 @@ namespace edvr::openxr { class ImmediateExecutor; class SharedTextureTransfer; s
 
 namespace edvr::openxr {
 
+// EDVRonFOOT, experimental.native_vr_swap_eyes: the graphics DLL's edvrNativeVrSwapEyes (nonzero: swap the eye frames now). The host
+// sets it once it has the graphics DLL; null (the default, and a graphics DLL without the export) swaps nothing.
+using EyeSwapQuery = int (*)();
+void setEyeSwapQuery(EyeSwapQuery query);
+
 class EyeCapture final {
  public:
   EyeCapture();
@@ -64,6 +69,10 @@ class EyeCapture final {
   uint64_t shaderViewsCreated() const { return shaderViewsCreated_; }
 
  private:
+  // The eye a submitted frame is stored as: the other one while the swap query says so. Asked at each left eye and kept for the right
+  // one, so a pair is never split by an answer that changes between its two eyes.
+  vr::EVREye swapEye(vr::EVREye eye);
+  bool swapLatched_ = false;
   vr::EVRCompositorError captureShared(vr::EVREye eye, const vr::Texture_t* texture,
                                        const vr::VRTextureBounds_t* bounds,
                                        vr::EVRSubmitFlags flags, bool copyPixels,

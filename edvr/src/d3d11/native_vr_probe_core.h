@@ -37,10 +37,17 @@ constexpr uint32_t kExpectedImageSize = 104894464u;
 //      that is not cinema. The per-frame update then makes the request the current mode S+0x3694 -- the rebuild's *(P+0x28)+0x9D4,
 //      with *(P+0x28) = S+0x2CC0 -- and rebuilds the pipeline when it changed.
 //   6  the default camera's name (cam, out): makes a new game string at *out, "HMD First Person Camera" on foot in a headset stereo
-//      mode. Called when the camera is chosen again, not every frame.
+//      mode. Camera Suite's reset to the default camera only (docs: "Выбор камеры на ногах"): not called in normal play.
+//   7  the camera director's "switch to the camera by name" (vtable slot 6; this, const char* name, bool flag): when the commander's
+//      entity has an object named "HMD" and a camera "HMD " + name is registered, it switches to that one -- the headset cameras that
+//      follow the head -- otherwise to the plain name. The name is a C string, read BEFORE the original runs.
+//   8  the director's first-person default (slot 7; this): asks "humanoid?" and calls slot 6 with "First Person Camera" or
+//      "Cockpit Cam".
+//   9  the director's other switch by name (slot 8; this, const char* name, bool ...): the same "HMD " choice on another path.
 // Points 0..2 begin push rbx; sub rsp,20h; point 3 push rbp/rbx/rsi/rdi/r12; point 4 mov [rsp+8],rbx; mov [rsp+10h],rbp; point 5
-// push rbp/rbx/rsi/rdi/r14; point 6 mov [rsp+8],rbx; mov [rsp+10h],rsi -- no relative operand, which CodeHook relocates as is. The
-// project's docs\research\native-vr-on-foot.md has the reading ("Читатели и писатели режима").
+// push rbp/rbx/rsi/rdi/r14; point 6 mov [rsp+8],rbx; mov [rsp+10h],rsi; point 7 mov [rsp+18h],rbx; push rbp; push rsi; point 8
+// mov [rsp+10h],rbx; push rdi; point 9 mov [rsp+18h],r8b; push rbp; push rbx -- no relative operand, which CodeHook relocates as is.
+// The project's docs\research\native-vr-on-foot.md has the reading ("Читатели и писатели режима", "Выбор камеры на ногах").
 enum : int {
     kPointMode = 0,
     kPointCinemaOn = 1,
@@ -49,12 +56,21 @@ enum : int {
     kPointTeardown = 4,
     kPointSource = 5,
     kPointCamera = 6,
-    kPointCount = 7
+    kPointCameraByName = 7,
+    kPointCameraDefault = 8,
+    kPointCameraByName2 = 9,
+    kPointCount = 10
 };
-constexpr uintptr_t kPointRva[kPointCount] = {0x283AFB0u, 0x28A9690u, 0x28AB150u, 0x2854FA0u, 0x288BF20u, 0x281AC10u, 0x2DFC7A0u};
+constexpr uintptr_t kPointRva[kPointCount] = {0x283AFB0u, 0x28A9690u, 0x28AB150u, 0x2854FA0u, 0x288BF20u,
+                                              0x281AC10u, 0x2DFC7A0u, 0x1D79660u, 0x1D79980u, 0x1D203B0u};
 constexpr const char* kPointName[kPointCount] = {"SetIdentStereoRenderModeActivity execute", "CinemaPipelineFeature activate",
                                                  "CinemaPipelineFeature deactivate", "view pipeline rebuild", "view pipeline teardown",
-                                                 "stereo mode source", "camera choice"};
+                                                 "stereo mode source", "camera choice", "camera by name", "first-person camera default",
+                                                 "camera by name (second path)"};
+constexpr bool isCameraPoint(int point) {
+    return point == kPointCamera || point == kPointCameraByName || point == kPointCameraDefault || point == kPointCameraByName2;
+}
+constexpr int kCameraPoints = 4;
 constexpr size_t kPrologueBytes = 6;
 constexpr uint8_t kPrologue[kPrologueBytes] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20};
 constexpr size_t kBuildPrologueBytes = 7;
@@ -65,6 +81,12 @@ constexpr size_t kSourcePrologueBytes = 7;
 constexpr uint8_t kSourcePrologue[kSourcePrologueBytes] = {0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x56};
 constexpr size_t kCameraPrologueBytes = 10;
 constexpr uint8_t kCameraPrologue[kCameraPrologueBytes] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10};
+constexpr size_t kByNamePrologueBytes = 7;
+constexpr uint8_t kByNamePrologue[kByNamePrologueBytes] = {0x48, 0x89, 0x5C, 0x24, 0x18, 0x55, 0x56};
+constexpr size_t kDefaultPrologueBytes = 6;
+constexpr uint8_t kDefaultPrologue[kDefaultPrologueBytes] = {0x48, 0x89, 0x5C, 0x24, 0x10, 0x57};
+constexpr size_t kByName2PrologueBytes = 7;
+constexpr uint8_t kByName2Prologue[kByName2PrologueBytes] = {0x44, 0x88, 0x44, 0x24, 0x18, 0x55, 0x53};
 
 inline const uint8_t* prologueOf(int point, size_t* bytes) {
     if (point == kPointBuild) {
@@ -82,6 +104,18 @@ inline const uint8_t* prologueOf(int point, size_t* bytes) {
     if (point == kPointCamera) {
         *bytes = kCameraPrologueBytes;
         return kCameraPrologue;
+    }
+    if (point == kPointCameraByName) {
+        *bytes = kByNamePrologueBytes;
+        return kByNamePrologue;
+    }
+    if (point == kPointCameraDefault) {
+        *bytes = kDefaultPrologueBytes;
+        return kDefaultPrologue;
+    }
+    if (point == kPointCameraByName2) {
+        *bytes = kByName2PrologueBytes;
+        return kByName2Prologue;
     }
     *bytes = kPrologueBytes;
     return kPrologue;
@@ -161,7 +195,8 @@ struct Event {
     // Source point: kHold* (kHoldNone: the probe's line for a mode the game changed); `self` this, `other` X, `aux` S (a repeat: the
     // repeats since the hold started -- kept out of eventKey, so repeats stay one event for the limiter). Rebuild and teardown: `other`
     // the view settings *(P+0x28). Camera: `self` the camera, `name` its name, `mode` the source's mode at the time, `substituted` the
-    // hold's value when one is running.
+    // hold's value when one is running. Camera by name (7, 9): `name` the name asked for (read before the original), `flagBefore` the
+    // flag argument's low byte, stack[0] the caller. First-person default (8): `mode`/`substituted` as the camera's, stack[0] the caller.
     uint8_t kind = kHoldNone;
     uint64_t aux = 0;
     char name[kNameBytes] = {};
@@ -258,10 +293,10 @@ inline uint64_t nameHash(const Event& e) {
 class ChangeFilter {
 public:
     bool admit(const Event& e) {
-        const uint64_t key = (static_cast<uint64_t>(e.point) << 56) ^ (e.point == kPointCamera ? 0 : e.self);
+        const uint64_t key = (static_cast<uint64_t>(e.point) << 56) ^ (isCameraPoint(e.point) ? 0 : e.self);
         const uint64_t sig = (static_cast<uint64_t>(static_cast<uint32_t>(e.mode)) << 32) ^
                              (static_cast<uint64_t>(static_cast<uint32_t>(e.substituted)) << 16) ^ (static_cast<uint64_t>(e.built) << 8) ^
-                             e.cinema ^ (static_cast<uint64_t>(e.readOk) << 60) ^ nameHash(e);
+                             e.cinema ^ (static_cast<uint64_t>(e.readOk) << 60) ^ nameHash(e) ^ (static_cast<uint64_t>(e.flagBefore) << 40);
         auto it = m_last.find(key);
         if (it != m_last.end() && it->second == sig) return false;
         if (m_last.size() > 1024) m_last.clear();  // a bound, not a policy
@@ -344,11 +379,156 @@ private:
     uint64_t m_suppressed = 0, m_overBudget = 0, m_doneSuppressed = 0, m_doneOverBudget = 0, m_dropReported = 0;
 };
 
-// The line after the first install: how many of the points are hooked, and whether the camera's is one of them.
-inline int formatInstalled(int armed, bool cameraArmed, char* out, size_t cap) {
+// The line after the first install: how many of the points are hooked, and how many of the camera's (kCameraPoints).
+inline int formatInstalled(int armed, int cameraArmed, char* out, size_t cap) {
+    char camera[160] = "";
+    if (cameraArmed <= 0)
+        std::snprintf(camera, sizeof(camera), "; camera: skipped (no camera point is hooked, see above): no camera lines this session");
+    else if (cameraArmed < kCameraPoints)
+        std::snprintf(camera, sizeof(camera), "; camera: %d of %d camera points hooked, the lines above say which are skipped", cameraArmed,
+                      kCameraPoints);
     return std::snprintf(out, cap, "native-vr-probe: installed on %d of %d points (build 332841)%s%s", armed, kPointCount,
-                         armed == kPointCount ? "" : "; the lines above say why the rest were not",
-                         cameraArmed ? "" : "; camera: skipped (its point is not hooked, see above): no camera lines this session");
+                         armed == kPointCount ? "" : "; the lines above say why the rest were not", camera);
+}
+
+// ---- the writer watch (native_vr_probe.cpp, experimental.native_vr_probe) ---------------------------------------------------------
+// On foot the game writes cinema into the stereo mode source X+0x20 about 40 times a second, and statics could not find who. At a
+// hold's start the frame thread puts a hardware write watch on that address -- debug register slot 1 (slot 0 is the flat camera
+// producer probe's), write, 4 bytes -- on every thread of the process. Its exception handler records each distinct instruction that
+// wrote there once (the address just after the write, as the CPU reports a data breakpoint, and the callers), and counts the rest.
+// The watch reads nothing it does not own and changes no value: a data breakpoint fires AFTER the write is done.
+constexpr unsigned kWatchSlot = 1;
+constexpr uint64_t kWatchMs = 30000;  // the longest a watch stays on
+constexpr int kWriterSites = 8;
+
+// Lock-free: the handler runs on whichever thread wrote. A new site claims a free row with a compare-and-swap, captures the callers
+// and only then sets `ready`, which the frame thread waits for before it writes the line. A full table counts the overflow.
+struct WriterSite {
+    std::atomic<uint64_t> rip{0};
+    std::atomic<uint64_t> hits{0};
+    std::atomic<uint8_t> ready{0};
+    uint8_t frames = 0;
+    uint32_t thread = 0;
+    uint64_t stack[kStackFrames] = {};
+};
+class WriterTable {
+public:
+    // The row of `rip` (a new one: *fresh = true, and the caller must publish it), or -1 when the table is full.
+    int record(uint64_t rip, bool* fresh) noexcept {
+        *fresh = false;
+        for (int i = 0; i < kWriterSites; ++i) {
+            uint64_t seen = m_sites[i].rip.load(std::memory_order_acquire);
+            if (seen == 0) {
+                uint64_t expected = 0;
+                if (m_sites[i].rip.compare_exchange_strong(expected, rip, std::memory_order_acq_rel)) {
+                    m_sites[i].hits.fetch_add(1, std::memory_order_relaxed);
+                    *fresh = true;
+                    return i;
+                }
+                seen = expected;
+            }
+            if (seen == rip) {
+                m_sites[i].hits.fetch_add(1, std::memory_order_relaxed);
+                return i;
+            }
+        }
+        m_overflow.fetch_add(1, std::memory_order_relaxed);
+        return -1;
+    }
+    void publish(int row, uint32_t thread, const uint64_t* stack, int frames) noexcept {
+        WriterSite& s = m_sites[row];
+        s.thread = thread;
+        s.frames = static_cast<uint8_t>(frames < 0 ? 0 : (frames > kStackFrames ? kStackFrames : frames));
+        for (int i = 0; i < s.frames; ++i) s.stack[i] = stack[i];
+        s.ready.store(1, std::memory_order_release);
+    }
+    void countOwn() noexcept { m_own.fetch_add(1, std::memory_order_relaxed); }
+    // Frame thread: rows published since the last call, each once (`said` is the frame thread's own record).
+    bool nextUnsaid(int* row) noexcept {
+        for (int i = 0; i < kWriterSites; ++i) {
+            if (m_said[i] || !m_sites[i].ready.load(std::memory_order_acquire)) continue;
+            m_said[i] = true;
+            *row = i;
+            return true;
+        }
+        return false;
+    }
+    const WriterSite& site(int row) const noexcept { return m_sites[row]; }
+    int sites() const noexcept {
+        int n = 0;
+        for (const WriterSite& s : m_sites) n += s.rip.load(std::memory_order_relaxed) ? 1 : 0;
+        return n;
+    }
+    uint64_t gameHits() const noexcept {
+        uint64_t n = 0;
+        for (const WriterSite& s : m_sites) n += s.hits.load(std::memory_order_relaxed);
+        return n + m_overflow.load(std::memory_order_relaxed);
+    }
+    uint64_t ownHits() const noexcept { return m_own.load(std::memory_order_relaxed); }
+    uint64_t overflow() const noexcept { return m_overflow.load(std::memory_order_relaxed); }
+
+private:
+    WriterSite m_sites[kWriterSites];
+    std::atomic<uint64_t> m_own{0}, m_overflow{0};
+    bool m_said[kWriterSites] = {};
+};
+
+// When the frame thread takes a watch off: the hold ended, the probe was turned off, or the watch has been on kWatchMs.
+enum : uint8_t { kWatchKeep = 0, kWatchHoldEnd = 1, kWatchProbeOff = 2, kWatchTimeout = 3 };
+inline uint8_t watchVerdict(uint64_t nowMs, uint64_t armedAtMs, bool holding, bool recording) {
+    if (!recording) return kWatchProbeOff;
+    if (!holding) return kWatchHoldEnd;
+    if (nowMs - armedAtMs >= kWatchMs) return kWatchTimeout;
+    return kWatchKeep;
+}
+inline const char* watchVerdictText(uint8_t v) {
+    switch (v) {
+        case kWatchHoldEnd: return "the hold ended";
+        case kWatchProbeOff: return "the probe was turned off";
+        case kWatchTimeout: return "30 s passed";
+        default: return "still on";
+    }
+}
+
+inline int formatWatchOn(uint64_t address, uint32_t armed, uint32_t skipped, uint32_t failed, char* out, size_t cap) {
+    return std::snprintf(out, cap,
+                         "native-vr-probe: writer watch on: stereo mode source 0x%llX (debug register %u, write, 4 bytes) on %u thread(s); "
+                         "%u skipped (that register already in use there), %u could not be set; it comes off when the hold ends, the "
+                         "probe goes off, or after %llu s",
+                         static_cast<unsigned long long>(address), kWatchSlot, armed, skipped, failed,
+                         static_cast<unsigned long long>(kWatchMs / 1000));
+}
+inline int formatWatchNotOn(const char* why, char* out, size_t cap) {
+    return std::snprintf(out, cap, "native-vr-probe: writer watch NOT on: %s; the probe and the game go on as before", why);
+}
+inline int formatWatchOff(uint8_t verdict, uint64_t ms, const WriterTable& t, char* out, size_t cap) {
+    return std::snprintf(out, cap,
+                         "native-vr-probe: writer watch off (%s) after %llu ms: %d writing site(s) of the game, %llu write(s) by the game "
+                         "(%llu past the %d-site table), %llu by EDVR's own hold",
+                         watchVerdictText(verdict), static_cast<unsigned long long>(ms), t.sites(),
+                         static_cast<unsigned long long>(t.gameHits()), static_cast<unsigned long long>(t.overflow()), kWriterSites,
+                         static_cast<unsigned long long>(t.ownHits()));
+}
+
+// "EliteDangerous64.exe+0x283AFB0" for an address inside the image, the bare address otherwise.
+inline int formatAddress(uint64_t address, uint64_t base, uint64_t imageSize, char* out, size_t cap);
+
+// One writing site, once: the address the CPU reported (just AFTER the writing instruction) and the callers.
+inline int formatWriterSite(int row, const WriterSite& s, uint64_t base, uint64_t imageSize, char* out, size_t cap) {
+    char rip[64], stack[kStackFrames * 40] = "";
+    formatAddress(s.rip.load(std::memory_order_relaxed), base, imageSize, rip, sizeof(rip));
+    size_t at = 0;
+    for (int i = 0; i < s.frames; ++i) {
+        char one[40];
+        formatAddress(s.stack[i], base, imageSize, one, sizeof(one));
+        const int n = std::snprintf(stack + at, sizeof(stack) - at, "%s%s", at ? " < " : "", one);
+        if (n < 0 || static_cast<size_t>(n) >= sizeof(stack) - at) break;
+        at += static_cast<size_t>(n);
+    }
+    return std::snprintf(out, cap,
+                         "native-vr-probe: cinema writer #%d: the game wrote the stereo mode source at %s (the instruction just before "
+                         "this address); thread %u; called from %s",
+                         row + 1, rip, s.thread, at ? stack : "(no stack)");
 }
 
 inline const char* onFootText(int onFoot) { return onFoot < 0 ? "unknown" : (onFoot ? "yes" : "no"); }
@@ -359,6 +539,22 @@ inline int formatOnFootKey(bool on, bool again, char* out, size_t cap) {
                          on ? "on: a cinema mode the game sets is replaced by headset stereo and held there"
                             : (again ? "off: no new hold starts; the next disembark after boarding is the game's cinema again" : "off"),
                          on ? 1 : 0);
+}
+
+// experimental.native_vr_swap_eyes: the left and right frames the game submits are swapped in the headset, only while the journal
+// says the commander is on foot. The OpenXR runtime asks for it once a frame pair (edvrNativeVrSwapEyes); nothing in the game changes.
+inline bool swapEyesActive(bool key, int onFoot) { return key && onFoot == 1; }
+inline int formatSwapKey(bool on, bool again, char* out, size_t cap) {
+    return std::snprintf(out, cap, "native-vr-swap-eyes: %s (experimental.native_vr_swap_eyes = %d)",
+                         on ? "on: on foot the left and right eye frames are swapped in the headset"
+                            : (again ? "off: the eye frames go to their own eyes again" : "off"),
+                         on ? 1 : 0);
+}
+inline int formatSwapActive(bool active, int onFoot, char* out, size_t cap) {
+    return std::snprintf(out, cap, "native-vr-swap-eyes: %s (on foot (journal): %s)",
+                         active ? "active on foot: the left eye sees the right frame and the right eye the left"
+                                : "inactive: each eye sees its own frame",
+                         onFootText(onFoot));
 }
 
 // "EliteDangerous64.exe+0x283AFB0" for an address inside the image, the bare address otherwise.
@@ -402,13 +598,26 @@ inline int formatEvent(const Event& e, uint64_t base, uint64_t imageSize, char* 
                                      static_cast<unsigned long long>(e.aux), settings, e.thread);
         }
     }
-    if (e.point == kPointCamera) {
+    if (isCameraPoint(e.point)) {
         char held[48] = "";
         if (e.substituted) std::snprintf(held, sizeof(held), ", held by native_vr_on_foot");
+        char site[120], caller[64] = "";
+        std::snprintf(site, sizeof(site), "site %s (+0x%llX)", kPointName[e.point], static_cast<unsigned long long>(kPointRva[e.point]));
+        if (e.point != kPointCamera && e.frames) {
+            char at[48];
+            formatAddress(e.stack[0], base, imageSize, at, sizeof(at));
+            std::snprintf(caller, sizeof(caller), "; called from %s", at);
+        }
+        if (e.point == kPointCameraDefault)
+            return std::snprintf(out, cap, "native-vr-probe: camera: first-person default asked at stereo mode %d%s; %s; thread %u%s", e.mode,
+                                 held, site, e.thread, caller);
+        char flag[24] = "";
+        if (e.point != kPointCamera) std::snprintf(flag, sizeof(flag), ", flag %u", e.flagBefore);
         if (!e.readOk)
-            return std::snprintf(out, cap, "native-vr-probe: camera: the name could not be read, at stereo mode %d%s; thread %u", e.mode,
-                                 held, e.thread);
-        return std::snprintf(out, cap, "native-vr-probe: camera \"%s\" at stereo mode %d%s; thread %u", e.name, e.mode, held, e.thread);
+            return std::snprintf(out, cap, "native-vr-probe: camera: the name could not be read, at stereo mode %d%s; %s%s; thread %u%s",
+                                 e.mode, held, site, flag, e.thread, caller);
+        return std::snprintf(out, cap, "native-vr-probe: camera \"%s\" at stereo mode %d%s; %s%s; thread %u%s", e.name, e.mode, held, site,
+                             flag, e.thread, caller);
     }
     char caller[64] = "(no stack)";
     char stack[6 * 40] = "";

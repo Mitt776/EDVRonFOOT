@@ -28,6 +28,13 @@
 //   +0x288BF20  the view pipeline's teardown
 //   +0x281AC10  the stereo mode source (the hold's one write)
 //   +0x2DFC7A0  the default camera's name (written after the original made it)
+//   +0x1D79660  the camera director's switch by name (the name asked for, written before the original)
+//   +0x1D79980  the director's first-person default
+//   +0x1D203B0  the director's other switch by name
+//
+// With the probe on, a hold start also puts a hardware write watch on the stereo mode source for a while (nativeVrWriterWatch*): who
+// in the game writes cinema there. And experimental.native_vr_swap_eyes (any build, no hook) swaps the eye frames on foot in the
+// OpenXR runtime, through the exported edvrNativeVrSwapEyes.
 #include <cstddef>
 #include <cstdint>
 
@@ -67,5 +74,23 @@ void nativeVrProbeDrain(uint64_t nowMs, int onFoot, NativeVrProbeSink sink, void
 // Events recorded since launch (proof the hooks are alive), and lost to a full ring.
 uint64_t nativeVrProbeRecorded();
 uint64_t nativeVrProbeDropped();
+
+// The writer watch (nvp::WriterTable; experimental.native_vr_probe). A hold start with the probe on asks for a hardware write watch on
+// the stereo mode source; the frame thread sets it on every thread of the process (debug register slot 1), writes each distinct game
+// instruction that writes there once, and takes it off when the hold ends, the probe goes off or after 30 s. Frame thread.
+//   Arm: one line saying on how many threads, or why not; returns the threads armed (0: not on, or already on).
+int nativeVrWriterWatchArm(uintptr_t address, uint64_t nowMs, NativeVrProbeSink sink, void* ctx);
+bool nativeVrWriterWatchOn();
+//   The writing sites recorded since the last call, each once.
+void nativeVrWriterWatchDrain(NativeVrProbeSink sink, void* ctx);
+//   Off on every thread it was set on, then the summary line (verdict: nvp::kWatch*).
+void nativeVrWriterWatchDisarm(uint8_t verdict, uint64_t nowMs, NativeVrProbeSink sink, void* ctx);
+//   Once a frame: arm on a hold start's request, drain, and take it off by nvp::watchVerdict.
+void nativeVrWriterWatchStep(uint64_t nowMs, bool recording, NativeVrProbeSink sink, void* ctx);
+
+// experimental.native_vr_swap_eyes: decides once a frame whether the eye frames are swapped (the key, and on foot by the journal: -1
+// unknown, 0, 1) and says it when the key or the answer changes. edvrNativeVrSwapEyes (exported) returns the answer. Frame thread.
+void nativeVrSwapEyesStep(bool key, int onFoot, NativeVrProbeSink sink, void* ctx);
+int nativeVrSwapEyesNow();
 
 }  // namespace edvr

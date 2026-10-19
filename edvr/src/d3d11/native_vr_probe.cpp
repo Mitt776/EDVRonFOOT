@@ -1,11 +1,13 @@
 // Native-VR-on-foot probe: the hooks, their installation and the frame thread's drain (native_vr_probe.h says what and why).
 #include "native_vr_probe.h"
 #include "native_vr_probe_core.h"
+#include "debug_register_core.h"
 #include "journal_watch.h"
 #include "../common/code_hook.h"
 #include "../common/config.h"
 #include "../common/log.h"
 #include <windows.h>
+#include <tlhelp32.h>
 #include <intrin.h>
 #include <atomic>
 #include <cstdarg>
@@ -19,6 +21,7 @@ using Fn1 = void (*)(void*);
 using Fn2 = void (*)(void*, void*);
 using FnSource = uint64_t (*)(void*, void*, void*, void*);
 using FnCamera = void* (*)(void*, void*);
+using FnCall4 = uint64_t (*)(void*, void*, void*, void*);  // the camera director's methods: every argument register forwarded as is
 
 std::atomic<uintptr_t> g_original[nvp::kPointCount];
 std::atomic<bool> g_recording{false};
@@ -37,6 +40,15 @@ std::atomic<uint64_t> g_recorded{0};
 nvp::Ring<1024> g_ring;
 std::atomic<uintptr_t> g_base{0};
 std::atomic<uintptr_t> g_imageSize{0};
+// The writer watch (nvp::WriterTable): the address a hold start asks the frame thread to watch, the address being watched (the
+// handler's match), and the range of this module, whose writes are the hold's own.
+std::atomic<uintptr_t> g_watchWanted{0};
+std::atomic<uintptr_t> g_watchAddress{0}, g_watchPrevious{0};
+std::atomic<bool> g_watchActive{false};  // between arming and the end of disarming: a hit is recorded, otherwise only taken off
+std::atomic<uintptr_t> g_ownLo{0}, g_ownHi{0};
+nvp::WriterTable g_writers;
+// experimental.native_vr_swap_eyes as the frame thread last decided it (edvrNativeVrSwapEyes).
+std::atomic<int> g_swapEyes{0};
 
 // ---- the hook side: no lock, no allocation, no log -------------------------------------------------------------------------------
 
@@ -125,6 +137,24 @@ __declspec(noinline) uint8_t sehReadName(void* const* out, char* name) noexcept 
             const char c = static_cast<char>(str[nvp::kNameChars + i]);
             name[i] = c >= 32 && c < 127 ? c : '?';
         }
+        name[n] = 0;
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        name[0] = 0;
+        return 0;
+    }
+}
+
+// The name a camera director's method was asked for, a C string: up to kNameBytes - 1 characters, anything unprintable as '?'. No
+// pointer: "(none)".
+__declspec(noinline) uint8_t sehReadCString(const char* text, char* name) noexcept {
+    __try {
+        if (!text) {
+            std::memcpy(name, "(none)", 7);
+            return 1;
+        }
+        size_t n = 0;
+        for (; n < nvp::kNameBytes - 1 && text[n]; ++n) name[n] = text[n] >= 32 && text[n] < 127 ? text[n] : '?';
         name[n] = 0;
         return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -253,7 +283,11 @@ __declspec(noinline) uint64_t sourceHook(void* self, void* a, void* b, void* c) 
                 g_holdValue.store(s.value, std::memory_order_relaxed);
                 g_holding.store(s.holding, std::memory_order_release);
                 g_sourceMode.store(step.write ? step.write : e.mode, std::memory_order_relaxed);
-                if (step.kind == nvp::kHoldStart) g_holdRepeats.store(0, std::memory_order_relaxed);
+                if (step.kind == nvp::kHoldStart) {
+                    g_holdRepeats.store(0, std::memory_order_relaxed);
+                    // The probe watches who writes cinema here next (the frame thread arms it).
+                    if (recording) g_watchWanted.store(reinterpret_cast<uintptr_t>(field), std::memory_order_release);
+                }
                 if (step.kind == nvp::kHoldAgain) e.aux = g_holdRepeats.fetch_add(1, std::memory_order_relaxed) + 1;
                 e.kind = step.kind;
                 e.substituted = step.write;
@@ -289,6 +323,43 @@ __declspec(noinline) void* cameraHook(void* self, void* out) {
     return result;
 }
 
+// The camera director's switch by name (points 7 and 9): the name it was asked for, read before the original -- which picks "HMD " +
+// name or the plain name inside -- then the original with every argument register as it came.
+template <int Point>
+__declspec(noinline) uint64_t cameraByNameHook(void* self, void* name, void* flag, void* fourth) {
+    if (g_recording.load(std::memory_order_relaxed)) {
+        nvp::Event e;
+        e.point = static_cast<uint8_t>(Point);
+        e.self = reinterpret_cast<uint64_t>(self);
+        e.readOk = sehReadCString(static_cast<const char*>(name), e.name);
+        e.flagBefore = static_cast<uint8_t>(reinterpret_cast<uintptr_t>(flag));
+        e.mode = g_sourceMode.load(std::memory_order_relaxed);
+        if (g_holding.load(std::memory_order_acquire)) e.substituted = g_holdValue.load(std::memory_order_relaxed);
+        e.thread = GetCurrentThreadId();
+        captureStack(e);
+        g_ring.push(e);
+        g_recorded.fetch_add(1, std::memory_order_relaxed);
+    }
+    return reinterpret_cast<FnCall4>(g_original[Point].load(std::memory_order_acquire))(self, name, flag, fourth);
+}
+
+// The director's first-person default (point 8): that it was asked, and at which mode; its call to point 7 says the name.
+__declspec(noinline) uint64_t cameraDefaultHook(void* self, void* a, void* b, void* c) {
+    if (g_recording.load(std::memory_order_relaxed)) {
+        nvp::Event e;
+        e.point = nvp::kPointCameraDefault;
+        e.self = reinterpret_cast<uint64_t>(self);
+        e.readOk = 1;
+        e.mode = g_sourceMode.load(std::memory_order_relaxed);
+        if (g_holding.load(std::memory_order_acquire)) e.substituted = g_holdValue.load(std::memory_order_relaxed);
+        e.thread = GetCurrentThreadId();
+        captureStack(e);
+        g_ring.push(e);
+        g_recorded.fetch_add(1, std::memory_order_relaxed);
+    }
+    return reinterpret_cast<FnCall4>(g_original[nvp::kPointCameraDefault].load(std::memory_order_acquire))(self, a, b, c);
+}
+
 const void* hookFor(int point) {
     switch (point) {
         case nvp::kPointMode: return reinterpret_cast<const void*>(&modeHook);
@@ -297,9 +368,144 @@ const void* hookFor(int point) {
         case nvp::kPointBuild: return reinterpret_cast<const void*>(&buildHook);
         case nvp::kPointSource: return reinterpret_cast<const void*>(&sourceHook);
         case nvp::kPointCamera: return reinterpret_cast<const void*>(&cameraHook);
+        case nvp::kPointCameraByName: return reinterpret_cast<const void*>(&cameraByNameHook<nvp::kPointCameraByName>);
+        case nvp::kPointCameraDefault: return reinterpret_cast<const void*>(&cameraDefaultHook);
+        case nvp::kPointCameraByName2: return reinterpret_cast<const void*>(&cameraByNameHook<nvp::kPointCameraByName2>);
         default: return reinterpret_cast<const void*>(&teardownHook);
     }
 }
+
+// ---- the writer watch: the handler side (any thread; no lock, no allocation, no log) ----------------------------------------------
+
+// The callers of the writing instruction, unwound from the CPU's own context of the write (the handler's stack is not the writer's).
+// A frame with no unwind data is a leaf: its return address is at rsp.
+__declspec(noinline) int sehUnwind(const CONTEXT* at, uint64_t* stack) noexcept {
+    int n = 0;
+    __try {
+        CONTEXT c = *at;
+        for (; n < nvp::kStackFrames; ++n) {
+            DWORD64 imageBase = 0;
+            PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(c.Rip, &imageBase, nullptr);
+            if (fn) {
+                PVOID handlerData = nullptr;
+                DWORD64 establisher = 0;
+                RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, c.Rip, fn, &c, &handlerData, &establisher, nullptr);
+            } else {
+                c.Rip = *reinterpret_cast<const DWORD64*>(c.Rsp);
+                c.Rsp += 8;
+            }
+            if (!c.Rip) break;
+            stack[n] = c.Rip;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    return n;
+}
+
+LONG CALLBACK writerWatchHandler(EXCEPTION_POINTERS* ep) {
+    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP) return EXCEPTION_CONTINUE_SEARCH;
+    // Never cleared once set, and the one before kept: a write that trapped just before its thread was disarmed may reach this handler
+    // after the frame thread moved on, and an unclaimed single-step would end the game.
+    const uintptr_t address = g_watchAddress.load(std::memory_order_acquire);
+    const uintptr_t previous = g_watchPrevious.load(std::memory_order_acquire);
+    CONTEXT* c = ep->ContextRecord;
+    const DWORD64 hitBit = DWORD64(1) << nvp::kWatchSlot;
+    // Slot 1 is this watch's alone in EDVR (the flat producer probe has slot 0, the vtable write watch uses page protection), so its
+    // hit is ours whatever Dr1 holds; a context that reports no slot at all is ours only at an address we watched. An unclaimed
+    // single-step ends the game (common\vtable_hook.cpp measured it), so the test leans toward claiming.
+    const bool slotHit = (c->Dr6 & hitBit) != 0;
+    const bool known = c->Dr1 && (c->Dr1 == address || c->Dr1 == previous);
+    if (!slotHit && !(known && !(c->Dr6 & 0xF))) return EXCEPTION_CONTINUE_SEARCH;
+    c->Dr6 &= ~hitBit;
+    if (!g_watchActive.load(std::memory_order_acquire) || c->Dr1 != address) {
+        // A straggler: a thread the frame thread could not take the watch off, or a trap that arrived after it did. Off here, in the
+        // context this thread resumes with.
+        c->Dr7 = (c->Dr7 & ~DWORD64(0xFFFFFFFFu)) | dr7::disarmSlotDr7(static_cast<uint32_t>(c->Dr7), nvp::kWatchSlot);
+        c->Dr1 = 0;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    const uintptr_t rip = static_cast<uintptr_t>(c->Rip);
+    if (rip >= g_ownLo.load(std::memory_order_relaxed) && rip < g_ownHi.load(std::memory_order_relaxed)) {
+        g_writers.countOwn();
+    } else {
+        bool fresh = false;
+        const int row = g_writers.record(rip, &fresh);
+        if (fresh) {
+            uint64_t stack[nvp::kStackFrames] = {};
+            const int frames = sehUnwind(c, stack);
+            g_writers.publish(row, GetCurrentThreadId(), stack, frames);
+        }
+    }
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+// ---- the writer watch: the frame thread side ------------------------------------------------------------------------------------
+
+enum : int { kDrFailed = 0, kDrDone = 1, kDrSkipped = 2 };
+
+// Slot kWatchSlot on one thread, by handle, from OUTSIDE that thread (a running thread's own debug registers cannot be set by
+// itself): suspend, read, change only that slot, write, resume. Arming leaves a thread whose slot someone else holds alone; disarming
+// touches only a slot that still holds our address.
+int setThreadWatch(DWORD tid, uintptr_t address, bool arm) noexcept {
+    HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, tid);
+    if (!h) return kDrFailed;
+    int result = kDrFailed;
+    if (SuspendThread(h) != static_cast<DWORD>(-1)) {
+        CONTEXT ctx{};
+        ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+        if (GetThreadContext(h, &ctx)) {
+            const uint32_t low = static_cast<uint32_t>(ctx.Dr7);
+            const DWORD64 high = ctx.Dr7 & ~DWORD64(0xFFFFFFFFu);
+            const bool ours = ctx.Dr1 == address;
+            if (arm) {
+                if (dr7::slotEnabledDr7(low, nvp::kWatchSlot) && !ours) {
+                    result = kDrSkipped;
+                } else {
+                    ctx.Dr1 = address;
+                    ctx.Dr7 = high | dr7::armSlotDr7(low, nvp::kWatchSlot, dr7::kDr7RwWrite, dr7::kDr7Len4Bytes);
+                    result = SetThreadContext(h, &ctx) ? kDrDone : kDrFailed;
+                }
+            } else if (ours) {
+                ctx.Dr1 = 0;
+                ctx.Dr7 = high | dr7::disarmSlotDr7(low, nvp::kWatchSlot);
+                result = SetThreadContext(h, &ctx) ? kDrDone : kDrFailed;
+            } else {
+                result = kDrSkipped;
+            }
+        }
+        ResumeThread(h);
+    }
+    CloseHandle(h);
+    return result;
+}
+
+// The calling thread cannot suspend itself: a helper thread sets its slot.
+struct DrJob {
+    DWORD tid;
+    uintptr_t address;
+    bool arm;
+    int result;
+};
+DWORD WINAPI drHelper(void* p) {
+    auto* job = static_cast<DrJob*>(p);
+    job->result = setThreadWatch(job->tid, job->address, job->arm);
+    return 0;
+}
+int setThreadWatchSafe(DWORD tid, uintptr_t address, bool arm) noexcept {
+    if (tid != GetCurrentThreadId()) return setThreadWatch(tid, address, arm);
+    DrJob job{tid, address, arm, kDrFailed};
+    HANDLE h = CreateThread(nullptr, 0, &drHelper, &job, 0, nullptr);
+    if (!h) return kDrFailed;
+    const bool done = WaitForSingleObject(h, 5000) == WAIT_OBJECT_0;
+    CloseHandle(h);
+    return done ? job.result : kDrFailed;
+}
+
+constexpr size_t kWatchThreads = 1024;
+DWORD g_watchTids[kWatchThreads];
+size_t g_watchTidCount = 0;
+PVOID g_watchHandler = nullptr;
+uint64_t g_watchArmedAtMs = 0;
 
 // ---- installation (frame thread) ------------------------------------------------------------------------------------------------
 
@@ -389,7 +595,136 @@ void say(NativeVrProbeSink sink, void* ctx, const char* fmt, ...) {
 
 void logSink(void*, const char* line) { Log::get().note("%s", line); }
 
+// This module's range: the hold's own write to the source (sehSwapMode) is inside it.
+void ownModuleRange(uintptr_t* lo, uintptr_t* hi) {
+    *lo = *hi = 0;
+    HMODULE self = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(&sourceHook), &self) ||
+        !self)
+        return;
+    const auto base = reinterpret_cast<uintptr_t>(self);
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    *lo = base;
+    *hi = base + nt->OptionalHeader.SizeOfImage;
+}
+
 }  // namespace
+
+int nativeVrWriterWatchArm(uintptr_t address, uint64_t nowMs, NativeVrProbeSink sink, void* ctx) {
+    char line[400];
+    if (g_watchTidCount) return 0;
+    if (!address) return 0;
+    if (!g_watchHandler) g_watchHandler = AddVectoredExceptionHandler(1, &writerWatchHandler);
+    if (!g_watchHandler) {
+        nvp::formatWatchNotOn("the exception handler could not be added", line, sizeof(line));
+        sink(ctx, line);
+        return 0;
+    }
+    uintptr_t lo = 0, hi = 0;
+    ownModuleRange(&lo, &hi);
+    g_ownLo.store(lo, std::memory_order_relaxed);
+    g_ownHi.store(hi, std::memory_order_relaxed);
+    // The handler must know the address before the first thread can trap on it.
+    const uintptr_t was = g_watchAddress.exchange(address, std::memory_order_acq_rel);
+    if (was && was != address) g_watchPrevious.store(was, std::memory_order_release);
+    g_watchActive.store(true, std::memory_order_release);
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) {
+        nvp::formatWatchNotOn("the process's threads could not be listed", line, sizeof(line));
+        sink(ctx, line);
+        return 0;
+    }
+    uint32_t armed = 0, skipped = 0, failed = 0;
+    const DWORD pid = GetCurrentProcessId();
+    THREADENTRY32 te{};
+    te.dwSize = sizeof(te);
+    for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+        if (te.th32OwnerProcessID != pid) continue;
+        if (g_watchTidCount >= kWatchThreads) {
+            ++failed;
+            continue;
+        }
+        const int r = setThreadWatchSafe(te.th32ThreadID, address, true);
+        if (r == kDrDone) {
+            g_watchTids[g_watchTidCount++] = te.th32ThreadID;
+            ++armed;
+        } else if (r == kDrSkipped) {
+            ++skipped;
+        } else {
+            ++failed;
+        }
+    }
+    CloseHandle(snap);
+    if (!armed) {
+        g_watchActive.store(false, std::memory_order_release);
+        char why[160];
+        std::snprintf(why, sizeof(why), "no thread took it (%u skipped, %u could not be set)", skipped, failed);
+        nvp::formatWatchNotOn(why, line, sizeof(line));
+        sink(ctx, line);
+        return 0;
+    }
+    g_watchArmedAtMs = nowMs;
+    nvp::formatWatchOn(address, armed, skipped, failed, line, sizeof(line));
+    sink(ctx, line);
+    return static_cast<int>(armed);
+}
+
+bool nativeVrWriterWatchOn() { return g_watchTidCount != 0; }
+
+void nativeVrWriterWatchDrain(NativeVrProbeSink sink, void* ctx) {
+    char line[700];
+    int row = 0;
+    while (g_writers.nextUnsaid(&row)) {
+        if (nvp::formatWriterSite(row, g_writers.site(row), g_base.load(std::memory_order_relaxed),
+                                  g_imageSize.load(std::memory_order_relaxed), line, sizeof(line)) > 0)
+            sink(ctx, line);
+    }
+}
+
+void nativeVrWriterWatchDisarm(uint8_t verdict, uint64_t nowMs, NativeVrProbeSink sink, void* ctx) {
+    if (!g_watchTidCount) return;
+    const uintptr_t address = g_watchAddress.load(std::memory_order_acquire);
+    for (size_t i = 0; i < g_watchTidCount; ++i) setThreadWatchSafe(g_watchTids[i], address, false);
+    g_watchTidCount = 0;
+    g_watchActive.store(false, std::memory_order_release);
+    nativeVrWriterWatchDrain(sink, ctx);
+    char line[400];
+    nvp::formatWatchOff(verdict, nowMs - g_watchArmedAtMs, g_writers, line, sizeof(line));
+    sink(ctx, line);
+}
+
+void nativeVrWriterWatchStep(uint64_t nowMs, bool recording, NativeVrProbeSink sink, void* ctx) {
+    const uintptr_t wanted = g_watchWanted.exchange(0, std::memory_order_acq_rel);
+    if (wanted && recording && !nativeVrWriterWatchOn()) nativeVrWriterWatchArm(wanted, nowMs, sink, ctx);
+    if (!nativeVrWriterWatchOn()) return;
+    nativeVrWriterWatchDrain(sink, ctx);
+    const uint8_t verdict = nvp::watchVerdict(nowMs, g_watchArmedAtMs, g_holding.load(std::memory_order_acquire), recording);
+    if (verdict != nvp::kWatchKeep) nativeVrWriterWatchDisarm(verdict, nowMs, sink, ctx);
+}
+
+void nativeVrSwapEyesStep(bool key, int onFoot, NativeVrProbeSink sink, void* ctx) {
+    static bool said = false, lastKey = false;
+    static int lastActive = -1;  // -1: no active/inactive line yet
+    char line[200];
+    if (!said || key != lastKey) {
+        nvp::formatSwapKey(key, said, line, sizeof(line));
+        sink(ctx, line);
+        said = true;
+        lastKey = key;
+    }
+    const bool active = nvp::swapEyesActive(key, onFoot);
+    // The active/inactive line on every change, once the key has been on: with the key never on it says nothing.
+    if ((key || lastActive == 1) && static_cast<int>(active) != lastActive) {
+        nvp::formatSwapActive(active, onFoot, line, sizeof(line));
+        sink(ctx, line);
+        lastActive = active ? 1 : 0;
+    }
+    g_swapEyes.store(active ? 1 : 0, std::memory_order_release);
+}
+
+int nativeVrSwapEyesNow() { return g_swapEyes.load(std::memory_order_acquire); }
 
 int nativeVrProbeInstall(uintptr_t base, const uintptr_t* targetsOverride, bool checkIdentity, NativeVrProbeSink sink, void* ctx) {
     if (checkIdentity) {
@@ -482,7 +817,7 @@ void nativeVrProbeDrain(uint64_t nowMs, int onFoot, NativeVrProbeSink sink, void
     while (g_ring.pop(&e)) {
         const bool pipeline = e.point == nvp::kPointBuild || e.point == nvp::kPointTeardown;
         // A decision or camera line only when it changed; a block or hold line every time, through the limiter, so repeats are counted.
-        const bool changeOnly = (pipeline && !e.substituted) || e.point == nvp::kPointCamera;
+        const bool changeOnly = (pipeline && !e.substituted) || nvp::isCameraPoint(e.point);
         if (changeOnly ? !changes.admit(e) : !limiter.admit(e, nowMs)) continue;
         if (pipeline && e.substituted) changes.admit(e);
         if (nvp::formatEvent(e, base, size, line, sizeof(line), onFoot) > 0) sink(ctx, line);
@@ -493,7 +828,7 @@ void nativeVrProbeDrain(uint64_t nowMs, int onFoot, NativeVrProbeSink sink, void
 void nativeVrProbeFrameBoundary() {
     static uint32_t generation = ~0u;
     static bool on = false, block = false, said = false, saidBlock = false, tried = false, saidBlockUnarmed = false;
-    static bool onFootKey = false, saidOnFoot = false, saidOnFootUnarmed = false;
+    static bool onFootKey = false, saidOnFoot = false, saidOnFootUnarmed = false, swapKey = false;
     static int armed = 0;
     const Config& cfg = Config::get();
     const uint32_t now = cfg.generation();
@@ -524,12 +859,18 @@ void nativeVrProbeFrameBoundary() {
             saidOnFoot = true;
         }
         onFootKey = wantOnFoot;
+        swapKey = cfg.getBool("experimental.native_vr_swap_eyes", false);
     }
+    const int onFoot = journalOnFootKnown() ? (journalOnFoot() ? 1 : 0) : -1;
+    // Swapping the eye frames patches nothing in the game: it needs no hook and works on any build.
+    nativeVrSwapEyesStep(swapKey, onFoot, &logSink, nullptr);
     if ((on || block || onFootKey) && !tried) {
         tried = true;
         armed = nativeVrProbeInstall(reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)), nullptr, true, &logSink, nullptr);
-        char line[260];
-        nvp::formatInstalled(armed, nativeVrProbeArmed(nvp::kPointCamera), line, sizeof(line));
+        int cameraArmed = 0;
+        for (int point = 0; point < nvp::kPointCount; ++point) cameraArmed += nvp::isCameraPoint(point) && nativeVrProbeArmed(point) ? 1 : 0;
+        char line[300];
+        nvp::formatInstalled(armed, cameraArmed, line, sizeof(line));
         Log::get().note("%s", line);
     }
     const bool sourceArmed = nativeVrProbeArmed(nvp::kPointSource);
@@ -548,10 +889,19 @@ void nativeVrProbeFrameBoundary() {
     nativeVrProbeSetRecording(on && armed > 0);
     nativeVrProbeSetBlockCinema(block && blockArmed);
     if (armed > 0) {
-        const int onFoot = journalOnFootKnown() ? (journalOnFoot() ? 1 : 0) : -1;
-        nativeVrProbeDrain(GetTickCount64(), onFoot, &logSink, nullptr);
+        const uint64_t nowMs = GetTickCount64();
+        nativeVrProbeDrain(nowMs, onFoot, &logSink, nullptr);
         nativeVrOnFootJournal(onFoot, &logSink, nullptr);
+        nativeVrWriterWatchStep(nowMs, on && armed > 0, &logSink, nullptr);
     }
 }
+
+}  // namespace edvr
+
+// The OpenXR runtime (openvr_api.dll) asks once a frame pair whether the eye frames are swapped (experimental.native_vr_swap_eyes).
+// Optional: a runtime that does not find it swaps nothing.
+extern "C" __declspec(dllexport) int edvrNativeVrSwapEyes() { return edvr::nativeVrSwapEyesNow(); }
+
+namespace edvr {
 
 }  // namespace edvr

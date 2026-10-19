@@ -1,8 +1,10 @@
 #pragma once
 // Pure logic for composing the x86 debug register Dr7 (slot 0), shared by the
 // hardware write watches that arm a data breakpoint on a game address
-// (flat_camera_producer_probe.cpp). No Windows header, no game memory --
-// tools\transition_flash_prevent_test drives it without the game.
+// (flat_camera_producer_probe.cpp), and for any slot (native_vr_probe.cpp's
+// writer watch). No Windows header, no game memory --
+// tools\transition_flash_prevent_test drives slot 0 without the game,
+// tools\native_vr_probe_test the others.
 #include <cstdint>
 
 namespace edvr {
@@ -44,6 +46,32 @@ inline uint32_t armSlot0Dr7(uint32_t existing, uint32_t rw = kDr7RwReadWrite,
 // them is one fewer thing this function can get wrong.
 inline uint32_t disarmSlot0Dr7(uint32_t existing) noexcept {
     return existing & ~kDr7L0Bit;
+}
+
+// ---------------------------------------------------------------------------
+// Any slot 0..3, for a watch that must not take slot 0 from the flat camera
+// producer probe (native_vr_probe.cpp's writer watch uses slot 1). Slot n's
+// bits: Ln = bit 2n, Gn = bit 2n+1, R/Wn = bits 16+4n..17+4n, LENn = bits
+// 18+4n..19+4n. The same read-modify-write rule as slot 0's: every bit that
+// is not slot n's comes back exactly as given. A slot out of range changes
+// nothing.
+constexpr uint32_t slotMaskDr7(unsigned slot) noexcept {
+    return slot > 3 ? 0u : ((3u << (2 * slot)) | (0xFu << (16 + 4 * slot)));
+}
+inline uint32_t armSlotDr7(uint32_t existing, unsigned slot, uint32_t rw = kDr7RwWrite,
+                           uint32_t len = kDr7Len4Bytes) noexcept {
+    if (slot > 3) return existing;
+    const uint32_t bits = (1u << (2 * slot)) | ((rw & 0x3u) << (16 + 4 * slot)) | ((len & 0x3u) << (18 + 4 * slot));
+    return (existing & ~slotMaskDr7(slot)) | bits;
+}
+// Clears only Ln, like disarmSlot0Dr7.
+inline uint32_t disarmSlotDr7(uint32_t existing, unsigned slot) noexcept {
+    return slot > 3 ? existing : existing & ~(1u << (2 * slot));
+}
+// Someone has slot n on (local or global enable): a watch that finds it so
+// leaves that thread alone rather than take a debugger's or another probe's.
+constexpr bool slotEnabledDr7(uint32_t existing, unsigned slot) noexcept {
+    return slot <= 3 && (existing & (3u << (2 * slot))) != 0;
 }
 
 }  // namespace dr7

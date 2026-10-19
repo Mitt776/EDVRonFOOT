@@ -14,8 +14,13 @@
 // and 6 becomes 4 before the game's copy, and stays so between calls; a mode the game sets itself (3, 0) is left alone and ends the
 // hold; nothing with the key off; a cinema mode is never written -- its start, repeat (limited, with the summary) and end lines, the
 // end by the journal, and the camera line written only when the name or the mode changes.
+// Part E: the camera director's three points (the name asked for, read before the original; every argument forwarded; a line per
+// change), debug register slots other than 0, the writer table and the watch's verdict, a REAL hardware write watch on this rig's own
+// variable (two writing instructions on two threads written once each, the rig's own write counted apart, nothing traps once it is off),
+// and experimental.native_vr_swap_eyes' answer and lines.
 #include "../../src/d3d11/native_vr_probe.h"
 #include "../../src/d3d11/native_vr_probe_core.h"
+#include "../../src/d3d11/debug_register_core.h"
 #include <windows.h>
 #include <cstdio>
 #include <cstring>
@@ -28,6 +33,7 @@ void breadcrumb(const char*) {}  // production guard.cpp's crash-channel depende
 bool journalOnFootKnown() { return false; }  // journal_watch.cpp's, for the frame boundary the rig never calls
 bool journalOnFoot() { return false; }
 }
+extern "C" int edvrNativeVrSwapEyes();
 
 using namespace edvr;
 
@@ -179,10 +185,10 @@ void partA() {
         e.readOk = 0;
         nvp::formatEvent(e, 0, 0, line, sizeof(line));
         check(std::strstr(line, "view pipeline 0xAB0 could not be read") != nullptr, "text: an unreadable pipeline says so");
-        nvp::formatInstalled(nvp::kPointCount, true, line, sizeof(line));
-        check(std::strcmp(line, "native-vr-probe: installed on 7 of 7 points (build 332841)") == 0, "text: the install line, all points");
-        nvp::formatInstalled(3, true, line, sizeof(line));
-        check(std::strstr(line, "installed on 3 of 7 points") && std::strstr(line, "say why the rest") && !std::strstr(line, "camera"),
+        nvp::formatInstalled(nvp::kPointCount, nvp::kCameraPoints, line, sizeof(line));
+        check(std::strcmp(line, "native-vr-probe: installed on 10 of 10 points (build 332841)") == 0, "text: the install line, all points");
+        nvp::formatInstalled(3, nvp::kCameraPoints, line, sizeof(line));
+        check(std::strstr(line, "installed on 3 of 10 points") && std::strstr(line, "say why the rest") && !std::strstr(line, "camera"),
               "text: the install line, some refused");
         nvp::formatOnFootKey(false, false, line, sizeof(line));
         check(std::strcmp(line, "native-vr-on-foot: off (experimental.native_vr_on_foot = 0)") == 0, "text: the key's first line, off");
@@ -192,9 +198,11 @@ void partA() {
               "text: the key's line, on");
         nvp::formatOnFootKey(false, true, line, sizeof(line));
         check(std::strstr(line, "native-vr-on-foot: off: no new hold starts") != nullptr, "text: the key's line, off again");
-        nvp::formatInstalled(6, false, line, sizeof(line));
-        check(std::strstr(line, "installed on 6 of 7 points") && std::strstr(line, "camera: skipped (its point is not hooked"),
+        nvp::formatInstalled(6, 0, line, sizeof(line));
+        check(std::strstr(line, "installed on 6 of 10 points") && std::strstr(line, "camera: skipped (no camera point is hooked"),
               "text: the install line says when the camera is skipped");
+        nvp::formatInstalled(8, 2, line, sizeof(line));
+        check(std::strstr(line, "camera: 2 of 4 camera points hooked") != nullptr, "text: the install line says when some camera points are skipped");
     }
     {
         nvp::HoldState s;
@@ -390,6 +398,17 @@ size_t writeJumpFunction(uint8_t* at, int point, const void* target) {
     }
     if (point == nvp::kPointSource) {
         const uint8_t pops[] = {0x41, 0x5E, 0x5F, 0x5E, 0x5B, 0x5D};  // pop r14; pop rdi; pop rsi; pop rbx; pop rbp
+        std::memcpy(at + n, pops, sizeof(pops));
+        n += sizeof(pops);
+    }
+    if (point == nvp::kPointCameraByName) {
+        const uint8_t pops[] = {0x5E, 0x5D};  // pop rsi; pop rbp
+        std::memcpy(at + n, pops, sizeof(pops));
+        n += sizeof(pops);
+    }
+    if (point == nvp::kPointCameraDefault) at[n++] = 0x5F;  // pop rdi
+    if (point == nvp::kPointCameraByName2) {
+        const uint8_t pops[] = {0x5B, 0x5D};  // pop rbx; pop rbp
         std::memcpy(at + n, pops, sizeof(pops));
         n += sizeof(pops);
     }
@@ -687,8 +706,180 @@ void partD(FnSourceCall callSource, FnCameraCall callCamera, uint64_t now) {
     frame(0);
 }
 
+// ---- Part E: the camera director, the debug registers, the writer watch and the eye swap ------------------------------------------
+
+using FnCall4 = uint64_t (*)(void*, const void*, uint64_t, uint64_t);
+using FnWrite = void (*)(volatile int32_t*, int32_t);
+
+// The camera director's stand-ins: what they were called with, every register as it came.
+volatile uint64_t g_byNameSelf = 0, g_byNameName = 0, g_byNameFlag = 0, g_byNameFourth = 0, g_defaultSelf = 0;
+uint64_t fakeByName(void* self, const char* name, uint64_t flag, uint64_t fourth) {
+    g_byNameSelf = reinterpret_cast<uint64_t>(self);
+    g_byNameName = reinterpret_cast<uint64_t>(name);
+    g_byNameFlag = flag;
+    g_byNameFourth = fourth;
+    return 0xBEEF;
+}
+uint64_t fakeDefault(void* self, void*, void*, void*) {
+    g_defaultSelf = reinterpret_cast<uint64_t>(self);
+    return 0xD0;
+}
+
+alignas(16) volatile int32_t g_watched = 5;
+
+void partE(FnCall4 callByName, FnCall4 callDefault, FnCall4 callByName2, FnWrite writeA, FnWrite writeB, uint64_t now) {
+    // The camera director: the name asked for, before the original; forwarded unchanged; a line per change.
+    uint8_t director[16] = {};
+    nativeVrProbeSetRecording(false);
+    nativeVrProbeDrain(now, 1, &sink, nullptr);  // Part D's last window and its summary, out of the way
+    nativeVrProbeDrain(now + 1500, 1, &sink, nullptr);
+    now += 3000;
+    g_lines.clear();
+    check(callByName(director, "First Person Camera", 0, 0x44) == 0xBEEF && g_byNameSelf == reinterpret_cast<uint64_t>(director) &&
+              std::strcmp(reinterpret_cast<const char*>(g_byNameName), "First Person Camera") == 0 && g_byNameFlag == 0 &&
+              g_byNameFourth == 0x44,
+          "director: probe off, the switch by name gets every argument and its result is returned");
+    nativeVrProbeDrain(now, 1, &sink, nullptr);
+    check(g_lines.empty(), "director: probe off, nothing written");
+    nativeVrProbeSetRecording(true);
+    for (int i = 0; i < 1000; ++i) callByName(director, "First Person Camera", 0, 0x44);
+    nativeVrProbeDrain(now, 1, &sink, nullptr);
+    check(countLines("native-vr-probe: camera \"First Person Camera\" at stereo mode") == 1 &&
+              anyLine("site camera by name (+0x1D79660), flag 0;") && anyLine("; called from "),
+          "director: a thousand identical switches give one line, with its site, flag and caller");
+    callByName(director, "First Person Camera", 1, 0);
+    check(g_byNameFlag == 1, "director: the flag reaches the original");
+    callByName2(director, "HMD First Person Camera", 1, 0);
+    callByName(director, nullptr, 0, 0);
+    callByName(director, reinterpret_cast<const char*>(0x10), 0, 0);
+    check(g_byNameName == 0x10, "director: an unreadable name is still forwarded");
+    nativeVrProbeDrain(now, 1, &sink, nullptr);
+    check(anyLine("camera \"First Person Camera\" at stereo mode") && anyLine("site camera by name (+0x1D79660), flag 1;"),
+          "director: a changed flag is another line");
+    check(countLines("camera \"HMD First Person Camera\"") == 1 && anyLine("site camera by name (second path) (+0x1D203B0)"),
+          "director: the second path names its own site");
+    check(countLines("camera \"(none)\"") == 1 && countLines("camera: the name could not be read") == 1,
+          "director: no name and an unreadable name are said so");
+    g_lines.clear();
+    check(callDefault(director, nullptr, 0, 0) == 0xD0 && g_defaultSelf == reinterpret_cast<uint64_t>(director),
+          "director: the first-person default is forwarded and its result returned");
+    callDefault(director, nullptr, 0, 0);
+    nativeVrProbeDrain(now, 1, &sink, nullptr);
+    check(countLines("native-vr-probe: camera: first-person default asked at stereo mode") == 1 &&
+              anyLine("site first-person camera default (+0x1D79980)"),
+          "director: the first-person default's line, once");
+    nativeVrProbeSetRecording(false);
+
+    // Debug register composition for slots other than 0 (debug_register_core.h).
+    check(dr7::armSlotDr7(0, 1) == 0x00D00004u, "Dr7 slot 1: L1, write, 4 bytes from a clear register");
+    check(dr7::armSlotDr7(0x000F0001u, 1) == (0x000F0001u | 0x00D00004u), "Dr7 slot 1: slot 0's bits come back as given");
+    check((dr7::armSlotDr7(0xFFFFFFFFu, 1, dr7::kDr7RwWrite) & ~dr7::slotMaskDr7(1)) == (0xFFFFFFFFu & ~dr7::slotMaskDr7(1)),
+          "Dr7 slot 1: every other bit comes back as given");
+    check(dr7::disarmSlotDr7(0x00D00004u | 0x000F0001u, 1) == (0x00D00000u | 0x000F0001u), "Dr7 slot 1: disarm clears only L1");
+    check(dr7::slotEnabledDr7(0x4u, 1) && dr7::slotEnabledDr7(0x8u, 1) && !dr7::slotEnabledDr7(0x000F0001u, 1),
+          "Dr7 slot 1: local or global enable is in use; slot 0's is not");
+    check(dr7::armSlotDr7(0x1234u, 4) == 0x1234u && dr7::armSlot0Dr7(0) == 0x000F0001u, "Dr7: slot 4 changes nothing; slot 0 as before");
+
+    // The writer table and the verdict, without a watch.
+    {
+        nvp::WriterTable t;
+        bool fresh = false;
+        check(t.record(0x100, &fresh) == 0 && fresh, "writers: a new site is a new row");
+        int row = -1;
+        check(!t.nextUnsaid(&row), "writers: not written before it is published");
+        const uint64_t stack[2] = {0x200, 0x300};
+        t.publish(0, 7, stack, 2);
+        check(t.nextUnsaid(&row) && row == 0 && !t.nextUnsaid(&row), "writers: published, it is written once");
+        for (int i = 0; i < 1000; ++i) t.record(0x100, &fresh);
+        check(!fresh && t.site(0).hits.load() == 1001, "writers: repeats are counted on the same row");
+        for (uint64_t r = 1; r < nvp::kWriterSites; ++r) t.record(0x100 + r, &fresh);
+        check(t.record(0x999, &fresh) == -1 && t.overflow() == 1 && t.sites() == nvp::kWriterSites,
+              "writers: a full table counts the overflow");
+        t.countOwn();
+        check(t.gameHits() == 1001 + (nvp::kWriterSites - 1) + 1 && t.ownHits() == 1, "writers: the game's and EDVR's own, apart");
+        char line[600];
+        nvp::formatWriterSite(0, t.site(0), 0x1000, 0x1000, line, sizeof(line));
+        check(std::strstr(line, "native-vr-probe: cinema writer #1: the game wrote the stereo mode source at 0x100 (the instruction just "
+                                "before this address); thread 7; called from 0x200 < 0x300") != nullptr,
+              "writers: the site's line");
+        check(nvp::watchVerdict(1000, 0, true, true) == nvp::kWatchKeep && nvp::watchVerdict(1000, 0, false, true) == nvp::kWatchHoldEnd &&
+                  nvp::watchVerdict(1000, 0, true, false) == nvp::kWatchProbeOff &&
+                  nvp::watchVerdict(nvp::kWatchMs, 0, true, true) == nvp::kWatchTimeout,
+              "writers: the watch comes off at the hold's end, the probe off, or after 30 s");
+    }
+
+    // The frame step: Part D's hold start (probe on) asked for a watch on the source; the hold has ended since, so it comes on and off.
+    g_lines.clear();
+    nativeVrWriterWatchStep(now, true, &sink, nullptr);
+    check(anyLine("native-vr-probe: writer watch on: stereo mode source 0x") && anyLine("(debug register 1, write, 4 bytes)") &&
+              anyLine("writer watch off (the hold ended)") && !nativeVrWriterWatchOn(),
+          "watch: a hold start's request is armed by the frame step, and taken off when the hold has ended");
+    g_lines.clear();
+    nativeVrWriterWatchStep(now, true, &sink, nullptr);
+    check(g_lines.empty(), "watch: one request, one watch");
+
+    // The real thing: a watch on this rig's own variable, the game's writes from two threads, EDVR's own write apart.
+    HANDLE go = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    std::thread other([&] {
+        WaitForSingleObject(go, 10000);
+        writeB(&g_watched, 5);
+    });
+    Sleep(50);  // the other thread exists before the watch is set
+    g_lines.clear();
+    const int armed = nativeVrWriterWatchArm(reinterpret_cast<uintptr_t>(&g_watched), now, &sink, nullptr);
+    check(armed >= 2 && nativeVrWriterWatchOn() && countLines("writer watch on") == 1, "watch: armed on this thread and the waiting one");
+    for (int i = 0; i < 100; ++i) writeA(&g_watched, 5);
+    SetEvent(go);
+    other.join();
+    g_watched = 3;  // this module's own write: the hold's, not the game's
+    nativeVrWriterWatchDrain(&sink, nullptr);
+    char siteA[64], siteB[64];
+    std::snprintf(siteA, sizeof(siteA), "source at 0x%llX (", static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(writeA) + 2));
+    std::snprintf(siteB, sizeof(siteB), "source at 0x%llX (", static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(writeB) + 2));
+    check(countLines("cinema writer #") == 2 && anyLine(siteA) && anyLine(siteB),
+          "watch: each writing instruction once, at the address just after it");
+    check(!anyLine("called from (no stack)"), "watch: the writer's callers were unwound");
+    nativeVrWriterWatchDisarm(nvp::kWatchTimeout, now + 1234, &sink, nullptr);
+    check(anyLine("writer watch off (30 s passed) after 1234 ms: 2 writing site(s) of the game, 101 write(s) by the game") &&
+              anyLine("1 by EDVR's own hold") && !nativeVrWriterWatchOn(),
+          "watch: the summary counts the game's writes and EDVR's own apart");
+    writeA(&g_watched, 5);
+    g_watched = 5;
+    g_lines.clear();
+    nativeVrWriterWatchDrain(&sink, nullptr);
+    check(g_lines.empty() && g_watched == 5, "watch: off, writes trap no more");
+    CloseHandle(go);
+
+    // experimental.native_vr_swap_eyes: only with the key and on foot; a line when the key or the answer changes.
+    g_lines.clear();
+    nativeVrSwapEyesStep(false, 1, &sink, nullptr);
+    check(countLines("native-vr-swap-eyes: off (experimental.native_vr_swap_eyes = 0)") == 1 && g_lines.size() == 1 &&
+              edvrNativeVrSwapEyes() == 0,
+          "swap: key off, one line, nothing swapped even on foot");
+    nativeVrSwapEyesStep(false, 1, &sink, nullptr);
+    check(g_lines.size() == 1, "swap: key off, said once");
+    g_lines.clear();
+    nativeVrSwapEyesStep(true, 0, &sink, nullptr);
+    check(anyLine("native-vr-swap-eyes: on: on foot the left and right eye frames are swapped") && anyLine("inactive: each eye sees its own") &&
+              edvrNativeVrSwapEyes() == 0,
+          "swap: key on in the ship, not swapped");
+    g_lines.clear();
+    nativeVrSwapEyesStep(true, 1, &sink, nullptr);
+    nativeVrSwapEyesStep(true, 1, &sink, nullptr);
+    check(countLines("native-vr-swap-eyes: active on foot") == 1 && g_lines.size() == 1 && edvrNativeVrSwapEyes() == 1,
+          "swap: on foot, swapped, said once");
+    g_lines.clear();
+    nativeVrSwapEyesStep(true, -1, &sink, nullptr);
+    check(anyLine("inactive") && edvrNativeVrSwapEyes() == 0, "swap: an unknown journal swaps nothing");
+    nativeVrSwapEyesStep(true, 1, &sink, nullptr);
+    g_lines.clear();
+    nativeVrSwapEyesStep(false, 1, &sink, nullptr);
+    check(anyLine("off: the eye frames go to their own eyes again") && anyLine("inactive") && edvrNativeVrSwapEyes() == 0,
+          "swap: key off on foot, back at once");
+}
+
 void partB() {
-    auto* page = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
+    auto* page =static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
     if (!page) {
         check(false, "glue: a code page for the synthetic functions");
         return;
@@ -700,6 +891,11 @@ void partB() {
     uint8_t* fnTeardown = page + 0x400;
     uint8_t* fnSource = page + 0x500;
     uint8_t* fnCamera = page + 0x600;
+    uint8_t* fnByName = page + 0x700;
+    uint8_t* fnDefault = page + 0x800;
+    uint8_t* fnByName2 = page + 0x900;
+    uint8_t* fnWriteA = page + 0xA00;  // mov [rcx], edx; ret -- the game's writers for the writer watch
+    uint8_t* fnWriteB = page + 0xA10;
     writeFunction(fnMode, &g_modeSelf, nullptr);
     writeFunction(fnOn, &g_onSelf, &g_onArg);
     writeFunction(fnOff, &g_offSelf, nullptr);
@@ -707,12 +903,19 @@ void partB() {
     writeJumpFunction(fnTeardown, nvp::kPointTeardown, reinterpret_cast<const void*>(&fakeTeardown));
     writeJumpFunction(fnSource, nvp::kPointSource, reinterpret_cast<const void*>(&fakeSource));
     writeJumpFunction(fnCamera, nvp::kPointCamera, reinterpret_cast<const void*>(&fakeCamera));
+    writeJumpFunction(fnByName, nvp::kPointCameraByName, reinterpret_cast<const void*>(&fakeByName));
+    writeJumpFunction(fnDefault, nvp::kPointCameraDefault, reinterpret_cast<const void*>(&fakeDefault));
+    writeJumpFunction(fnByName2, nvp::kPointCameraByName2, reinterpret_cast<const void*>(&fakeByName));
+    const uint8_t writer[] = {0x89, 0x11, 0xC3};
+    std::memcpy(fnWriteA, writer, sizeof(writer));
+    std::memcpy(fnWriteB, writer, sizeof(writer));
     fnOff[0] = 0x41;  // not the game's prologue: the point must be refused
     FlushInstructionCache(GetCurrentProcess(), page, 4096);
     const uintptr_t targets[nvp::kPointCount] = {reinterpret_cast<uintptr_t>(fnMode),     reinterpret_cast<uintptr_t>(fnOn),
                                                  reinterpret_cast<uintptr_t>(fnOff),      reinterpret_cast<uintptr_t>(fnBuild),
                                                  reinterpret_cast<uintptr_t>(fnTeardown), reinterpret_cast<uintptr_t>(fnSource),
-                                                 reinterpret_cast<uintptr_t>(fnCamera)};
+                                                 reinterpret_cast<uintptr_t>(fnCamera),   reinterpret_cast<uintptr_t>(fnByName),
+                                                 reinterpret_cast<uintptr_t>(fnDefault),  reinterpret_cast<uintptr_t>(fnByName2)};
     using Fn1 = void (*)(void*);
     using Fn2 = void (*)(void*, void*);
     auto callMode = reinterpret_cast<Fn1>(fnMode);
@@ -721,13 +924,18 @@ void partB() {
 
     g_lines.clear();
     int armed = nativeVrProbeInstall(0x140000000ull, targets, false, &sink, nullptr);
-    check(armed == 6, "glue: six good prologues are hooked, the bad one is not");
+    check(armed == 9, "glue: nine good prologues are hooked, the bad one is not");
     check(countLines("CinemaPipelineFeature deactivate at EliteDangerous64.exe+0x28AB150 NOT hooked") == 1,
           "glue: the refused point is named once, by its RVA");
     check(fnOff[0] == 0x41 && std::memcmp(fnOff + 1, nvp::kPrologue + 1, nvp::kPrologueBytes - 1) == 0,
           "glue: the refused point's bytes are untouched");
-    check(fnMode[0] == 0xE9 && fnOn[0] == 0xE9 && fnBuild[0] == 0xE9 && fnTeardown[0] == 0xE9 && fnSource[0] == 0xE9 && fnCamera[0] == 0xE9,
-          "glue: the six hooked points now begin with the jump");
+    check(fnMode[0] == 0xE9 && fnOn[0] == 0xE9 && fnBuild[0] == 0xE9 && fnTeardown[0] == 0xE9 && fnSource[0] == 0xE9 && fnCamera[0] == 0xE9 &&
+              fnByName[0] == 0xE9 && fnDefault[0] == 0xE9 && fnByName2[0] == 0xE9,
+          "glue: the nine hooked points now begin with the jump");
+    check(anyLine("camera by name hooked at EliteDangerous64.exe+0x1D79660") && anyLine("7 prologue bytes verified") &&
+              anyLine("first-person camera default hooked at EliteDangerous64.exe+0x1D79980") && anyLine("6 prologue bytes verified") &&
+              anyLine("camera by name (second path) hooked at EliteDangerous64.exe+0x1D203B0"),
+          "glue: the three camera director points, by their RVAs");
     check(anyLine("view pipeline rebuild hooked") && anyLine("7 prologue bytes verified, 5 moved") &&
               anyLine("only experimental.native_vr_block_cinema changes what it sees") && anyLine("view pipeline teardown hooked") &&
               anyLine("10 prologue bytes verified, 5 moved"),
@@ -741,7 +949,7 @@ void partB() {
     FlushInstructionCache(GetCurrentProcess(), fnOff, 1);
     g_lines.clear();
     armed = nativeVrProbeInstall(0x140000000ull, targets, false, &sink, nullptr);
-    check(armed == 7 && countLines("hooked at") == 1 && anyLine("CinemaPipelineFeature deactivate hooked"),
+    check(armed == 10 && countLines("hooked at") == 1 && anyLine("CinemaPipelineFeature deactivate hooked"),
           "glue: a later call hooks the corrected point and leaves the armed ones alone");
 
     uint64_t now = 100000;
@@ -811,6 +1019,8 @@ void partB() {
     nativeVrProbeSetRecording(false);
     partC(reinterpret_cast<void (*)(void*)>(fnBuild), reinterpret_cast<void (*)(void*)>(fnTeardown), callOn, callOff, now + 5000);
     partD(reinterpret_cast<FnSourceCall>(fnSource), reinterpret_cast<FnCameraCall>(fnCamera), now + 100000);
+    partE(reinterpret_cast<FnCall4>(fnByName), reinterpret_cast<FnCall4>(fnDefault), reinterpret_cast<FnCall4>(fnByName2),
+          reinterpret_cast<FnWrite>(fnWriteA), reinterpret_cast<FnWrite>(fnWriteB), now + 200000);
 }
 }  // namespace
 

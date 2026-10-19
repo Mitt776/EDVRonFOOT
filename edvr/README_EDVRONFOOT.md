@@ -59,8 +59,9 @@ native_vr_probe = 1
 Что искать в логе (`edvr_logs\edvr_gfx_*.log`, строки начинаются с `native-vr-probe:`):
 
 - `native-vr-probe: off (...= 0)` — зонд выключен (так и должно быть по умолчанию).
-- `native-vr-probe: installed on 7 of 7 points (build 332841)` — включён и встал на все семь точек. Если в конце
-  строки `camera: skipped (...)`, точка выбора камеры не встала, и строк о камере не будет.
+- `native-vr-probe: installed on 10 of 10 points (build 332841)` — включён и встал на все десять точек. Если в конце
+  строки `camera: skipped (...)`, ни одна точка камеры не встала, и строк о камере не будет; `camera: 2 of 4 camera
+  points hooked` — встали не все, строки выше говорят какие.
 - `native-vr-probe: stereo mode: requested 1 -> applied 1; activity 0x...; called from EliteDangerous64.exe+0x...; then ...` —
   игра выставила режим стерео для вида. `requested` — что попросили данные игры, `applied` — что ушло в рендер.
 - `native-vr-probe: cinema feature ON|OFF: feature 0x..., active flag before 0|1, ...` — включение и выключение кинотеатра.
@@ -71,9 +72,23 @@ native_vr_probe = 1
   Строки решения пишутся только тогда, когда что-то поменялось.
 - `native-vr-probe: stereo mode source: the game wants stereo mode 5 (cinema); ... its view settings 0x...` — какой режим
   игра хочет сейчас (источник, из которого режим копируется в рендер). Пишется только при смене.
-- `native-vr-probe: camera "HMD First Person Camera" at stereo mode 3; ...` — какую камеру выбрала игра и при каком
-  режиме. В корабле обычно `HMD Cockpit Cam`, на ногах в стерео — `HMD First Person Camera`, в кинотеатре —
-  `First Person Camera` (без `HMD`). Пишется только при смене имени или режима.
+- `native-vr-probe: camera "First Person Camera" at stereo mode 3, held by native_vr_on_foot; site camera by name (+0x1D79660), flag 0; thread ...; called from ...` —
+  какую камеру игра попросила включить и при каком режиме. `site` — какое место в игре спросило:
+  - `camera by name` и `camera by name (second path)` — «включить камеру по имени». Игра сама добавляет к имени
+    `HMD `, если у командира есть объект шлема и такая камера есть, и тогда голова отслеживается;
+  - `camera choice (+0x2DFC7A0)` — сброс камеры в Camera Suite.
+
+  В корабле обычно `Cockpit Cam`, на ногах — `First Person Camera`. Пишется только при смене имени, режима или флага.
+- `native-vr-probe: camera: first-person default asked at stereo mode 3; site first-person camera default (+0x1D79980); ...` —
+  игра попросила «камеру от первого лица по умолчанию»; следующая строка `camera "..."` говорит, какое имя она выбрала.
+- `native-vr-probe: writer watch on: stereo mode source 0x... (debug register 1, write, 4 bytes) on N thread(s); ...` —
+  при начале удержания постоянного стерео (нужен и `native_vr_on_foot = 1`) зонд на время ставит «ловушку» на запись
+  в режим: кто в игре пишет туда «кинотеатр». Она снимается при возвращении в корабль, при выключении зонда или через 30 с.
+- `native-vr-probe: cinema writer #1: the game wrote the stereo mode source at EliteDangerous64.exe+0x... (the instruction just before this address); thread ...; called from ...` —
+  место в коде игры, которое пишет «кинотеатр», по одной строке на каждое место. Это и ищем.
+- `native-vr-probe: writer watch off (the hold ended) after N ms: K writing site(s) of the game, M write(s) by the game (...), L by EDVR's own hold` —
+  ловушка снята, итог.
+- `native-vr-probe: writer watch NOT on: ...` — ловушка не встала (причина в строке); остальной зонд работает.
 - `native-vr-probe: in the last ... ms N repeat(s) were not written ...` — сводка: одинаковые события пишутся не чаще раза
   в секунду, остальные только считаются.
 
@@ -148,12 +163,40 @@ native_vr_on_foot = 1
   `native-vr-probe: in the last ... ms N repeat(s) were not written`.
 - `native-vr-on-foot: hold end: back in the ship (journal: on foot yes -> no) ...` или
   `native-vr-on-foot: hold end: game set mode N itself ...` — удержание закончено, режим снова игровой.
-- `native-vr-probe: camera "HMD First Person Camera" at stereo mode 3, held by native_vr_on_foot; ...` (с зондом) —
-  игра выбрала шлемовую камеру на ногах.
+- `native-vr-probe: camera "First Person Camera" at stereo mode 3, held by native_vr_on_foot; site camera by name ...` (с зондом) —
+  какую камеру игра попросила на ногах (подробности — в разделе зонда).
 - `native benchmark: ... input 2720x2976/...` на ногах — игра рисует глаза в размере шлема. Если там `3408x1917`
   (размер экрана кинотеатра), глаза всё ещё рисуются «по-кинотеатральному».
 - `native-vr-on-foot: cannot work: ...` — точка не перехвачена (например, другой билд игры); игра работает
   с обычным кинотеатром.
+
+## Перестановка глаз на ногах (эксперимент, `native_vr_swap_eyes`)
+
+С постоянным стерео глаза на ногах не сводились, будто левый и правый перепутаны. Этот ключ — проверка, а не починка:
+пока по журналу игры ты на ногах, EDVR меняет местами кадры левого и правого глаза, которые отдаёт игра. В корабле
+ничего не меняется. Игру EDVR при этом не трогает, поэтому ключ работает на любом билде.
+
+Включить — в `edvr.ini` **в папке игры** (`C:\Steam\steamapps\common\Elite Dangerous\Products\elite-dangerous-odyssey-64\edvr.ini`),
+в конце секции `[experimental]`, после строки `native_vr_on_foot`:
+
+```
+native_vr_swap_eyes = 1
+```
+
+Ключ читается на лету, его можно поменять прямо на ногах: сохранил файл — через секунду глаза переставлены.
+
+Что смотреть: на ногах с постоянным стерео посмотри на близкий предмет (дверь, перила) и по очереди закрой глаза.
+- С перестановкой глаза сводятся в одну объёмную картинку → глаза были просто перепутаны.
+- Не сводятся ни с ней, ни без неё → дело в камере (у неё нет сдвига между глазами), перестановка не поможет.
+
+Как выйти: поставить `native_vr_swap_eyes = 0` и сохранить файл (через секунду всё как было) или вернуться в корабль.
+
+Что искать в логе:
+
+- `native-vr-swap-eyes: on: on foot the left and right eye frames are swapped in the headset (...= 1)` / `off (...= 0)` —
+  состояние ключа.
+- `native-vr-swap-eyes: active on foot: the left eye sees the right frame and the right eye the left (on foot (journal): yes)` —
+  перестановка действует; `inactive: each eye sees its own frame` — нет (в корабле или ключ выключен).
 
 ## Известные сбои
 
