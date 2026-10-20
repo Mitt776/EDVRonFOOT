@@ -32,10 +32,10 @@
   обновления игры (`--suspend`, ждать переноса профиля). `docs/research/native-vr-on-foot.md`, `## Status` — «.9,
   дверца на 334473», не длиннее 60 строк. В `design.md` заявки `native-vr-on-foot-pattern-switch` к решению 7
   дописать поправку со ссылкой на эту заявку. Проверка: в README нет утверждения, что DLL ревизию не проверяет
-- [ ] 2.2 Полная сборка `cmd /c "D:\Project VSC\EDVRonFOOT\edvr\build_edvronfoot.bat"`, коммит (`git commit -F`),
+- [x] 2.2 Полная сборка `cmd /c "D:\Project VSC\EDVRonFOOT\edvr\build_edvronfoot.bat"`, коммит (`git commit -F`),
   тег `v0.19.1-edvronfoot.9`, `build.bat --dll-only`. Проверка: «Native OpenXR build and all gates passed»,
   единственный `KNOWN FAILURE tolerated: weapon_motion`, `config contract ok`
-- [ ] 2.3 Установка при закрытой игре: `py -3.12 edvr\tools\install_edvr.py --target "C:\Steam\steamapps\common\Elite
+- [x] 2.3 Установка при закрытой игре: `py -3.12 edvr\tools\install_edvr.py --target "C:\Steam\steamapps\common\Elite
   Dangerous\Products\elite-dangerous-odyssey-64" --all --tag edvronfoot --dry-run`, затем без `--dry-run`, без
   `--allow-unqualified-game`. Живой `edvr.ini` до и после — один хэш. Проверка: `--verify-only` ok;
   `edvronfoot_game.ps1 -Action Status` показывает `.9`
