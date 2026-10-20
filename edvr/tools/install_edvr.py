@@ -230,6 +230,16 @@ def _native_preflight(root, target, receipt_path):
     return p
 
 
+# EDVRonFOOT: --allow-unqualified-game. The qualification pins one game revision
+# because the legacy Oculus route (elite_oculus) proves its SDK call chain per
+# revision; the OpenVR route Elite takes with SteamVR is not revision-specific,
+# and every game-code hook in the DLLs checks its own bytes and stands down on
+# a mismatch. With the flag an Odyssey executable of another revision is
+# accepted with a warning; Horizons and unreadable executables are refused as
+# before, and so is anything that does not name itself Odyssey.
+ALLOW_UNQUALIFIED_GAME = False
+
+
 def validate_elite_game(path):
     """Validate the qualified executable before staging either profile.
 
@@ -259,6 +269,12 @@ def validate_elite_game(path):
                          "EDVR supports Odyssey only; no EDVR build supports this game.")
     version = strings.get("FileVersion")
     which = " (version %s)" % version if version else ""
+    if ALLOW_UNQUALIFIED_GAME and "odyssey" in named:
+        print("[edvr] WARNING: this Elite Dangerous: Odyssey revision%s is not the one this "
+              "EDVR build is qualified for; installing anyway (--allow-unqualified-game). "
+              "The legacy Oculus route is unproven on it and stays off; read the flight "
+              "log for the parts that stand down." % which)
+        return None
     raise ValueError("This Elite Dangerous: Odyssey revision%s is not one this EDVR "
                      "build is qualified for. Install an EDVR build qualified for "
                      "this game revision." % which)
@@ -1564,10 +1580,15 @@ def main(argv=None):
                     help="compare installed against built; write nothing")
     ap.add_argument("--self-test", action="store_true",
                     help="check this script against itself and exit")
+    ap.add_argument("--allow-unqualified-game", action="store_true",
+                    help="EDVRonFOOT: accept an Odyssey revision this build is not "
+                         "qualified for, with a warning (Horizons is still refused)")
     args = ap.parse_args(argv)
 
     if args.self_test:
         return self_test()
+    global ALLOW_UNQUALIFIED_GAME
+    ALLOW_UNQUALIFIED_GAME = args.allow_unqualified_game
 
     if args.keep_backups < 1:
         ap.error("--keep-backups must be at least 1: the newest backup is never pruned")
@@ -2857,6 +2878,37 @@ def self_test():
                "no EDVR build supports this game" not in str(exc):
                 print("legacy Horizons got the wrong message: %s" % exc)
                 ok = False
+        # EDVRonFOOT's --allow-unqualified-game: the unknown Odyssey revision
+        # passes with a warning; Horizons and an executable that does not name
+        # itself Odyssey are refused as without it; the flag is off again after.
+        other_exe = os.path.join(tmp, "gate-other.exe")
+        with open(other_exe, "wb") as f:
+            f.write(_elite_gate._fixture(product_name="Some Game",
+                                         file_description="Some Game Executable",
+                                         file_version="1"))
+        global ALLOW_UNQUALIFIED_GAME
+        if ALLOW_UNQUALIFIED_GAME:
+            print("the unqualified-game flag is on by default")
+            ok = False
+        ALLOW_UNQUALIFIED_GAME = True
+        try:
+            try:
+                if validate_elite_game(odyssey_exe) is not None:
+                    print("unqualified Odyssey under the flag returned a profile")
+                    ok = False
+            except ValueError as exc:
+                print("unqualified Odyssey was refused under the flag: %s" % exc)
+                ok = False
+            for refused, label in ((legacy_exe, "Horizons"), (other_exe, "a non-Odyssey executable"),
+                                   (os.path.join(tmp, "gate-absent.exe"), "an absent executable")):
+                try:
+                    validate_elite_game(refused)
+                    print("%s passed the elite gate under the flag" % label)
+                    ok = False
+                except ValueError:
+                    pass
+        finally:
+            ALLOW_UNQUALIFIED_GAME = False
         try:
             validate_elite_game(os.path.join(tmp, "gate-absent.exe"))
             print("absent executable passed the elite gate")
