@@ -11,7 +11,7 @@
   `kLoaderCallRva`, `kLoaderReturnRva`, stamp `0x6ACD513D`, SizeOfImage `0x640C000`, порог `.text` `0x4DB4000`,
   11 отпечатков, 9 байтовых точек, 5 прямых вызовов, 3 указателя таблиц — все значения 334473 из 1.1. Комментарии
   про ревизию — на 334473. Проверка: grep — в `edvr/src` нет `0x6A989634`, `0x4DB32E0`; `e6be8bbe` остаётся только в комментариях других частей EDVR, привязанных к 332841 (вне заявки), и в `probe.cpp` до 1.3
-- [ ] 1.3 `edvr/tools/elite_oculus.py`: те же значения (`GAME_SHA256`, `PROFILE_ID`, `_BYTE_CHECKS`,
+- [x] 1.3 `edvr/tools/elite_oculus.py`: те же значения (`GAME_SHA256`, `PROFILE_ID`, `_BYTE_CHECKS`,
   `_FINGERPRINTS`, вызовы и указатели в `_validate_image`, строгая проверка заголовка, `selector_rva`, `factory_rva`),
   фикстура `_fixture()` и самопроверка с `file_version="334473"`. `edvr/src/installer/probe.cpp`:
   `kQualifiedEliteSha256`. Проверка: `py -3.12 edvr\tools\elite_oculus.py --self-test` ok; `py -3.12
