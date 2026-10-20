@@ -42,10 +42,10 @@
 - [x] 4.1 README_EDVRONFOOT: раздел «Интерфейс на ногах» — что видно, два крепления и как переключить в меню, ширина,
   что прицел честный только «к телу», что искать в логе, как выключить. Исследование: в `## Status` — «следующий
   полёт: показ интерфейса `.10`» и временные ключи и клавиша. Проверка: `## Status` не длиннее 60 строк
-- [ ] 4.2 Полная сборка `build.bat` через `edvr\build_edvronfoot.bat` по абсолютному пути. Проверка: «all gates
+- [x] 4.2 Полная сборка `build.bat` через `edvr\build_edvronfoot.bat` по абсолютному пути. Проверка: «all gates
   passed», единственный известный сбой `weapon_motion`; коммит, тег `v0.19.1-edvronfoot.10`, затем `--dll-only` через
   обёртку проходит
-- [ ] 4.3 Установка при закрытой игре: `py -3.12 edvr\tools\install_edvr.py --target "C:\Steam\steamapps\common\Elite
+- [x] 4.3 Установка при закрытой игре: `py -3.12 edvr\tools\install_edvr.py --target "C:\Steam\steamapps\common\Elite
   Dangerous\Products\elite-dangerous-odyssey-64" --all --tag edvronfoot --dry-run`, затем без `--dry-run`. В живой
   `edvr.ini` через Edit — `on_foot_hud_panel = NUMLOCK` в `[hotkey]`. Проверка: `edvronfoot_game.ps1 -Action Status`
   показывает `.10`, `--verify-only` ok, diff `edvr.ini` — одна новая строка
