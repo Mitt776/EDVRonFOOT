@@ -42,10 +42,12 @@
 
 ## 3. Проверка
 
-- [ ] 3.1 Запуск Димой: игра стартует из Steam, в шлеме VR в корабле. Проверка по логу (`edvr_log.py --expect-build
+- [x] 3.1 Запуск Димой: игра стартует из Steam, в шлеме VR в корабле. Проверка по логу (`edvr_log.py --expect-build
   HEAD`): версия `.9`; строка `oculus route: native=1 profile=1 ... installed=1`; если игра пыталась загрузить LibOVR —
   `rejected` ≥ 1, `exact` ≥ 1; в `edvr_breadcrumbs.txt` нет нового «process exit» сразу после старта. После этого —
   полёт варианта Б (задача 3.1 `native-vr-on-foot-pattern-switch` и разведка `native-vr-on-foot-ui-recon`) на `.9`
+  (2026-10-20, `edvr_gfx_20261020_231928.log`: `.9` совпадает с HEAD; `installed=1`, `exact=2 rejected=2`; игра
+  проработала 23 минуты, сбой был только при закрытии сессии — давний сбой выхода, не дверца)
 
 ## Workflow follow-up
 

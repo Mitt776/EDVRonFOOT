@@ -130,6 +130,9 @@ native_vr_probe = 1
 байт не там, где игре можно писать, EDVR ничего не трогает и пишет в лог причину. Тогда на ногах кинотеатр.
 Страховка и зонд работают только на сборке 332841; на других сборках в логе одна строка, что страховка не установлена.
 
+В шлеме ключ меняется в меню EDVR: F8 → страница Performance → внизу «Developer mode» = on. После этого появится
+страница Experimental, на ней строка «Native VR on foot».
+
 Включено по умолчанию: строки в `edvr.ini` может и не быть. Выключить — в `edvr.ini` **в папке игры**
 (`C:\Steam\steamapps\common\Elite Dangerous\Products\elite-dangerous-odyssey-64\edvr.ini`), секция `[experimental]`:
 
