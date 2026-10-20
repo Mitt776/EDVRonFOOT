@@ -2,8 +2,8 @@
 
 ## 1. Подготовка (без кода и сборки)
 
-- [x] 1.1 Проверить, что в игре стоит нужная сборка. Проверка: `powershell -ExecutionPolicy Bypass -File "D:\Project VSC\EDVRonFOOT\edvr\edvronfoot_game.ps1" -Action Status` показывает `v0.19.1-edvronfoot.7`
-- [x] 1.2 В живой `edvr.ini` игры через Edit (не регуляркой) добавить: `dump_draws = NUMLOCK` в `[hotkey]`; `census_offscreen = 1`, `census_frames = 2`, `census_lines = 16384` в `[advanced]`. Проверка: diff до и после — ровно четыре новые строки в своих секциях, остальное без изменений; `native_vr_on_foot = 1` на месте
+- [x] 1.1 Проверить, что в игре стоит нужная сборка. Проверка: `powershell -ExecutionPolicy Bypass -File "D:\Project VSC\EDVRonFOOT\edvr\edvronfoot_game.ps1" -Action Status` показывает `v0.19.1-edvronfoot.7` (2026-10-20 вечер: после обновления игры до 334473 повторено на `.8`)
+- [x] 1.2 В живой `edvr.ini` игры через Edit (не регуляркой) добавить: `dump_draws = NUMLOCK` в `[hotkey]`; `census_offscreen = 1`, `census_frames = 2`, `census_lines = 16384` в `[advanced]`. Проверка: diff до и после — ровно четыре новые строки в своих секциях, остальное без изменений; `native_vr_on_foot = 1` на месте (обновление игры стёрло `edvr.ini`; строки вписаны заново в восстановленный файл, diff — те же четыре)
 - [x] 1.3 Записать в исследование `docs/research/native-vr-on-foot.md` раздел «Разведка интерфейса на ногах» с датой: гипотеза, исходы A1–A3, признак каждого исхода в переписи, временные строки `edvr.ini`; в `## Status` — «следующий полёт: разведка интерфейса». Проверка: `## Status` не длиннее 60 строк, новый раздел называет три исхода и их признаки
 
 ## 2. Полёт Димы

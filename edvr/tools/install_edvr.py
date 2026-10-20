@@ -232,11 +232,13 @@ def _native_preflight(root, target, receipt_path):
 
 # EDVRonFOOT: --allow-unqualified-game. The qualification pins one game revision
 # because the legacy Oculus route (elite_oculus) proves its SDK call chain per
-# revision; the OpenVR route Elite takes with SteamVR is not revision-specific,
-# and every game-code hook in the DLLs checks its own bytes and stands down on
-# a mismatch. With the flag an Odyssey executable of another revision is
-# accepted with a warning; Horizons and unreadable executables are refused as
-# before, and so is anything that does not name itself Odyssey.
+# revision. d3d11.dll checks the same profile at process attach and refuses to
+# load into Elite when it fails, so on another revision the game does not start
+# until the profile is ported (game build 334473 showed exactly this). The flag
+# exists to stage a build for that porting work: an Odyssey executable of
+# another revision is accepted with a warning that says so; Horizons and
+# unreadable executables are refused as before, and so is anything that does
+# not name itself Odyssey.
 ALLOW_UNQUALIFIED_GAME = False
 
 
@@ -272,8 +274,9 @@ def validate_elite_game(path):
     if ALLOW_UNQUALIFIED_GAME and "odyssey" in named:
         print("[edvr] WARNING: this Elite Dangerous: Odyssey revision%s is not the one this "
               "EDVR build is qualified for; installing anyway (--allow-unqualified-game). "
-              "The legacy Oculus route is unproven on it and stays off; read the flight "
-              "log for the parts that stand down." % which)
+              "With this build installed the game will not start: d3d11.dll refuses to "
+              "load until its Oculus profile is ported to this revision. To play "
+              "meanwhile, run install_edvr.py --suspend (and --resume later)." % which)
         return None
     raise ValueError("This Elite Dangerous: Odyssey revision%s is not one this EDVR "
                      "build is qualified for. Install an EDVR build qualified for "
@@ -2861,7 +2864,7 @@ def self_test():
             ok = False
         except ValueError as exc:
             if "not one this EDVR build is qualified for" not in str(exc) or \
-               "332841" not in str(exc):
+               "334473" not in str(exc):
                 print("unknown Odyssey revision got the wrong message: %s" % exc)
                 ok = False
         legacy_exe = os.path.join(tmp, "gate-legacy.exe")
@@ -2893,8 +2896,16 @@ def self_test():
         ALLOW_UNQUALIFIED_GAME = True
         try:
             try:
-                if validate_elite_game(odyssey_exe) is not None:
+                import contextlib, io
+                said = io.StringIO()
+                with contextlib.redirect_stdout(said):
+                    accepted = validate_elite_game(odyssey_exe)
+                if accepted is not None:
                     print("unqualified Odyssey under the flag returned a profile")
+                    ok = False
+                if "will not start" not in said.getvalue() or "--suspend" not in said.getvalue():
+                    print("the unqualified-game warning does not say the game will not start: %s"
+                          % said.getvalue())
                     ok = False
             except ValueError as exc:
                 print("unqualified Odyssey was refused under the flag: %s" % exc)
