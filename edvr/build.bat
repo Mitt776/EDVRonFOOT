@@ -534,6 +534,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\explorer_cam.cpp" ^
     "src\d3d11\native_vr_probe.cpp" ^
     "src\d3d11\on_foot_hud.cpp" ^
+    "src\d3d11\on_foot_hud_probe.cpp" ^
     "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" "src\d3d11\vscreen_footprint.cpp" ^
     "src\d3d11\binding_shadow.cpp" ^
     "src\d3d11\vr_runtime.cpp" ^
@@ -3045,6 +3046,24 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     "tools\on_foot_hud_test\on_foot_hud_test.cpp" /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: on-foot hud test build failed & exit /b 1 )
 "%BUILD%\on_foot_hud_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_on_foot_hud_probe_test
+echo [edvr] === on_foot_hud_probe_test.exe ===
+REM EDVRonFOOT: build gate for the on-foot HUD probe (src\d3d11\on_foot_hud_probe.h, experimental.on_foot_hud_probe). Part A drives
+REM on_foot_hud_probe_core.h on a fake game node in the rig's memory: which nodes are ours, the mask, the pockets, the view name, the
+REM change filter, the summary, the ring and every line's text. Part B compiles the REAL glue with the real CodeHook on a synthetic
+REM function with the game's prologue: another build and wrong bytes refused with one line, the node forwarded unchanged, the snapshot
+REM after the original, forward only while off, another vtable not read, an unreadable field survived with one line.
+if not exist "%OBJ%\onfoothudprobe" mkdir "%OBJ%\onfoothudprobe"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^
+    /Fo"%OBJ%\onfoothudprobe"\ /Fe"%BUILD%\on_foot_hud_probe_test.exe" ^
+    "tools\on_foot_hud_probe_test\on_foot_hud_probe_test.cpp" "src\d3d11\on_foot_hud_probe.cpp" ^
+    "src\common\code_hook.cpp" "src\common\guard.cpp" "src\common\log.cpp" "src\common\config.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: on-foot hud probe test build failed & exit /b 1 )
+"%BUILD%\on_foot_hud_probe_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_explorer_cam_fade_test
