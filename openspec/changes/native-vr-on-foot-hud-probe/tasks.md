@@ -51,11 +51,11 @@
 
 - [x] 3.1 Исследование: в `## Status` следующий шаг — «прогулка с зондом `.11`, ключ `on_foot_hud_probe`». README
   не трогаем: ключ скрытый. Проверка: `## Status` не длиннее 60 строк.
-- [ ] 3.2 Полная сборка `build.bat` через `edvr\build_edvronfoot.bat` по абсолютному пути. Проверка:
+- [x] 3.2 Полная сборка `build.bat` через `edvr\build_edvronfoot.bat` по абсолютному пути. Проверка:
   - «all gates passed», единственный известный сбой — `weapon_motion`;
   - коммит, тег `v0.19.1-edvronfoot.11`;
   - затем `--dll-only` через обёртку проходит.
-- [ ] 3.3 Установка при закрытой игре.
+- [x] 3.3 Установка при закрытой игре.
   - Сначала `py -3.12 edvr\tools\install_edvr.py --target "C:\Steam\steamapps\common\Elite
     Dangerous\Products\elite-dangerous-odyssey-64" --all --tag edvronfoot --dry-run`, затем без `--dry-run`.
   - В живой `edvr.ini` через Edit — `on_foot_hud_probe = 1` в `[experimental]`.
