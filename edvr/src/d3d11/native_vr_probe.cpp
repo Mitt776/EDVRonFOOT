@@ -46,8 +46,6 @@ std::atomic<uintptr_t> g_watchAddress{0}, g_watchPrevious{0};
 std::atomic<bool> g_watchActive{false};  // between arming and the end of disarming: a hit is recorded, otherwise only taken off
 std::atomic<uintptr_t> g_ownLo{0}, g_ownHi{0};
 nvp::WriterTable g_writers;
-// The install found build 332841 (the cinema-on-foot switch's address is known only then).
-std::atomic<bool> g_identityOk{false};
 
 // ---- the hook side: no lock, no allocation, no log -------------------------------------------------------------------------------
 
@@ -137,6 +135,34 @@ __declspec(noinline) bool sehSwapByte(uint8_t* p, uint8_t from, uint8_t to) noex
                                                                  static_cast<char>(from))) == from;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
+    }
+}
+
+// The image's identity and sections from its own headers, then the switch's pattern in its executable sections (nvp::findCinemaSwitch).
+// False if the headers could not be read or name more sections than fit; a fault while scanning is a not-found.
+constexpr int kMaxSections = 32;
+__declspec(noinline) bool sehFindSwitch(uintptr_t base, nvp::SwitchFind* found, uint32_t* timestamp, uint32_t* imageSize) noexcept {
+    __try {
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+        *timestamp = nt->FileHeader.TimeDateStamp;
+        *imageSize = nt->OptionalHeader.SizeOfImage;
+        const int count = nt->FileHeader.NumberOfSections;
+        if (count > kMaxSections) return false;
+        nvp::ImageSection sections[kMaxSections];
+        const IMAGE_SECTION_HEADER* h = IMAGE_FIRST_SECTION(nt);
+        for (int i = 0; i < count; ++i) {
+            sections[i].rva = h[i].VirtualAddress;
+            sections[i].size = h[i].Misc.VirtualSize;
+            sections[i].execute = (h[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0;
+            sections[i].write = (h[i].Characteristics & IMAGE_SCN_MEM_WRITE) != 0;
+            if (sections[i].rva + static_cast<uint64_t>(sections[i].size) > *imageSize) sections[i].size = 0;  // never past the image
+        }
+        *found = nvp::findCinemaSwitch(reinterpret_cast<const uint8_t*>(base), sections, count);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        *found = nvp::SwitchFind{};
+        return true;
     }
 }
 
@@ -713,15 +739,29 @@ void nativeVrWriterWatchStep(uint64_t nowMs, bool recording, NativeVrProbeSink s
     if (verdict != nvp::kWatchKeep) nativeVrWriterWatchDisarm(verdict, nowMs, sink, ctx);
 }
 
-void nativeVrCinemaSwitchStep(uint8_t* address, bool key, int onFoot, NativeVrProbeSink sink, void* ctx) {
+uint32_t nativeVrCinemaSwitchFind(uintptr_t base, NativeVrProbeSink sink, void* ctx) {
+    nvp::SwitchFind found;
+    uint32_t timestamp = 0, imageSize = 0;
+    const uint64_t startMs = GetTickCount64();
+    char line[400];
+    if (!sehFindSwitch(base, &found, &timestamp, &imageSize)) {
+        say(sink, ctx, "native-vr-on-foot: cinema-on-foot switch not searched: the game's image headers could not be read; the game "
+                       "keeps its cinema on foot");
+        return 0;
+    }
+    if (nvp::formatFind(found, timestamp, imageSize, GetTickCount64() - startMs, line, sizeof(line)) > 0) sink(ctx, line);
+    return found.result == nvp::kFindFound ? found.byteRva : 0;
+}
+
+void nativeVrCinemaSwitchStep(uint8_t* address, uint32_t rva, bool key, int onFoot, NativeVrProbeSink sink, void* ctx) {
     static nvp::SwitchState state;
     static bool saidNoAddress = false;
     static int lastOnFoot = -1;
     char line[400];
     if (!address) {
         if (key && !saidNoAddress)
-            sink(ctx, "native-vr-on-foot: head camera cannot work (the game is not build 332841, see the install line); nothing written; "
-                      "the game keeps its cinema");
+            sink(ctx, "native-vr-on-foot: head camera cannot work (the cinema-on-foot switch was not found, see its line); nothing "
+                      "written; the game keeps its cinema");
         saidNoAddress = key;
         return;
     }
@@ -734,7 +774,7 @@ void nativeVrCinemaSwitchStep(uint8_t* address, bool key, int onFoot, NativeVrPr
         return;
     }
     if (step.kind != nvp::kSwitchAgain || nvp::switchAgainSaid(state.again)) {
-        if (nvp::formatSwitch(step, state, value, onFoot, line, sizeof(line)) > 0) sink(ctx, line);
+        if (nvp::formatSwitch(step, state, value, onFoot, rva, line, sizeof(line)) > 0) sink(ctx, line);
     }
     if (state.ours && onFoot >= 0 && onFoot != lastOnFoot && lastOnFoot >= 0) {
         nvp::formatHeadCameraJournal(onFoot, line, sizeof(line));
@@ -756,7 +796,6 @@ int nativeVrProbeInstall(uintptr_t base, const uintptr_t* targetsOverride, bool 
             return armed;
         }
         g_imageSize.store(imageSize, std::memory_order_relaxed);
-        g_identityOk.store(true, std::memory_order_relaxed);
     }
     g_base.store(base, std::memory_order_relaxed);
     int armed = 0;
@@ -844,6 +883,7 @@ void nativeVrProbeFrameBoundary() {
     static bool on = false, said = false, tried = false;
     static bool onFootKey = false, saidOnFoot = false, saidOnFootUnarmed = false;
     static int armed = 0;
+    static uint32_t switchRva = 0;  // the cinema-on-foot switch, found once at the install (0: not found)
     const Config& cfg = Config::get();
     const uint32_t now = cfg.generation();
     if (now != generation) {
@@ -875,19 +915,23 @@ void nativeVrProbeFrameBoundary() {
         char line[300];
         nvp::formatInstalled(armed, cameraArmed, line, sizeof(line));
         Log::get().note("%s", line);
+        // The switch is data, not a hook, and found by its reader's code: any build where that code is the one match (the hooks
+        // above are build 332841's only).
+        switchRva = nativeVrCinemaSwitchFind(reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)), &logSink, nullptr);
     }
     const bool sourceArmed = nativeVrProbeArmed(nvp::kPointSource);
     if (onFootKey && tried && !sourceArmed && !saidOnFootUnarmed) {
-        Log::get().note("native-vr-on-foot: cannot work: the stereo mode source is not hooked (see the lines above); the game keeps its "
-                        "cinema");
+        if (switchRva)
+            Log::get().note("native-vr-on-foot: the hold (build 332841 only) is not installed (see the lines above); the head camera "
+                            "switch works without it");
+        else
+            Log::get().note("native-vr-on-foot: cannot work: the stereo mode source is not hooked and the cinema-on-foot switch was "
+                            "not found (see the lines above); the game keeps its cinema");
         saidOnFootUnarmed = true;
     }
     nativeVrProbeSetOnFoot(onFootKey && sourceArmed);
-    // The switch is data, not a hook: it needs only the build, which the install checked.
     if (tried)
-        nativeVrCinemaSwitchStep(g_identityOk.load(std::memory_order_relaxed)
-                                     ? reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr)) + nvp::kCinemaSwitchRva
-                                     : nullptr,
+        nativeVrCinemaSwitchStep(switchRva ? reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr)) + switchRva : nullptr, switchRva,
                                  onFootKey, onFoot, &logSink, nullptr);
     nativeVrProbeSetRecording(on && armed > 0);
     if (armed > 0) {

@@ -541,13 +541,112 @@ inline int formatOnFootKey(bool on, bool again, char* out, size_t cap) {
 }
 
 // experimental.native_vr_on_foot's head camera: the game's own cinema-on-foot switch, a byte in its render settings block. The
-// per-frame update 0x28873C0 turns headset stereo (3/4) into cinema (5/6) only while this byte is not 0 AND the view says first
-// person on foot; it is the byte's one reader in build 332841 (0x2887AF9), and in the ship that second condition is never met, so the
-// byte changes nothing there. With the byte 0 the game itself keeps headset stereo on foot -- the source, +0xC8 and the camera all
-// at once, as in the ship -- where the hold put back only the source. The exe's value is 1; the switch writes only 1 -> 0 (key on)
-// and 0 -> 1 (key off, and only a 0 it wrote), and nothing over any other value.
-constexpr uintptr_t kCinemaSwitchRva = 0x5E82B3Eu;
+// per-frame update (0x28873C0 in build 332841, 0x2889A00 in 334473) turns headset stereo (3/4) into cinema (5/6) only while this
+// byte is not 0 AND the view says first person on foot; that test is the byte's one reader (0x2887AF9 / 0x288A139), and in the ship
+// the second condition is never met, so the byte changes nothing there. With the byte 0 the game itself keeps headset stereo on foot
+// -- the source, +0xC8 and the camera all at once, as in the ship -- where the hold put back only the source. The exe's value is 1;
+// the switch writes only 1 -> 0 (key on) and 0 -> 1 (key off, and only a 0 it wrote), and nothing over any other value.
 constexpr uint8_t kCinemaSwitchGame = 1;
+
+// The byte is found by its reader's code, not by a table of builds (the address moved 0x5E82B3E -> 0x5E85B8A between 332841 and
+// 334473; the code around the reader did not). The pattern is the view's question and then the test of the byte:
+//   FF 9r B0 00 00 00       call [reg+0xB0]                 (the view: first person on foot?)
+//   4x 38 mr <disp32>       cmp byte ptr [rip+disp], r8b..r15b (mr: mod 00, rm 101)
+//   74 ??  84 C0  75        je / test al, al / jne
+// The registers are free (a rebuild picks others easily); the shape is not. The byte's RVA is the end of the cmp plus disp32. It is
+// taken only when the pattern is in the game's executable code exactly once and the byte lies inside a writable section; the value
+// test is cinemaSwitchStep's own (1 is written to 0, 0 is the game's own, anything else is refused).
+constexpr size_t kSwitchPatternBytes = 18;
+constexpr uint32_t kSwitchCmpOffset = 6;  // the cmp's first byte, from the pattern's first
+constexpr uint32_t kSwitchCmpBytes = 7;
+inline bool switchPatternAt(const uint8_t* p) {
+    return p[0] == 0xFF && (p[1] & 0xF8) == 0x90 && p[1] != 0x94 && p[2] == 0xB0 && p[3] == 0 && p[4] == 0 && p[5] == 0 &&
+           (p[6] == 0x44 || p[6] == 0x45) && p[7] == 0x38 && (p[8] & 0xC7) == 0x05 && p[13] == 0x74 && p[15] == 0x84 &&
+           p[16] == 0xC0 && p[17] == 0x75;
+}
+struct ImageSection {
+    uint32_t rva = 0, size = 0;  // the section in the loaded image
+    bool execute = false, write = false;
+};
+enum : uint8_t {
+    kFindFound = 0,
+    kFindNone = 1,         // no match in the executable sections
+    kFindMany = 2,         // more than one
+    kFindOutside = 3,      // the one match points outside every section
+    kFindNotWritable = 4,  // ... or into a section that cannot be written
+};
+struct SwitchFind {
+    uint8_t result = kFindNone;
+    uint32_t matches = 0;
+    uint32_t readerRva = 0;  // the cmp's RVA (the first match's)
+    uint32_t byteRva = 0;
+};
+// `image` is the loaded image (or the rig's copy of one); only the executable sections are read.
+inline SwitchFind findCinemaSwitch(const uint8_t* image, const ImageSection* sections, int count) {
+    SwitchFind f;
+    for (int i = 0; i < count; ++i) {
+        const ImageSection& s = sections[i];
+        if (!s.execute || s.size < kSwitchPatternBytes) continue;
+        const uint8_t* p = image + s.rva;
+        const uint8_t* end = p + s.size - kSwitchPatternBytes + 1;
+        while ((p = static_cast<const uint8_t*>(std::memchr(p, 0xFF, static_cast<size_t>(end - p)))) != nullptr) {
+            if (switchPatternAt(p)) {
+                if (++f.matches == 1) {
+                    const uint32_t at = s.rva + static_cast<uint32_t>(p - (image + s.rva));
+                    int32_t disp;
+                    std::memcpy(&disp, p + kSwitchCmpOffset + 3, sizeof(disp));
+                    f.readerRva = at + kSwitchCmpOffset;
+                    f.byteRva = static_cast<uint32_t>(static_cast<int64_t>(f.readerRva) + kSwitchCmpBytes + disp);
+                }
+            }
+            if (++p >= end) break;
+        }
+    }
+    if (f.matches == 0) return f;
+    if (f.matches > 1) {
+        f.result = kFindMany;
+        return f;
+    }
+    f.result = kFindOutside;
+    for (int i = 0; i < count; ++i) {
+        const ImageSection& s = sections[i];
+        if (f.byteRva >= s.rva && f.byteRva - s.rva < s.size) {
+            f.result = s.write ? kFindFound : kFindNotWritable;
+            break;
+        }
+    }
+    return f;
+}
+inline int formatFind(const SwitchFind& f, uint32_t timestamp, uint32_t imageSize, uint64_t ms, char* out, size_t cap) {
+    const char* tail = "nothing will be written there; the game keeps its cinema on foot";
+    switch (f.result) {
+        case kFindFound:
+            return std::snprintf(out, cap,
+                                 "native-vr-on-foot: cinema-on-foot switch found at EliteDangerous64.exe+0x%X (read at +0x%X, the one "
+                                 "call-then-compare of its kind in the game's code; PE stamp 0x%08X, image size 0x%X; %llu ms)",
+                                 f.byteRva, f.readerRva, timestamp, imageSize, static_cast<unsigned long long>(ms));
+        case kFindNone:
+            return std::snprintf(out, cap,
+                                 "native-vr-on-foot: cinema-on-foot switch not found: no call-then-compare of its kind in the game's "
+                                 "code (PE stamp 0x%08X, image size 0x%X; %llu ms); %s",
+                                 timestamp, imageSize, static_cast<unsigned long long>(ms), tail);
+        case kFindMany:
+            return std::snprintf(out, cap,
+                                 "native-vr-on-foot: cinema-on-foot switch not found: %u call-then-compare matches in the game's code, "
+                                 "not one (PE stamp 0x%08X, image size 0x%X); %s",
+                                 f.matches, timestamp, imageSize, tail);
+        case kFindOutside:
+            return std::snprintf(out, cap,
+                                 "native-vr-on-foot: cinema-on-foot switch not found: the one match (read at +0x%X) points outside the "
+                                 "game's image (+0x%X; PE stamp 0x%08X); %s",
+                                 f.readerRva, f.byteRva, timestamp, tail);
+        default:
+            return std::snprintf(out, cap,
+                                 "native-vr-on-foot: cinema-on-foot switch not found: the one match (read at +0x%X) points into a "
+                                 "section that cannot be written (+0x%X; PE stamp 0x%08X); %s",
+                                 f.readerRva, f.byteRva, timestamp, tail);
+    }
+}
 enum : uint8_t {
     kSwitchNone = 0,
     kSwitchSet = 1,       // 1 -> 0: ours from now on
@@ -608,13 +707,14 @@ inline bool switchAgainSaid(uint32_t again) {
     while (again >= 10 && again % 10 == 0) again /= 10;
     return again == 1;
 }
-inline int formatSwitch(const SwitchStep& step, const SwitchState& s, int value, int onFoot, char* out, size_t cap) {
+// `rva` is where the switch was found (findCinemaSwitch).
+inline int formatSwitch(const SwitchStep& step, const SwitchState& s, int value, int onFoot, uint32_t rva, char* out, size_t cap) {
     switch (step.kind) {
         case kSwitchSet:
             return std::snprintf(out, cap,
-                                 "native-vr-on-foot: head camera on: the game's cinema-on-foot switch (EliteDangerous64.exe+0x%llX) 1 -> 0; "
+                                 "native-vr-on-foot: head camera on: the game's cinema-on-foot switch (EliteDangerous64.exe+0x%X) 1 -> 0; "
                                  "on foot the game keeps headset stereo and its headset camera itself, as in the ship (on foot (journal): %s)",
-                                 static_cast<unsigned long long>(kCinemaSwitchRva), onFootText(onFoot));
+                                 rva, onFootText(onFoot));
         case kSwitchAgain:
             return std::snprintf(out, cap, "native-vr-on-foot: head camera: the game put its cinema-on-foot switch back to 1; 0 again (%u time(s))",
                                  s.again);
@@ -631,7 +731,7 @@ inline int formatSwitch(const SwitchStep& step, const SwitchState& s, int value,
                                      "native-vr-on-foot: head camera cannot work (the cinema-on-foot switch could not be read); nothing "
                                      "written there; the hold works as before");
             return std::snprintf(out, cap,
-                                 "native-vr-on-foot: head camera cannot work (the cinema-on-foot switch holds %d, not build 332841's 1); "
+                                 "native-vr-on-foot: head camera cannot work (the cinema-on-foot switch holds %d, not the game's 1); "
                                  "nothing written there; the hold works as before",
                                  value);
         case kSwitchGameOff:

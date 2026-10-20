@@ -1004,13 +1004,13 @@ void partF() {
         char line[400];
         nvp::SwitchState s;
         nvp::SwitchStep r = nvp::cinemaSwitchStep(s, true, 1);
-        nvp::formatSwitch(r, s, 1, 0, line, sizeof(line));
-        check(std::strstr(line, "native-vr-on-foot: head camera on: the game's cinema-on-foot switch (EliteDangerous64.exe+0x5E82B3E) 1 -> 0") &&
+        nvp::formatSwitch(r, s, 1, 0, 0x5E85B8Au, line, sizeof(line));
+        check(std::strstr(line, "native-vr-on-foot: head camera on: the game's cinema-on-foot switch (EliteDangerous64.exe+0x5E85B8A) 1 -> 0") &&
                   std::strstr(line, "on foot (journal): no"),
-              "text: the switch's on line, by its RVA");
+              "text: the switch's on line, by the RVA it was found at");
         nvp::SwitchStep strange;
         strange.kind = nvp::kSwitchStrange;
-        nvp::formatSwitch(strange, s, 7, 0, line, sizeof(line));
+        nvp::formatSwitch(strange, s, 7, 0, 0x5E85B8Au, line, sizeof(line));
         check(std::strstr(line, "head camera cannot work (the cinema-on-foot switch holds 7") && std::strstr(line, "the hold works as before"),
               "text: the refusal says the value and that the hold goes on");
         nvp::formatHeadCameraJournal(1, line, sizeof(line));
@@ -1020,36 +1020,178 @@ void partF() {
     // The glue on a byte of the rig's own, as the frame thread drives it.
     uint8_t game = 1;
     g_lines.clear();
-    nativeVrCinemaSwitchStep(&game, false, 0, &sink, nullptr);
+    nativeVrCinemaSwitchStep(&game, 0x5E85B8Au, false, 0, &sink, nullptr);
     check(game == 1 && g_lines.empty(), "glue switch: key off, the byte and the log are untouched");
-    nativeVrCinemaSwitchStep(&game, true, 0, &sink, nullptr);
+    nativeVrCinemaSwitchStep(&game, 0x5E85B8Au, true, 0, &sink, nullptr);
     check(game == 0 && countLines("head camera on:") == 1, "glue switch: key on, the byte is 0, one line");
-    nativeVrCinemaSwitchStep(&game, true, 0, &sink, nullptr);
+    nativeVrCinemaSwitchStep(&game, 0x5E85B8Au, true, 0, &sink, nullptr);
     check(game == 0 && g_lines.size() == 1, "glue switch: next frame, nothing more");
-    nativeVrCinemaSwitchStep(&game, true, 1, &sink, nullptr);
+    nativeVrCinemaSwitchStep(&game, 0x5E85B8Au, true, 1, &sink, nullptr);
     check(game == 0 && countLines("head camera: on foot (journal)") == 1, "glue switch: on foot by the journal, one line");
     for (int i = 0; i < 1000; ++i) {
         game = 1;
-        nativeVrCinemaSwitchStep(&game, true, 1, &sink, nullptr);
+        nativeVrCinemaSwitchStep(&game, 0x5E85B8Au, true, 1, &sink, nullptr);
     }
     check(game == 0 && countLines("back to 1; 0 again") == 4 && anyLine("(1000 time(s))"),
           "glue switch: the game puts 1 back a thousand times: 0 each time, said at 1, 10, 100, 1000");
-    nativeVrCinemaSwitchStep(&game, true, 0, &sink, nullptr);
+    nativeVrCinemaSwitchStep(&game, 0x5E85B8Au, true, 0, &sink, nullptr);
     check(countLines("back in the ship (journal)") == 1 && game == 0, "glue switch: back in the ship, said, the byte stays 0");
-    nativeVrCinemaSwitchStep(&game, false, 0, &sink, nullptr);
+    nativeVrCinemaSwitchStep(&game, 0x5E85B8Au, false, 0, &sink, nullptr);
     check(game == 1 && countLines("head camera off: the cinema-on-foot switch is the game's 1 again") == 1,
           "glue switch: key off, the game's 1 is back");
     uint8_t odd = 7;
     g_lines.clear();
-    nativeVrCinemaSwitchStep(&odd, true, 0, &sink, nullptr);
-    nativeVrCinemaSwitchStep(&odd, true, 0, &sink, nullptr);
+    nativeVrCinemaSwitchStep(&odd, 0x5E85B8Au, true, 0, &sink, nullptr);
+    nativeVrCinemaSwitchStep(&odd, 0x5E85B8Au, true, 0, &sink, nullptr);
     check(odd == 7 && countLines("head camera cannot work") == 1, "glue switch: an unexpected value is left alone, said once");
-    nativeVrCinemaSwitchStep(&odd, false, 0, &sink, nullptr);
+    nativeVrCinemaSwitchStep(&odd, 0x5E85B8Au, false, 0, &sink, nullptr);
     g_lines.clear();
-    nativeVrCinemaSwitchStep(nullptr, true, 0, &sink, nullptr);
-    nativeVrCinemaSwitchStep(nullptr, true, 0, &sink, nullptr);
-    check(countLines("head camera cannot work (the game is not build 332841") == 1, "glue switch: another build, said once");
-    nativeVrCinemaSwitchStep(nullptr, false, 0, &sink, nullptr);
+    nativeVrCinemaSwitchStep(nullptr, 0, true, 0, &sink, nullptr);
+    nativeVrCinemaSwitchStep(nullptr, 0, true, 0, &sink, nullptr);
+    check(countLines("head camera cannot work (the cinema-on-foot switch was not found") == 1, "glue switch: not found, said once");
+    nativeVrCinemaSwitchStep(nullptr, 0, false, 0, &sink, nullptr);
+}
+
+// ---- Part G: finding the switch by its reader's code ------------------------------------------------------------------------------
+// A synthetic image: code at 0x1000 (0x1000 bytes, execute), data at 0x2000 (0x800, write), read-only data at 0x2800 (0x800).
+constexpr uint32_t kImgText = 0x1000, kImgData = 0x2000, kImgRdata = 0x2800, kImgSize = 0x3000;
+// The pattern at `at` (an RVA) pointing at `target`; `call` and `cmp` are the two register-bearing bytes (FF 9r, 4x 38 mr).
+void putPattern(std::vector<uint8_t>& img, uint32_t at, uint32_t target, uint8_t call = 0x90, uint8_t rex = 0x44, uint8_t mr = 0x2D) {
+    const uint8_t head[] = {0xFF, call, 0xB0, 0, 0, 0, rex, 0x38, mr};
+    std::memcpy(&img[at], head, sizeof(head));
+    const int32_t disp = static_cast<int32_t>(target) - static_cast<int32_t>(at + nvp::kSwitchCmpOffset + nvp::kSwitchCmpBytes);
+    std::memcpy(&img[at + 9], &disp, sizeof(disp));
+    const uint8_t tail[] = {0x74, 0x05, 0x84, 0xC0, 0x75};
+    std::memcpy(&img[at + 13], tail, sizeof(tail));
+}
+nvp::SwitchFind findIn(const std::vector<uint8_t>& img) {
+    nvp::ImageSection s[3];
+    s[0].rva = kImgText, s[0].size = 0x1000, s[0].execute = true;
+    s[1].rva = kImgData, s[1].size = 0x800, s[1].write = true;
+    s[2].rva = kImgRdata, s[2].size = 0x800;
+    return nvp::findCinemaSwitch(img.data(), s, 3);
+}
+
+void partG() {
+    {
+        std::vector<uint8_t> img(kImgSize, 0xCC);
+        nvp::SwitchFind f = findIn(img);
+        check(f.result == nvp::kFindNone && f.matches == 0, "find: no pattern, not found");
+        putPattern(img, 0x1100, 0x2010);
+        f = findIn(img);
+        check(f.result == nvp::kFindFound && f.matches == 1 && f.readerRva == 0x1106 && f.byteRva == 0x2010,
+              "find: one pattern, the byte's RVA is the cmp's end plus disp32");
+        putPattern(img, 0x1800, 0x2020);
+        f = findIn(img);
+        check(f.result == nvp::kFindMany && f.matches == 2, "find: two patterns, refused with the count");
+    }
+    {
+        std::vector<uint8_t> img(kImgSize, 0xCC);
+        putPattern(img, 0x1100, 0x2900);
+        check(findIn(img).result == nvp::kFindNotWritable, "find: the byte in a section that cannot be written, refused");
+        putPattern(img, 0x1100, 0x5000);
+        check(findIn(img).result == nvp::kFindOutside, "find: the byte outside every section, refused");
+        putPattern(img, 0x1100, 0x0FF0);
+        check(findIn(img).result == nvp::kFindOutside, "find: the byte before the first section, refused");
+    }
+    {
+        std::vector<uint8_t> img(kImgSize, 0xCC);
+        putPattern(img, 0x1100, 0x2010, 0x93, 0x45, 0x3D);
+        nvp::SwitchFind f = findIn(img);
+        check(f.result == nvp::kFindFound && f.byteRva == 0x2010, "find: other registers in the call and the cmp, found");
+        std::vector<uint8_t> sib(kImgSize, 0xCC);
+        putPattern(sib, 0x1100, 0x2010, 0x94);
+        check(findIn(sib).result == nvp::kFindNone, "find: FF 94 (a SIB byte follows) is not the pattern");
+        std::vector<uint8_t> notRip(kImgSize, 0xCC);
+        putPattern(notRip, 0x1100, 0x2010, 0x90, 0x44, 0x6D);
+        check(findIn(notRip).result == nvp::kFindNone, "find: a cmp that is not RIP-relative is not the pattern");
+        std::vector<uint8_t> noRex(kImgSize, 0xCC);
+        putPattern(noRex, 0x1100, 0x2010, 0x90, 0x40);
+        check(findIn(noRex).result == nvp::kFindNone, "find: a cmp without REX.R is not the pattern");
+        std::vector<uint8_t> inData(kImgSize, 0xCC);
+        putPattern(inData, 0x2100, 0x2010);
+        check(findIn(inData).result == nvp::kFindNone, "find: the pattern in a section that does not execute is not looked at");
+        std::vector<uint8_t> atEnd(kImgSize, 0xCC);
+        putPattern(atEnd, kImgText + 0x1000 - static_cast<uint32_t>(nvp::kSwitchPatternBytes), 0x2010);
+        check(findIn(atEnd).result == nvp::kFindFound, "find: the pattern in the code section's last bytes, found");
+        std::vector<uint8_t> broken(kImgSize, 0xCC);
+        putPattern(broken, 0x1100, 0x2010);
+        broken[0x1100 + 17] = 0x74;
+        check(findIn(broken).result == nvp::kFindNone, "find: the last branch not a jne, not the pattern");
+    }
+    {
+        char line[400];
+        nvp::SwitchFind f;
+        f.result = nvp::kFindFound, f.matches = 1, f.readerRva = 0x288A139, f.byteRva = 0x5E85B8A;
+        nvp::formatFind(f, 0x6ACD6F3D, 0x640B000, 12, line, sizeof(line));
+        check(std::strstr(line, "native-vr-on-foot: cinema-on-foot switch found at EliteDangerous64.exe+0x5E85B8A (read at +0x288A139") &&
+                  std::strstr(line, "PE stamp 0x6ACD6F3D") && std::strstr(line, "12 ms"),
+              "text: found, with the reader, the build and the time");
+        f.result = nvp::kFindNone;
+        nvp::formatFind(f, 1, 2, 3, line, sizeof(line));
+        check(std::strstr(line, "not found: no call-then-compare") && std::strstr(line, "the game keeps its cinema on foot"),
+              "text: none");
+        f.result = nvp::kFindMany, f.matches = 3;
+        nvp::formatFind(f, 1, 2, 3, line, sizeof(line));
+        check(std::strstr(line, "not found: 3 call-then-compare matches") != nullptr, "text: many, with the count");
+        f.result = nvp::kFindNotWritable;
+        nvp::formatFind(f, 1, 2, 3, line, sizeof(line));
+        check(std::strstr(line, "cannot be written (+0x5E85B8A") != nullptr, "text: not writable, with the address");
+        f.result = nvp::kFindOutside;
+        nvp::formatFind(f, 1, 2, 3, line, sizeof(line));
+        check(std::strstr(line, "outside the game's image (+0x5E85B8A") != nullptr, "text: outside, with the address");
+    }
+
+    // The glue on a synthetic PE image in memory: its own headers name the sections.
+    auto makePe = [](std::vector<uint8_t>& img, int sections) {
+        img.assign(kImgSize, 0xCC);
+        std::memset(img.data(), 0, 0x400);
+        auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(img.data());
+        dos->e_magic = IMAGE_DOS_SIGNATURE;
+        dos->e_lfanew = 0x80;
+        auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(img.data() + 0x80);
+        nt->Signature = IMAGE_NT_SIGNATURE;
+        nt->FileHeader.Machine = IMAGE_FILE_MACHINE_AMD64;
+        nt->FileHeader.NumberOfSections = static_cast<WORD>(sections);
+        nt->FileHeader.TimeDateStamp = 0x6ACD6F3D;
+        nt->FileHeader.SizeOfOptionalHeader = sizeof(IMAGE_OPTIONAL_HEADER64);
+        nt->OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR64_MAGIC;
+        nt->OptionalHeader.SizeOfImage = kImgSize;
+        IMAGE_SECTION_HEADER* h = IMAGE_FIRST_SECTION(nt);
+        const uint32_t rvas[3] = {kImgText, kImgData, kImgRdata}, sizes[3] = {0x1000, 0x800, 0x800};
+        const DWORD flags[3] = {IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE, IMAGE_SCN_MEM_READ};
+        for (int i = 0; i < 3 && i < sections; ++i) {
+            h[i].VirtualAddress = rvas[i];
+            h[i].Misc.VirtualSize = sizes[i];
+            h[i].Characteristics = flags[i];
+        }
+    };
+    std::vector<uint8_t> pe;
+    makePe(pe, 3);
+    putPattern(pe, 0x1100, 0x2010);
+    g_lines.clear();
+    const uint32_t rva = nativeVrCinemaSwitchFind(reinterpret_cast<uintptr_t>(pe.data()), &sink, nullptr);
+    check(rva == 0x2010 && countLines("cinema-on-foot switch found at EliteDangerous64.exe+0x2010 (read at +0x1106") == 1 &&
+              anyLine("PE stamp 0x6ACD6F3D, image size 0x3000"),
+          "glue find: the image's own headers, the one pattern, one line");
+    pe[0x2010] = 1;
+    nativeVrCinemaSwitchStep(&pe[0x2010], rva, true, 0, &sink, nullptr);
+    check(pe[0x2010] == 0 && anyLine("switch (EliteDangerous64.exe+0x2010) 1 -> 0"), "glue find: the step writes the found byte, named");
+    nativeVrCinemaSwitchStep(&pe[0x2010], rva, false, 0, &sink, nullptr);
+    check(pe[0x2010] == 1, "glue find: key off, the game's 1 is back");
+    makePe(pe, 40);
+    g_lines.clear();
+    check(nativeVrCinemaSwitchFind(reinterpret_cast<uintptr_t>(pe.data()), &sink, nullptr) == 0 && countLines("not searched") == 1,
+          "glue find: more sections than fit, not searched, said");
+    makePe(pe, 3);
+    g_lines.clear();
+    check(nativeVrCinemaSwitchFind(reinterpret_cast<uintptr_t>(pe.data()), &sink, nullptr) == 0 && countLines("not found: no call") == 1,
+          "glue find: no pattern, 0 and one line");
+    void* noAccess = VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_NOACCESS);
+    g_lines.clear();
+    check(noAccess && nativeVrCinemaSwitchFind(reinterpret_cast<uintptr_t>(noAccess), &sink, nullptr) == 0 && countLines("not found") == 1,
+          "glue find: unreadable headers fault into a not-found, no crash");
+    if (noAccess) VirtualFree(noAccess, 0, MEM_RELEASE);
 }
 }  // namespace
 
@@ -1061,6 +1203,7 @@ int main(int argc, char** argv) {
     partA();
     partB();
     partF();
+    partG();
     std::printf("%s: native_vr_probe_test, %d checks, %d failed\n", g_failures ? "FAIL" : "PASS", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

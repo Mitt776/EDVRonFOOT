@@ -10,7 +10,7 @@
 // mode the game wants, X+0x20, which a render task copies into the renderer's request once a frame and by which it decides whether to
 // compute the headset eyes' projections. The source hook puts headset stereo in place of a cinema mode found there and keeps it there
 // until the game sets a mode of its own or the journal says the commander boarded. It never writes a cinema mode. The same key also
-// turns off the game's own cinema-on-foot switch (+0x5E82B3E, 1 -> 0; nativeVrCinemaSwitchStep), so the game itself keeps headset
+// turns off the game's own cinema-on-foot switch (found by its reader's code; 1 -> 0; nativeVrCinemaSwitchStep), so the game itself keeps headset
 // stereo and its headset camera on foot and the hold has nothing to do; the hold stays as the fallback.
 //
 // THREADS. The hooks run on whichever game thread calls them. They take no lock, allocate nothing and write no log line: they read
@@ -83,9 +83,12 @@ void nativeVrWriterWatchDisarm(uint8_t verdict, uint64_t nowMs, NativeVrProbeSin
 //   Once a frame: arm on a hold start's request, drain, and take it off by nvp::watchVerdict.
 void nativeVrWriterWatchStep(uint64_t nowMs, bool recording, NativeVrProbeSink sink, void* ctx);
 
-// experimental.native_vr_on_foot's head camera (nvp::cinemaSwitchStep): once a frame, the game's cinema-on-foot switch at `address`
-// (null: not build 332841) is turned 1 -> 0 while the key is on, and our 0 back to 1 when it goes off, with a line on each change and
-// when the journal's on-foot answer changes while the switch is ours. Frame thread.
-void nativeVrCinemaSwitchStep(uint8_t* address, bool key, int onFoot, NativeVrProbeSink sink, void* ctx);
+// experimental.native_vr_on_foot's head camera. Find: the switch's RVA in the image at `base`, by its reader's code
+// (nvp::findCinemaSwitch over the image's own section table), with one line saying where or why not; 0 if not found. Once, at the
+// install. Step (nvp::cinemaSwitchStep): once a frame, the switch at `address` (null: not found; `rva` names it in the lines) is
+// turned 1 -> 0 while the key is on, and our 0 back to 1 when it goes off, with a line on each change and when the journal's on-foot
+// answer changes while the switch is ours. Frame thread.
+uint32_t nativeVrCinemaSwitchFind(uintptr_t base, NativeVrProbeSink sink, void* ctx);
+void nativeVrCinemaSwitchStep(uint8_t* address, uint32_t rva, bool key, int onFoot, NativeVrProbeSink sink, void* ctx);
 
 }  // namespace edvr
