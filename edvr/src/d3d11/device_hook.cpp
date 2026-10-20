@@ -43,6 +43,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "journal_watch.h"
 #include "explorer_cam.h"   // explorerCamFrameBoundary (the frame tick) and explorerCamShutdown (the avatar dither-fade global goes back at an unload)
 #include "native_vr_probe.h"   // EDVRonFOOT: nativeVrProbeFrameBoundary (the frame tick: config, install, drain)
+#include "on_foot_hud.h"       // EDVRonFOOT: onFootHudFrameBoundary
 #include "ui_surfaces.h"   // the glyph atlas and sizing chain instruments
 #include "ui_panel_scale.h" // uiPanelScaleShutdown: the panel operands put back
 #include "ui_sizing_math.h" // uiDisplaySizeFromXml: DisplaySettings.xml, for the panel budget
@@ -1214,6 +1215,7 @@ EDVR_BOUNDARY_TICK(tkCelestialStatus, "celestial_status");
 EDVR_BOUNDARY_TICK(tkExplorerCam, "explorer_cam");
 // EDVRonFOOT: the native-VR-on-foot probe (native_vr_probe.h). Like Explorer Cam it must run on every owned Present.
 EDVR_BOUNDARY_TICK(tkNativeVrProbe, "native_vr_probe");
+EDVR_BOUNDARY_TICK(tkOnFootHud, "on_foot_hud");
 EDVR_BOUNDARY_TICK(tkFssModeLatch, "fss_mode_latch");
 EDVR_BOUNDARY_TICK(tkMenu, "menu");
 EDVR_BOUNDARY_TICK(tkBindingBoundary, "binding_boundary");
@@ -1560,6 +1562,9 @@ void presentFrameBoundary() {
     // every frame too, so binding it live arms the feature on the next one.
     tkExplorerCam.run([] { explorerCamFrameBoundary(static_cast<uint32_t>(g_state->frameCounter)); });
     tkNativeVrProbe.run([] { nativeVrProbeFrameBoundary(); });
+    // EDVRonFOOT: the on-foot HUD (on_foot_hud.h): its keys, the journal, the draw flag, the frame's panels, the panel key and the summary;
+    // before vScreenFrameBoundary below, which samples the draw gate the flag feeds.
+    tkOnFootHud.run([] { onFootHudFrameBoundary(); });
     tkFssModeLatch.run(tickFssModeLatch);
     // The settings menu (docs/settings-menu.md): its summon key, its
     // navigation keys and head-aim, its fade, the keyboard gate that

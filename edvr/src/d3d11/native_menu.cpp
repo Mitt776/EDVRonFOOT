@@ -1,6 +1,8 @@
 #include "native_menu.h"
 #include "menu_panel.h"
 #include "input_gate.h"
+#include "on_foot_hud.h"
+#include "on_foot_hud_core.h"
 #include "../common/frame_flag.h"
 #include <atomic>
 #include <cmath>
@@ -104,33 +106,55 @@ HRESULT WINAPI treat(void* context, uint32_t eye, ID3D11Texture2D* source,
   if (!desc.Width || !desc.Height || desc.ArraySize != 1 || desc.MipLevels != 1 ||
       desc.SampleDesc.Count != 1 || desc.SampleDesc.Quality || desc.Usage != D3D11_USAGE_DEFAULT ||
       desc.CPUAccessFlags) return E_INVALIDARG;
-  float alpha = 0; uint32_t stamp = 0;
-  if (!edvr::menuVisible(&alpha, &stamp) || alpha <= 0.f) return S_FALSE;
-  float anchor[12]{}, yaw = 0, pitch = 0;
-  if (edvr::menuHeadLock(&yaw, &pitch)) {
-    if (!std::isfinite(yaw) || !std::isfinite(pitch)) return E_INVALIDARG;
-    headLockAnchor(s->head, yaw, pitch, anchor);
-  } else if (!edvr::menuAnchor(anchor, nullptr)) return S_FALSE;
-  if (!rigid(anchor)) return E_INVALIDARG;
   const auto* eyePose = s->eyes[eye];
-  float transform[12]{};
-  for (int i = 0; i < 3; ++i) {
-    for (int j = 0; j < 3; ++j) transform[i*3+j] = anchor[i]*eyePose[j] + anchor[4+i]*eyePose[4+j] + anchor[8+i]*eyePose[8+j];
-    transform[9+i] = anchor[i]*(eyePose[3]-anchor[3]) + anchor[4+i]*(eyePose[7]-anchor[7]) + anchor[8+i]*(eyePose[11]-anchor[11]);
-  }
+  auto toEye = [eyePose](const float* anchor, float* transform) {
+    for (int i = 0; i < 3; ++i) {
+      for (int j = 0; j < 3; ++j) transform[i*3+j] = anchor[i]*eyePose[j] + anchor[4+i]*eyePose[4+j] + anchor[8+i]*eyePose[8+j];
+      transform[9+i] = anchor[i]*(eyePose[3]-anchor[3]) + anchor[4+i]*(eyePose[7]-anchor[7]) + anchor[8+i]*(eyePose[11]-anchor[11]);
+    }
+  };
   // These signed physical magnitudes also represent an off-centre frustum.
   const float physical[4] = {-s->frusta[eye][0], s->frusta[eye][1], s->frusta[eye][3], -s->frusta[eye][2]};
   struct FrustumScope {
     explicit FrustumScope(const float* value) { edvr::menuPanelSetNativeFrustum(value); }
     ~FrustumScope() { edvr::menuPanelClearNativeFrustum(); }
   } frustumScope(physical);
-  auto* treated = static_cast<ID3D11Texture2D*>(edvr::menuPanelCompositeNative(source, int(eye), box, transform));
-  if (!treated) return S_FALSE;
-  treated->AddRef(); *output = treated;
+  // Every treated texture is region-sized and keeps the source's orientation; these bounds say so.
   const bool flipU = box && box[0] > box[2], flipV = box && box[1] > box[3];
-  outBox[0] = flipU ? 1.f : 0.f; outBox[2] = flipU ? 0.f : 1.f;
-  outBox[1] = flipV ? 1.f : 0.f; outBox[3] = flipV ? 0.f : 1.f;
-  return S_OK;
+  const float treatedBox[4] = {flipU ? 1.f : 0.f, flipV ? 1.f : 0.f, flipU ? 0.f : 1.f, flipV ? 0.f : 1.f};
+  auto deliver = [&](ID3D11Texture2D* treated) -> HRESULT {
+    if (!treated) return S_FALSE;
+    treated->AddRef(); *output = treated;
+    std::memcpy(outBox, treatedBox, sizeof(treatedBox));
+    return S_OK;
+  };
+  // EDVRonFOOT: the game's on-foot interface first (on_foot_hud.h), under the menu: the menu below composites over its result.
+  ID3D11Texture2D* hud = nullptr;
+  edvr::OnFootHudSheet sheet;
+  if (edvr::onFootHudSheetForEye(s->device, eye, &sheet)) {
+    float hudAnchor[12]{}, hudTransform[12]{};
+    if (sheet.anchor == 1) edvr::ofh::bodyAnchor(s->head, hudAnchor);
+    else headLockAnchor(s->head, 0, 0, hudAnchor);
+    toEye(hudAnchor, hudTransform);
+    edvr::MenuGeometry g;
+    g.dist = edvr::ofh::kDistance; g.curve = edvr::ofh::kCurve; g.halfW = edvr::ofh::halfWidth(sheet.widthDeg);
+    g.shift = 0.f; g.alpha = 1.f;
+    hud = static_cast<ID3D11Texture2D*>(edvr::menuPanelCompositeSheet(source, int(eye), box, hudTransform, sheet.srv, sheet.aspect, g));
+  }
+  ID3D11Texture2D* menuSource = hud ? hud : source;
+  const float* menuBox = hud ? treatedBox : box;
+  float alpha = 0; uint32_t stamp = 0;
+  if (!edvr::menuVisible(&alpha, &stamp) || alpha <= 0.f) return deliver(hud);
+  float anchor[12]{}, yaw = 0, pitch = 0;
+  if (edvr::menuHeadLock(&yaw, &pitch)) {
+    if (!std::isfinite(yaw) || !std::isfinite(pitch)) return E_INVALIDARG;
+    headLockAnchor(s->head, yaw, pitch, anchor);
+  } else if (!edvr::menuAnchor(anchor, nullptr)) return deliver(hud);
+  if (!rigid(anchor)) return E_INVALIDARG;
+  float transform[12]{};
+  toEye(anchor, transform);
+  auto* treated = static_cast<ID3D11Texture2D*>(edvr::menuPanelCompositeNative(menuSource, int(eye), menuBox, transform));
+  return deliver(treated ? treated : hud);
 }
 HRESULT WINAPI close(void* context) {
   std::lock_guard<std::mutex> lock(mutex);

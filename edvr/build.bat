@@ -533,6 +533,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\transition_flash_eye_base.cpp" ^
     "src\d3d11\explorer_cam.cpp" ^
     "src\d3d11\native_vr_probe.cpp" ^
+    "src\d3d11\on_foot_hud.cpp" ^
     "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" "src\d3d11\vscreen_footprint.cpp" ^
     "src\d3d11\binding_shadow.cpp" ^
     "src\d3d11\vr_runtime.cpp" ^
@@ -3030,6 +3031,20 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: native vr probe test build failed & exit /b 1 )
 "%BUILD%\native_vr_probe_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_on_foot_hud_test
+echo [edvr] === on_foot_hud_test.exe ===
+REM EDVRonFOOT: build gate for the on-foot HUD (src\d3d11\on_foot_hud_core.h, experimental.native_vr_on_foot_hud). Drives the pure half on
+REM synthetic frames: the .9 census's panels ranked (2412x1449 the main one), the game's own composite in the frame shows nothing, no panels,
+REM equal counts, the panel key stepping 1 -> 2 -> 3 -> 1 and a count that changes in the middle, the body anchor after a head turn and a
+REM seated-space turn, the decision order, the change latch and its budget, wrong key values, and every line's text.
+if not exist "%OBJ%\onfoothud" mkdir "%OBJ%\onfoothud"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\onfoothud"\ /Fe"%BUILD%\on_foot_hud_test.exe" ^
+    "tools\on_foot_hud_test\on_foot_hud_test.cpp" /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: on-foot hud test build failed & exit /b 1 )
+"%BUILD%\on_foot_hud_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_explorer_cam_fade_test

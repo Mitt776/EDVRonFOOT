@@ -31,6 +31,7 @@
 struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct ID3D11Texture2D;
+struct ID3D11ShaderResourceView;
 struct IDXGISwapChain;
 
 namespace edvr {
@@ -42,6 +43,15 @@ void menuPanelSetNativeFrustum(const float tans[4]);
 void menuPanelClearNativeFrustum();
 void* menuPanelCompositeNative(ID3D11Texture2D* src, int eye, const float* bounds,
                                const float xf[12]);
+struct MenuGeometry;
+// EDVRonFOOT: the same composite for any premultiplied sheet -- the on-foot
+// HUD's copy of the game's interface panel (on_foot_hud.h). `aspect` is the
+// sheet's height over its width; `g` places it (shift 0 for a sheet that is
+// all card). Its own output textures, so the menu can be composited over the
+// result in the same treat; the native frustum must be set, as for the menu.
+void* menuPanelCompositeSheet(ID3D11Texture2D* src, int eye, const float* bounds,
+                              const float xf[12], ID3D11ShaderResourceView* sheet,
+                              float aspect, const MenuGeometry& g);
 
 enum MenuLineStyle : uint8_t {
     kMenuRow = 0,       // label left, value right

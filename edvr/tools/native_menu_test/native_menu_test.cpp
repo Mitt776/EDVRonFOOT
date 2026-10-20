@@ -8,6 +8,7 @@
 #include "../../src/common/system_d3d11.h"
 #include "../../src/common/runtime_profile.h"
 #include "../../src/d3d11/gpu_census.h"
+#include "../../src/d3d11/on_foot_hud.h"
 #include <openxr/openxr.h>
 #include <d3d11.h>
 #include <wrl/client.h>
@@ -38,6 +39,9 @@ thread_local bool g_flatComputeInternal = false;
 // perfMonitorNoteEvent above.
 bool gpuCensusBegin(ID3D11DeviceContext*, GpuCensusSection) noexcept { return false; }
 void gpuCensusEnd(ID3D11DeviceContext*, GpuCensusSection) noexcept {}
+// EDVRonFOOT: the on-foot HUD (on_foot_hud.cpp: the draw census, the journal) is not linked here. With no sheet, treat is the menu's
+// alone, which is what this rig pins.
+bool onFootHudSheetForEye(ID3D11Device*, uint32_t, OnFootHudSheet*) { return false; }
 }
 
 static bool readPixels(ID3D11Device* d, ID3D11DeviceContext* c,

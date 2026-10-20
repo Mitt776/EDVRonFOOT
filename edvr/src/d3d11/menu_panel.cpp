@@ -1146,24 +1146,28 @@ bool makeTex(ID3D11Device* dev, uint32_t w, uint32_t h, DXGI_FORMAT texFmt, DXGI
     return true;
 }
 
-void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf,
-                     bool flat = false) {
-    MenuGeometry g;
-    {
-        std::lock_guard<std::mutex> lock(g_geomMutex);
-        g = g_geom;
-    }
-    if (!(g.alpha > 0.0f) || !g_panelSrv || g_panelW <= 0 || g_panelH <= 0) return nullptr;
-    if (g.overlayRaster) {
-        // The menu tick publishes geometry before it can upload the worker's
-        // finished raster. Use the width belonging to the texture that is
-        // actually live, and suppress the draw while no overlay raster is
-        // available, rather than borrowing a stale menu/toast width.
-        const float widthDeg = g_panelWidthDeg.load();
-        if (!(widthDeg > 0.0f) || !(g.dist > 0.0f)) return nullptr;
-        g.halfW = g.dist * tanf(widthDeg * 0.5f * 0.0174532925f);
-    }
+// EDVRonFOOT: the on-foot HUD's sheet (on_foot_hud.h) goes through the same
+// pass with the game's panel in place of the raster. Its own output textures,
+// so the menu can composite over the sheet's result; its own failure lines;
+// none of the menu's side effects (its timer ring, its census section, its
+// drawn flag, its first-composite line).
+EyeState g_sheetEye[2];
+bool     g_sheetFailNoted = false;
+FaultBudget g_sheetBudget("onFootHudSheet", 8);
 
+void sheetFailOnce(const char* what) {
+    if (g_sheetFailNoted) return;
+    g_sheetFailNoted = true;
+    Log::get().note("on-foot hud: %s; the interface sheet is not drawn.", what);
+}
+
+// One sheet over one eye: `sheetSrv` premultiplied, `aspect` its height over
+// its width, `g` where it sits. `menu` says whether this is the settings
+// menu's raster (its notes, timer and census) or another sheet.
+void* compositeSheet(void* srcTex, int eye, const float* bounds, const float* xf, bool flat,
+                     MenuGeometry g, ID3D11ShaderResourceView* sheetSrv, float aspect,
+                     EyeState* eyes, bool menu) {
+    auto fail = [menu](const char* what) { if (menu) failOnce(what); else sheetFailOnce(what); };
     ID3D11Texture2D* src = nullptr;
     static_cast<IUnknown*>(srcTex)->QueryInterface(__uuidof(ID3D11Texture2D),
                                                    reinterpret_cast<void**>(&src));
@@ -1171,13 +1175,13 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
     D3D11_TEXTURE2D_DESC sd{};
     src->GetDesc(&sd);
     bool ok = sd.SampleDesc.Count == 1 && sd.ArraySize == 1 && sd.MipLevels == 1;
-    if (!ok) failOnce("the outgoing texture is multisampled or arrayed, a kind this pass does not handle");
+    if (!ok) fail("the outgoing texture is multisampled or arrayed, a kind this pass does not handle");
 
     uint32_t region[4] = {};
     bool flipU = false, flipV = false;
     if (ok && !supersampleRegionFromBounds(sd.Width, sd.Height, bounds, region, &flipU, &flipV)) {
         ok = false;
-        failOnce("the Submit bounds name no usable eye region");
+        fail("the Submit bounds name no usable eye region");
     }
     const uint32_t regionW = ok ? region[2] - region[0] : 0;
     const uint32_t regionH = ok ? region[3] - region[1] : 0;
@@ -1186,7 +1190,9 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
     DXGI_FORMAT viewFmt = ok ? viewFormatOf(sd.Format, &linear) : DXGI_FORMAT_UNKNOWN;
     if (ok && viewFmt == DXGI_FORMAT_UNKNOWN) {
         ok = false;
-        if (!g_fmtNoted) {
+        if (!menu) {
+            sheetFailOnce("the eye texture's format is one this pass does not handle");
+        } else if (!g_fmtNoted) {
             g_fmtNoted = true;
             Log::get().note("menu panel: the outgoing texture's format (DXGI_FORMAT %d) is one "
                             "this pass does not handle; the panel is not drawn. Please report "
@@ -1214,7 +1220,7 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
         bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
         ok = SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &g_cb));
-        if (!ok) failOnce("the parameter buffer could not be created");
+        if (!ok) fail("the parameter buffer could not be created");
     }
     if (ok && !g_samp) {
         D3D11_SAMPLER_DESC smp{};
@@ -1224,10 +1230,10 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
         smp.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
         smp.MaxLOD = D3D11_FLOAT32_MAX;
         ok = SUCCEEDED(dev->CreateSamplerState(&smp, &g_samp));
-        if (!ok) failOnce("the sampler could not be created");
+        if (!ok) fail("the sampler could not be created");
     }
 
-    EyeState& e = g_eye[eye];
+    EyeState& e = eyes[eye];
     ID3D11ShaderResourceView* inSrv = nullptr;
     bool viaCopy = false;
     if (ok) {
@@ -1265,7 +1271,7 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
         }
         if (!inSrv) {
             ok = false;
-            failOnce("the outgoing texture refuses a shader view and could not be copied");
+            fail("the outgoing texture refuses a shader view and could not be copied");
         }
     }
     if (ok && (!e.outTex || e.outW != regionW || e.outH != regionH || e.outFmt != sd.Format)) {
@@ -1279,7 +1285,7 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
             e.outFmt = sd.Format;
         } else {
             ok = false;
-            failOnce("the output texture could not be created");
+            fail("the output texture could not be created");
         }
     }
 
@@ -1301,9 +1307,8 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
         // the eye (a look away from a world-anchored panel): the whole
         // region, which the shader answers pixel by pixel.
         int32_t box[4] = {0, 0, static_cast<int32_t>(regionW), static_cast<int32_t>(regionH)};
-        // Read the aspect ONCE: a raster landing between two reads would
-        // give the culling box and the shader different panels for a frame.
-        const float aspect = g_panelAspect.load();
+        // The aspect was read ONCE by the caller: a raster landing between two
+        // reads would give the culling box and the shader different panels.
         float flatPose[12]{};
         if (flat && aspect > 0.0f) {
             const float fitHeight = 0.85f * static_cast<float>(regionH) /
@@ -1328,8 +1333,8 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
             src->Release();
             return nullptr;
         }
-        pollQueries(ctx);
-        const int qs = acquireQuery(dev, ctx);
+        if (menu) pollQueries(ctx);
+        const int qs = menu ? acquireQuery(dev, ctx) : -1;
         D3D11_BOX rb{};
         rb.left = region[0];
         rb.top = region[1];
@@ -1352,8 +1357,10 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
             for (int i = 0; i < 4; ++i) p.region[i] = static_cast<int32_t>(region[i]);
         }
         for (int i = 0; i < 4; ++i) p.box[i] = box[i];
-        g_lastBoxW = static_cast<uint32_t>(box[2] - box[0]);
-        g_lastBoxH = static_cast<uint32_t>(box[3] - box[1]);
+        if (menu) {
+            g_lastBoxW = static_cast<uint32_t>(box[2] - box[0]);
+            g_lastBoxH = static_cast<uint32_t>(box[3] - box[1]);
+        }
         p.outSize[0] = static_cast<int32_t>(regionW);
         p.outSize[1] = static_cast<int32_t>(regionH);
         p.flipV = flipV ? 1 : 0;
@@ -1389,7 +1396,7 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
 
             ID3D11ShaderResourceView* nullSrv[2] = {};
             ID3D11UnorderedAccessView* nullUav = nullptr;
-            ID3D11ShaderResourceView* setSrv[2] = {inSrv, g_panelSrv};
+            ID3D11ShaderResourceView* setSrv[2] = {inSrv, sheetSrv};
             ctx->CSSetShaderResources(0, 2, nullSrv);
             ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
             ctx->CSSetShader(g_cs, nullptr, 0);
@@ -1397,10 +1404,10 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
             ctx->CSSetSamplers(0, 1, &g_samp);
             ctx->CSSetShaderResources(0, 2, setSrv);
             ctx->CSSetUnorderedAccessViews(0, 1, &e.outUav, nullptr);
-            gpuCensusBegin(ctx, GpuCensusSection::DoorMenu);
+            if (menu) gpuCensusBegin(ctx, GpuCensusSection::DoorMenu);
             ctx->Dispatch((static_cast<UINT>(box[2] - box[0]) + 7) / 8,
                           (static_cast<UINT>(box[3] - box[1]) + 7) / 8, 1);
-            gpuCensusEnd(ctx, GpuCensusSection::DoorMenu);
+            if (menu) gpuCensusEnd(ctx, GpuCensusSection::DoorMenu);
             if (qs >= 0) g_qring[qs].timer.end(ctx); // Poll consumes failed End samples too.
 
             ctx->CSSetShaderResources(0, 2, nullSrv);
@@ -1417,9 +1424,9 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
             if (savedSamp) savedSamp->Release();
 
             result = e.outTex;
-            ++g_draws;
-            if (!flat) bumpMenuDrawn();
-            if (!g_firstNoted) {
+            if (menu) ++g_draws;
+            if (menu && !flat) bumpMenuDrawn();
+            if (menu && !g_firstNoted) {
                 g_firstNoted = true;
                 Log::get().note(
                     "menu panel: first composite -- a %dx%d bitmap on a %ux%u %s eye region "
@@ -1434,13 +1441,35 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
             if (qs >= 0) {
                 g_qring[qs].timer.end(ctx); // Keep the slot until its invalid sample is consumed.
             }
-            failOnce("the parameter buffer could not be written");
+            fail("the parameter buffer could not be written");
         }
     }
     if (ctx) ctx->Release();
     if (dev) dev->Release();
     src->Release();
     return result;
+}
+
+// The settings menu's raster through the sheet pass: its geometry, its live
+// texture, its aspect read once.
+void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf,
+                     bool flat = false) {
+    MenuGeometry g;
+    {
+        std::lock_guard<std::mutex> lock(g_geomMutex);
+        g = g_geom;
+    }
+    if (!(g.alpha > 0.0f) || !g_panelSrv || g_panelW <= 0 || g_panelH <= 0) return nullptr;
+    if (g.overlayRaster) {
+        // The menu tick publishes geometry before it can upload the worker's
+        // finished raster. Use the width belonging to the texture that is
+        // actually live, and suppress the draw while no overlay raster is
+        // available, rather than borrowing a stale menu/toast width.
+        const float widthDeg = g_panelWidthDeg.load();
+        if (!(widthDeg > 0.0f) || !(g.dist > 0.0f)) return nullptr;
+        g.halfW = g.dist * tanf(widthDeg * 0.5f * 0.0174532925f);
+    }
+    return compositeSheet(srcTex, eye, bounds, xf, flat, g, g_panelSrv, g_panelAspect.load(), g_eye, true);
 }
 
 }  // namespace
@@ -1473,6 +1502,14 @@ void* menuPanelCompositeNative(ID3D11Texture2D* src, int eye, const float* bound
     if (graphicsRuntimeDisabled() || !src || !xf || eye < 0 || eye > 1) return nullptr;
     void* out = nullptr;
     guardedBudget(g_budget, [&] { out = compositeInner(src, eye, bounds, xf); });
+    return out;
+}
+void* menuPanelCompositeSheet(ID3D11Texture2D* src, int eye, const float* bounds, const float xf[12],
+                              ID3D11ShaderResourceView* sheet, float aspect, const MenuGeometry& g) {
+    if (graphicsRuntimeDisabled() || !src || !xf || !sheet || eye < 0 || eye > 1 || !(aspect > 0.0f) ||
+        !(g.alpha > 0.0f) || !(g.halfW > 0.0f)) return nullptr;
+    void* out = nullptr;
+    guardedBudget(g_sheetBudget, [&] { out = compositeSheet(src, eye, bounds, xf, false, g, sheet, aspect, g_sheetEye, false); });
     return out;
 }
 
@@ -1788,6 +1825,7 @@ void menuPanelShutdown() {
     if (g_w.started && g_w.thread.joinable()) g_w.thread.join();
     g_w.started = false;
     for (EyeState& e : g_eye) releaseEye(e);
+    for (EyeState& e : g_sheetEye) releaseEye(e);
     releaseQueries();
     if (g_panelSrv) { g_panelSrv->Release(); g_panelSrv = nullptr; }
     if (g_panelTex) { g_panelTex->Release(); g_panelTex = nullptr; }

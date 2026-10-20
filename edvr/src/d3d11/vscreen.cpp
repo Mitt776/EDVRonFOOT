@@ -56,6 +56,7 @@
 #include "wake_pulse.h"
 #include "scheduler_stack_probe.h"  // schedulerStackProbeShutdown
 #include "ui_depth.h"
+#include "on_foot_hud.h"  // EDVRonFOOT: the on-foot HUD's panel census
 #include "ui_layer.h"
 #include "ui_layer_math.h"
 #include "vr_world_route.h"  // VrWorldInternalScope: the world route's own D3D calls step past these hooks
@@ -1674,6 +1675,7 @@ bool drawGateSubscribed(State* s) {
         fssPanelWantsDraws() || fssRevealWantsDraws() ||
         remlokWantsDraws() || holoWantsDraws() || targetSharpWantsDraws() ||
         uiDepthWantsDraws() ||
+        onFootHudWantsDraws() ||      // EDVRonFOOT: the on-foot HUD's panel census (on_foot_hud.h)
         sunglareWantsDraws() ||
         drawCensusArmed() ||
         objectProbeWantsDraws() ||
@@ -2025,6 +2027,9 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         s->rtv0Eye = targetIsEyeSized(bindingGet(BindSlot::Rtv0), &s->rtv0Cand);
         s->rtv0EyeGen = rtvGen;
     }
+    // EDVRonFOOT: the on-foot HUD's census (on_foot_hud.h) -- the interface draws per hidden panel and the game's own composite, eye
+    // or not, so above the offscreen branch. One load while the commander is not on foot or the key is off.
+    if (onFootHudWantsDraws()) onFootHudNoteDraw(self, s->rtv0Eye);
     // The quad probe, ABOVE the eye gate since 2026-08-28.
     //
     // It lived in the offscreen branch because everything it had ever been
