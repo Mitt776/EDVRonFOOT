@@ -56,7 +56,7 @@
   - «all gates passed», единственный известный сбой — `weapon_motion`, контракт настроек без изменений;
   - коммит, тег `v0.19.1-edvronfoot.13`;
   - `--dll-only` через обёртку проходит.
-- [ ] 3.3 Установка при закрытой игре: `py -3.12 edvr\tools\install_edvr.py --target "C:\Steam\steamapps\common\Elite
+- [x] 3.3 Установка при закрытой игре: `py -3.12 edvr\tools\install_edvr.py --target "C:\Steam\steamapps\common\Elite
   Dangerous\Products\elite-dangerous-odyssey-64" --all --tag edvronfoot --dry-run`, затем без `--dry-run`. В живом
   `edvr.ini` через Edit — `on_foot_hud_probe = 1`. Проверка: `edvronfoot_game.ps1 -Action Status` показывает `.13`,
   `--verify-only` ok, diff `edvr.ini` — одна строка.
