@@ -10,6 +10,7 @@
 // with recording off the hook only forwards; a node of another vtable is not read; an unreadable field is survived with one line.
 #include "../../src/d3d11/on_foot_hud_probe.h"
 #include "../../src/d3d11/on_foot_hud_probe_core.h"
+#include "../../src/d3d11/debug_register_core.h"
 #include <windows.h>
 #include <cstdio>
 #include <cstring>
@@ -257,6 +258,188 @@ void partA() {
           "text: key on");
 }
 
+// ---- Part A, .13: the graph, the states, the events, the watch's sites ------------------------------------------------------------
+
+// A fake graph system: S with up to three graphs, each with its own node list.
+struct FakeGraphs {
+    uint8_t system[0x50] = {};
+    uint64_t graphs[3] = {};
+    uint8_t graph[3][0x40] = {};
+    uint64_t nodes[3][8] = {};
+    uint8_t node[4][0x40] = {};  // the tracked nodes (their +0x30 flag)
+
+    void build(int graphCount) {
+        put<uint64_t>(system, ohp::kSysGraphCount, static_cast<uint64_t>(graphCount));
+        put(system, ohp::kSysGraphs, addr(graphs));
+        for (int g = 0; g < 3; ++g) {
+            graphs[g] = addr(graph[g]);
+            put<uint8_t>(graph[g], ohp::kGraphOn, 1);
+            put<uint64_t>(graph[g], ohp::kGraphNodeCount, 0);
+            put(graph[g], ohp::kGraphNodes, addr(nodes[g]));
+        }
+        for (auto& n : node) put<uint8_t>(n, ohp::kNodeOn, 1);
+    }
+    void add(int g, uint64_t n) {
+        uint64_t count = 0;
+        std::memcpy(&count, graph[g] + ohp::kGraphNodeCount, 8);
+        nodes[g][count] = n;
+        put<uint64_t>(graph[g], ohp::kGraphNodeCount, count + 1);
+    }
+    void clear(int g) { put<uint64_t>(graph[g], ohp::kGraphNodeCount, 0); }
+};
+
+void partA13() {
+    static FakeGraphs f;
+    f.build(2);
+    f.add(0, 0x1111);          // a node of nobody's
+    f.add(0, addr(f.node[0])); // hud, view 0: in graph 0
+    f.add(1, addr(f.node[1])); // ui, view 0: in graph 1
+    const uint64_t tracked[ohp::kTracked] = {addr(f.node[0]), addr(f.node[1]), addr(f.node[2]), 0};
+    uint32_t seen = 0;
+    uint64_t graphs[ohp::kTracked] = {};
+    check(ohp::scanWalk(addr(f.system), tracked, &plainRead, nullptr, &seen, graphs), "graph: the walk is read");
+    check(ohp::seenOf(seen, 0) == ohp::kSeenOn && ohp::seenOf(seen, 1) == ohp::kSeenOn && ohp::seenOf(seen, 2) == 0 && ohp::seenOf(seen, 3) == 0 &&
+              graphs[0] == addr(f.graph[0]) && graphs[1] == addr(f.graph[1]) && graphs[2] == 0,
+          "graph: each tracked node found in its graph, the missing one not");
+    put<uint8_t>(f.node[0], ohp::kNodeOn, 0);
+    put<uint8_t>(f.graph[1], ohp::kGraphOn, 0);
+    ohp::scanWalk(addr(f.system), tracked, &plainRead, nullptr, &seen, graphs);
+    check(ohp::seenOf(seen, 0) == ohp::kSeenNodeOff && ohp::seenOf(seen, 1) == ohp::kSeenGraphOff, "graph: node off, graph off");
+    put<uint8_t>(f.node[0], ohp::kNodeOn, 1);
+    put<uint8_t>(f.graph[1], ohp::kGraphOn, 1);
+    put<uint64_t>(f.system, ohp::kSysGraphCount, ohp::kMaxGraphs + 1);
+    check(!ohp::scanWalk(addr(f.system), tracked, &plainRead, nullptr, &seen, graphs) && seen == 0, "graph: a count beyond any is refused");
+    put<uint64_t>(f.system, ohp::kSysGraphCount, 2);
+    put<uint64_t>(f.graph[1], ohp::kGraphNodeCount, ohp::kMaxGraphNodes + 1);
+    check(!ohp::scanWalk(addr(f.system), tracked, &plainRead, nullptr, &seen, graphs), "graph: a node count beyond any is refused");
+    put<uint64_t>(f.graph[1], ohp::kGraphNodeCount, 1);
+    check(ohp::graphHolds(addr(f.graph[0]), addr(f.node[0]), &plainRead, nullptr) == 1 &&
+              ohp::graphHolds(addr(f.graph[1]), addr(f.node[0]), &plainRead, nullptr) == 0 &&
+              ohp::graphHolds(0, addr(f.node[0]), &plainRead, nullptr) == -1,
+          "graph: holds, does not, unknown");
+
+    // The states.
+    using ohp::classify;
+    check(classify(ohp::kSeenOn | ohp::kSeenNodeOff, true, false, 1) == ohp::kStateOn, "state: on wins");
+    check(classify(ohp::kSeenNodeOff | ohp::kSeenGraphOff, true, false, 1) == ohp::kStateNodeOff, "state: H1");
+    check(classify(ohp::kSeenGraphOff, true, false, 1) == ohp::kStateGraphOff, "state: H3");
+    check(classify(0, true, false, 0) == ohp::kStateNotInGraph, "state: H2");
+    check(classify(0, true, false, 1) == ohp::kStateNotWalked, "state: still in its graph, not walked");
+    check(classify(0, true, false, -1) == ohp::kStateNotFound, "state: its graph unknown");
+    check(classify(0, false, true, 1) == ohp::kStateNotWalked && classify(0, false, true, 0) == ohp::kStateNotInGraph,
+          "state: walks without nodes only");
+    check(classify(0, false, false, 0) == ohp::kStateUnknown, "state: no walk, unknown");
+
+    ohp::StateLog log;
+    check(!log.admit(0, ohp::kStateUnknown, 0), "state log: unknown is never written");
+    check(log.admit(0, ohp::kStateOn, 0) && !log.admit(0, ohp::kStateOn, 10), "state log: the first, not a repeat");
+    check(log.admit(0, ohp::kStateNodeOff, 20) && log.last(0) == ohp::kStateNodeOff, "state log: a change");
+    int written = 2;
+    for (int i = 0; i < 30; ++i) written += log.admit(1, i & 1 ? ohp::kStateOn : ohp::kStateGraphOff, 100 + i) ? 1 : 0;
+    // 18 more are written (the last, i = 17, "on"); of the 12 over the allowance only the six "graph-off" differ from it.
+    check(written == ohp::StateLog::kPerWindow && log.held() == 6, "state log: 20 in 30 s, the changes over it counted");
+    check(log.admit(1, log.last(1) == ohp::kStateOn ? ohp::kStateGraphOff : ohp::kStateOn, 30000), "state log: the next window writes again");
+    log.forget(0);
+    check(log.admit(0, ohp::kStateNodeOff, 30010), "state log: a new node's first state is written again");
+
+    // The callers and an event.
+    const uint64_t base = 0x140000000ull, size = 0x640C000ull;
+    const uint64_t stack[3] = {base + 0x28ADA4D, base + 0x28575C0, 0x7FFE12345678ull};
+    char line[1600];
+    ohp::formatCallers(stack, 3, base, size, line, sizeof(line));
+    check(std::strcmp(line, "EliteDangerous64.exe+0x28ADA4D < +0x28575C0 < 0x7FFE12345678") == 0, "text: the callers");
+    ohp::formatCallers(stack, 0, base, size, line, sizeof(line));
+    check(std::strcmp(line, "?") == 0, "text: no callers");
+    ohp::GraphEvent e;
+    e.remove = 1;
+    e.node = 0xAB0;
+    e.first = 0;
+    e.graph = 0xC00;
+    e.countAfter = 1;
+    e.thread = 77;
+    e.frames = 2;
+    e.stack[0] = stack[0];
+    e.stack[1] = stack[1];
+    ohp::formatGraphEvent(e, 1, base, size, line, sizeof(line));
+    check(std::strcmp(line, "on-foot hud probe: graph remove: node 0xAB0 (hud 36-39) graph 0xC00, 1 node(s) after, on-foot=yes, thread 77, from "
+                            "EliteDangerous64.exe+0x28ADA4D < +0x28575C0") == 0,
+          "text: a remove event");
+    static ohp::Ring<32, ohp::GraphEvent> events;
+    for (int i = 0; i < 35; ++i) {
+        e.node = static_cast<uint64_t>(i);
+        events.push(e);
+    }
+    int popped = 0;
+    ohp::GraphEvent out;
+    while (events.pop(&out)) ++popped;
+    check(popped == 32 && events.dropped() == 3, "events: a full ring drops and counts");
+
+    // The sites.
+    static ohp::SiteTable sites;
+    bool fresh = false;
+    const int row = sites.record(base + 0x1000, &fresh);
+    check(row == 0 && fresh, "sites: a new site");
+    sites.publish(row, 9, 0, stack, 2);
+    check(sites.record(base + 0x1000, &fresh) == 0 && !fresh && sites.site(0).hits.load() == 2, "sites: a repeat only counted");
+    int r = -1;
+    check(sites.nextUnsaid(&r) && r == 0 && !sites.nextUnsaid(&r), "sites: said once");
+    check(ohp::formatWriter(ohp::kFlagNode, 0, sites.site(0), 0xAB0, base, size, line, sizeof(line)) > 0 &&
+              std::strcmp(line, "on-foot hud probe: writer #1 of the node flag of 0xAB0: at EliteDangerous64.exe+0x1000 (after the write), "
+                                "value 0, thread 9, from EliteDangerous64.exe+0x28ADA4D < +0x28575C0") == 0,
+          "text: a writer");
+    for (uint64_t i = 1; i < 10; ++i) sites.record(base + 0x2000 + i, &fresh);
+    check(sites.sites() == ohp::kSites && sites.overflow() == 2 && sites.hits() == 11, "sites: the ninth site is overflow");
+    check(ohp::formatWatchOff(ohp::kFlagNode, 0xAE0, "the key is off", sites, line, sizeof(line)) > 0 &&
+              std::strstr(line, "watch off: node flag 0xAE0: the key is off; 8 site(s), 11 hit(s), 2 from sites that did not fit"),
+          "text: watch off");
+    check(ohp::formatWatchOn(ohp::kFlagGraph, 0xC14, 0xC00, 40, 1, 2, line, sizeof(line)) > 0 &&
+              std::strstr(line, "watch on: graph flag 0xC14 (0xC00+0x14) on debug slot 3, write, 4 bytes: 40 thread(s), 1 skipped"),
+          "text: watch on");
+
+    // The fuse.
+    ohp::Fuse fuse;
+    check(!fuse.step(0, 0) && !fuse.step(1000, 100000), "fuse: 100 000 in the window is allowed");
+    check(fuse.step(2000, 100001), "fuse: one more trips it");
+    check(!fuse.step(31000, 150000) && !fuse.step(32000, 160000), "fuse: a new window starts over");
+
+    // The lines.
+    check(ohp::formatPointHooked(ohp::kPointWalk, 0x1406BF980ull, 8, line, sizeof(line)) > 0 &&
+              std::strstr(line, "hooked graph walk at EliteDangerous64.exe+0x6BF980 (0x1406BF980), 16 bytes verified, 8 moved; it reads"),
+          "text: a point hooked");
+    check(ohp::formatPointWrongBytes(ohp::kPointRemove, line, sizeof(line)) > 0 &&
+              std::strstr(line, "NOT installed: the graph remove at EliteDangerous64.exe+0x6BFE60 does not begin") &&
+              std::strstr(line, "the others stand"),
+          "text: a point refused");
+    check(ohp::formatState(ohp::kKindHud, 8, ohp::kStateNodeOff, 0xAB0, 0, 0xC00, 1, 1, line, sizeof(line)) > 0 &&
+              std::strcmp(line, "on-foot hud probe: state hud 36-39 view bit 8: node-off (H1): in an enabled graph, the node's flag +0x30 is 0; "
+                                "node 0xAB0 flag=0 graph 0xC00 on=1 on-foot=yes") == 0,
+          "text: a state");
+    check(ohp::formatState(ohp::kKindUi, 49, ohp::kStateNotFound, 0xAB0, -1, 0, -1, -1, line, sizeof(line)) > 0 &&
+              std::strstr(line, "state ui 40-46 view bit 49: not-found") && std::strstr(line, "flag=? graph 0x0 on=? on-foot=?"),
+          "text: a state, unread");
+    check(ohp::formatTracked(ohp::kKindHud, 8, 0xAB0, 0, line, sizeof(line)) > 0 &&
+              std::strcmp(line, "on-foot hud probe: tracking hud 36-39 node 0xAB0 of view bit 8") == 0,
+          "text: tracking");
+
+    ohp::GraphSummary gs;
+    ohp::GraphCounts total;
+    ohp::TrackedView none[1];
+    check(gs.step(0, total, none, 0, line, sizeof(line)) == 0, "graph summary: the first call starts the window");
+    total.walks = 3600;
+    check(gs.step(30000, total, none, 0, line, sizeof(line)) > 0 && std::strstr(line, "30 s graph: 3600 node-calling walk(s)") &&
+              std::strstr(line, "the hud 36-39 node is not recognised"),
+          "graph summary: no hud node, said");
+    ohp::TrackedView views[2];
+    views[0] = {ohp::kKindHud, 8, ohp::kStateNodeOff};
+    views[1] = {ohp::kKindUi, 8, ohp::kStateOn};
+    total.postgui = 2;
+    total.hits = 5;
+    check(gs.step(60000, total, views, 2, line, sizeof(line)) > 0 &&
+              std::strstr(line, "hud 36-39 bit 8 node-off (H1), ui 40-46 bit 8 on; graph events: 2 PostGUI, 0 other, 0 lost; watch: 5 hit(s)") &&
+              !std::strstr(line, "not recognised"),
+          "graph summary: the states and the window's counts");
+}
+
 // ---- Part B: the real glue on a synthetic function -------------------------------------------------------------------------------
 
 FakeGame g_game;
@@ -365,6 +548,8 @@ void partB() {
     onFootHudProbeDrain(100000, 1, &sink, nullptr);
     check(countLines("on-foot hud probe: node 0x") == 1 && anyLine("on-foot=yes") && anyLine("| 39 pass=yes here=yes"),
           "glue: the line, after the original's hand-in, stamped on foot");
+    check(anyLine("tracking hud 36-39 node 0x") && anyLine("of view bit 1") && anyLine("watch on: node flag"),
+          "glue: the hud node drawn is tracked and its flag watched");
     draw(g_game.node);
     g_lines.clear();
     onFootHudProbeDrain(100100, 1, &sink, nullptr);
@@ -397,6 +582,278 @@ void partB() {
     check(anyLine("on-foot hud probe: 30 s: 6 node draw(s) in all; PostGUI: 1 node(s), 5 call(s)") && anyLine("2 unreadable"),
           "glue: the summary");
 }
+
+// ---- Part B, .13: the graph hooks on synthetic functions --------------------------------------------------------------------------
+
+FakeGraphs g_graphs;
+volatile uint64_t g_walkSystem = 0, g_walkRun = 0, g_addGraph = 0, g_addNode = 0;
+volatile int g_walkCalls = 0, g_addCalls = 0, g_removeCalls = 0;
+bool g_walkFlip = false;
+
+// The game's walk for the rig: it may switch the node off while it runs (the hook must have read it before).
+void fakeWalk(uint8_t* system, uint64_t run) {
+    g_walkSystem = addr(system);
+    g_walkRun = run;
+    ++g_walkCalls;
+    if (g_walkFlip) put<uint8_t>(g_game.node, ohp::kNodeOn, 0);
+}
+// The game's add and remove: append the node to the graph's list, take it out.
+void fakeAdd(uint8_t* graph, uint64_t node) {
+    g_addGraph = addr(graph);
+    g_addNode = node;
+    ++g_addCalls;
+    uint64_t count = 0, list = 0;
+    std::memcpy(&count, graph + ohp::kGraphNodeCount, 8);
+    std::memcpy(&list, graph + ohp::kGraphNodes, 8);
+    reinterpret_cast<uint64_t*>(list)[count] = node;
+    put<uint64_t>(graph, ohp::kGraphNodeCount, count + 1);
+}
+void fakeRemove(uint8_t* graph, uint64_t node) {
+    ++g_removeCalls;
+    uint64_t count = 0, list = 0;
+    std::memcpy(&count, graph + ohp::kGraphNodeCount, 8);
+    std::memcpy(&list, graph + ohp::kGraphNodes, 8);
+    auto* nodes = reinterpret_cast<uint64_t*>(list);
+    uint64_t kept = 0;
+    for (uint64_t i = 0; i < count; ++i)
+        if (nodes[i] != node) nodes[kept++] = nodes[i];
+    put<uint64_t>(graph, ohp::kGraphNodeCount, kept);
+}
+
+// Each point's prologue in full, its undoing, then mov rax, imm64; jmp rax into the stand-in with the arguments and the return address
+// as the caller left them.
+size_t writeTail(uint8_t* at, size_t n, const void* target) {
+    at[n++] = 0x48;
+    at[n++] = 0xB8;
+    const uint64_t t = addr(target);
+    std::memcpy(at + n, &t, 8);
+    n += 8;
+    at[n++] = 0xFF;
+    at[n++] = 0xE0;
+    return n;
+}
+void writeWalk(uint8_t* at) {
+    // sub rsp,48h; mov rax,[rcx+20h]; mov [rsp+60h],rbx; mov rbx,[rcx+28h]; then mov rbx,[rsp+60h]; add rsp,48h
+    const uint8_t code[] = {0x48, 0x83, 0xEC, 0x48, 0x48, 0x8B, 0x41, 0x20, 0x48, 0x89, 0x5C, 0x24, 0x60, 0x48, 0x8B, 0x59, 0x28,
+                            0x48, 0x8B, 0x5C, 0x24, 0x60, 0x48, 0x83, 0xC4, 0x48};
+    std::memcpy(at, code, sizeof(code));
+    writeTail(at, sizeof(code), reinterpret_cast<const void*>(&fakeWalk));
+}
+void writeAdd(uint8_t* at) {
+    // mov [rsp+10h],rdx; sub rsp,28h; mov r8,[rcx+28h]; add rcx,18h; then sub rcx,18h; add rsp,28h
+    const uint8_t code[] = {0x48, 0x89, 0x54, 0x24, 0x10, 0x48, 0x83, 0xEC, 0x28, 0x4C, 0x8B, 0x41, 0x28, 0x48, 0x83, 0xC1, 0x18,
+                            0x48, 0x83, 0xE9, 0x18, 0x48, 0x83, 0xC4, 0x28};
+    std::memcpy(at, code, sizeof(code));
+    writeTail(at, sizeof(code), reinterpret_cast<const void*>(&fakeAdd));
+}
+void writeRemove(uint8_t* at) {
+    // mov [rsp+10h],rbx; push rdi; sub rsp,20h; mov rax,[rcx+28h]; lea rdi,[rcx+18h]; then add rsp,20h; pop rdi
+    const uint8_t code[] = {0x48, 0x89, 0x5C, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0x41, 0x28, 0x48, 0x8D, 0x79, 0x18,
+                            0x48, 0x83, 0xC4, 0x20, 0x5F};
+    std::memcpy(at, code, sizeof(code));
+    writeTail(at, sizeof(code), reinterpret_cast<const void*>(&fakeRemove));
+}
+
+void partB13() {
+    auto* page = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
+    if (!page) {
+        check(false, "graph glue: a code page for the synthetic functions");
+        return;
+    }
+    uint8_t* walkAt = page;
+    uint8_t* addAt = page + 0x100;
+    uint8_t* removeAt = page + 0x200;
+    writeWalk(walkAt);
+    writeAdd(addAt);
+    writeRemove(removeAt);
+    addAt[0] = 0x90;  // the add point's bytes are wrong at first
+    FlushInstructionCache(GetCurrentProcess(), page, 4096);
+    const uintptr_t base = g_game.base();
+
+    g_lines.clear();
+    const bool walkHooked = onFootHudProbeInstallPoint(ohp::kPointWalk, base, addr(walkAt), &sink, nullptr);
+    const bool addHooked = onFootHudProbeInstallPoint(ohp::kPointAdd, base, addr(addAt), &sink, nullptr);
+    const bool removeHooked = onFootHudProbeInstallPoint(ohp::kPointRemove, base, addr(removeAt), &sink, nullptr);
+    check(walkHooked && !addHooked && removeHooked && g_lines.size() == 3 &&
+              anyLine("hooked graph walk at EliteDangerous64.exe+0x6BF980") && anyLine("8 moved") &&
+              anyLine("NOT installed: the graph add at EliteDangerous64.exe+0x6BFC60 does not begin") &&
+              anyLine("hooked graph remove at EliteDangerous64.exe+0x6BFE60") && addAt[0] == 0x90 && walkAt[0] == 0xE9 && removeAt[0] == 0xE9,
+          "graph glue: one point's wrong bytes refuse only it, the others are hooked");
+    addAt[0] = 0x48;
+    FlushInstructionCache(GetCurrentProcess(), addAt, 1);
+    g_lines.clear();
+    check(onFootHudProbeInstallPoint(ohp::kPointAdd, base, addr(addAt), &sink, nullptr) && anyLine("hooked graph add") && anyLine("5 moved"),
+          "graph glue: the add point, right bytes, hooked");
+
+    using FnWalk = void (*)(void*, uint64_t);
+    using Fn2 = void (*)(void*, void*);
+    auto walk = reinterpret_cast<FnWalk>(walkAt);
+    auto add = reinterpret_cast<Fn2>(addAt);
+    auto remove = reinterpret_cast<Fn2>(removeAt);
+
+    // The tracked hud node (view bit 1, from Part B's draws) in graph 0 of a two-graph system, on.
+    g_graphs.build(2);
+    g_graphs.add(0, addr(g_game.node));
+    put<uint8_t>(g_game.node, ohp::kNodeOn, 1);
+    onFootHudProbeSetRecording(true);
+    g_lines.clear();
+    onFootHudProbeDrain(130000, 0, &sink, nullptr);  // the writes above, as writers of the watched flag
+
+    // The state is read BEFORE the original: the stand-in switches the node off while it runs.
+    g_walkFlip = true;
+    walk(g_graphs.system, 1);
+    g_walkFlip = false;
+    check(g_walkCalls == 1 && g_walkSystem == addr(g_graphs.system) && g_walkRun == 1, "graph glue: the walk forwarded unchanged");
+    g_lines.clear();
+    onFootHudProbeDrain(130100, 0, &sink, nullptr);
+    char want[200];
+    std::snprintf(want, sizeof(want), "is in graph 0x%llX", static_cast<unsigned long long>(addr(g_graphs.graph[0])));
+    check(anyLine(want) && countLines("state hud 36-39 view bit 1: on: in an enabled graph") == 1 && anyLine("on-foot=no"),
+          "graph glue: in its graph and on, as the walk found it on its way in");
+    check(anyLine("watch on: graph flag"), "graph glue: its graph's flag watched once the graph is known");
+    check(anyLine("writer #") && anyLine("of the node flag of 0x") && anyLine("value 0"), "graph glue: the node flag's writer, the stand-in");
+
+    walk(g_graphs.system, 1);
+    g_lines.clear();
+    onFootHudProbeDrain(130200, 1, &sink, nullptr);
+    check(countLines("state hud 36-39 view bit 1: node-off (H1)") == 1 && anyLine("flag=0") && anyLine("on-foot=yes"), "graph glue: H1");
+    check(anyLine("watch off: node flag") && anyLine("re-armed") && anyLine("watch on: node flag"),
+          "graph glue: on foot changed, the watches re-armed");
+
+    put<uint8_t>(g_game.node, ohp::kNodeOn, 1);
+    put<uint8_t>(g_graphs.graph[0], ohp::kGraphOn, 0);
+    walk(g_graphs.system, 1);
+    g_lines.clear();
+    onFootHudProbeDrain(130300, 1, &sink, nullptr);
+    check(countLines("state hud 36-39 view bit 1: graph-off (H3)") == 1 && anyLine("on=0") && anyLine("of the graph flag of 0x"),
+          "graph glue: H3, and the graph flag's writer");
+
+    put<uint8_t>(g_graphs.graph[0], ohp::kGraphOn, 1);
+    g_graphs.clear(0);
+    walk(g_graphs.system, 1);
+    g_lines.clear();
+    onFootHudProbeDrain(130400, 1, &sink, nullptr);
+    check(countLines("state hud 36-39 view bit 1: not-in-graph (H2)") == 1, "graph glue: H2");
+
+    g_graphs.add(0, addr(g_game.node));
+    put<uint64_t>(g_graphs.system, ohp::kSysGraphCount, 0);  // the walk visits no graph
+    walk(g_graphs.system, 1);
+    g_lines.clear();
+    onFootHudProbeDrain(130500, 1, &sink, nullptr);
+    check(countLines("state hud 36-39 view bit 1: graph-not-walked") == 1, "graph glue: still in its graph, not walked");
+    put<uint64_t>(g_graphs.system, ohp::kSysGraphCount, 2);
+    walk(g_graphs.system, 0);  // a walk that calls no node
+    g_lines.clear();
+    onFootHudProbeDrain(130600, 1, &sink, nullptr);
+    onFootHudProbeDrain(130700, 1, &sink, nullptr);  // and a frame with no walk
+    check(countLines("state ") == 0 && g_walkCalls == 6 && g_walkRun == 0, "graph glue: no change, no walk: no state line");
+
+    // Add and remove: after the original, with the game's callers; a node of another kind only counted; off, only forwarded.
+    g_addCalls = 0;
+    add(g_graphs.graph[1], g_game.node);
+    remove(g_graphs.graph[1], g_game.node);
+    add(g_graphs.graph[1], g_graphs.node[3]);  // no vtable: not a PostGUI node
+    g_lines.clear();
+    onFootHudProbeDrain(130800, 1, &sink, nullptr);
+    std::snprintf(want, sizeof(want), "graph add: node 0x%llX (hud 36-39) graph 0x%llX, 1 node(s) after, on-foot=yes, thread ",
+                  static_cast<unsigned long long>(addr(g_game.node)), static_cast<unsigned long long>(addr(g_graphs.graph[1])));
+    check(anyLine(want) && anyLine("graph remove: node 0x") && anyLine(", 0 node(s) after") && countLines("graph add") == 1 && anyLine(", from "),
+          "graph glue: the add and the remove, with the count after the original");
+    check(g_addCalls == 2 && g_removeCalls == 1 && g_addGraph == addr(g_graphs.graph[1]) && g_addNode == addr(g_graphs.node[3]),
+          "graph glue: add and remove forwarded unchanged");
+    onFootHudProbeSetRecording(false);
+    add(g_graphs.graph[2], g_game.node);
+    g_lines.clear();
+    onFootHudProbeDrain(130900, 1, &sink, nullptr);
+    check(g_addCalls == 3 && countLines("graph add") == 0, "graph glue: off, only forwarded");
+
+    // The graph's 30-second line (its window began at Part B's first drain, 50000; the last one was written at 125000).
+    onFootHudProbeSetRecording(true);
+    g_lines.clear();
+    onFootHudProbeDrain(155000, 1, &sink, nullptr);
+    check(anyLine("30 s graph: 5 node-calling walk(s), 1 without nodes") && anyLine("hud 36-39 bit 1 graph-not-walked") &&
+              anyLine("graph events: 2 PostGUI, 1 other"),
+          "graph glue: the graph's summary");
+
+    // The key off: both watches come off with their totals, and a write after it is not seen.
+    g_lines.clear();
+    onFootHudProbeStopWatches("the key is off", &sink, nullptr);
+    check(anyLine("watch off: node flag") && anyLine("watch off: graph flag") && countLines("the key is off") == 2 &&
+              !onFootHudProbeWatchOn(ohp::kFlagNode) && !onFootHudProbeWatchOn(ohp::kFlagGraph),
+          "graph glue: the key off takes the watches off");
+    put<uint8_t>(g_game.node, ohp::kNodeOn, 0);
+    g_lines.clear();
+    onFootHudProbeWatchDrain(ohp::kFlagNode, &sink, nullptr);
+    check(g_lines.empty(), "graph glue: no writer after the watch is off");
+}
+
+// ---- Part C: the write watch, real, on this rig's threads -------------------------------------------------------------------------
+
+__declspec(noinline) void writeByte(volatile uint8_t* p, uint8_t v) { *p = v; }
+
+HANDLE g_busyGo = nullptr;
+DWORD WINAPI busyThread(void*) {
+    WaitForSingleObject(g_busyGo, 30000);
+    return 0;
+}
+
+void partC() {
+    alignas(16) static uint8_t flagBytes[16] = {1};
+    alignas(16) static uint8_t other[16] = {};
+    volatile uint8_t* const flag = flagBytes;  // written through volatile: each write is a store the watch sees
+    const uint64_t flagAt = addr(flagBytes);
+    // A thread that already holds slot 2 for someone else.
+    g_busyGo = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    HANDLE busy = CreateThread(nullptr, 0, &busyThread, nullptr, 0, nullptr);
+    bool held = false;
+    if (busy && SuspendThread(busy) != static_cast<DWORD>(-1)) {
+        CONTEXT c{};
+        c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+        if (GetThreadContext(busy, &c)) {
+            c.Dr2 = addr(other);
+            c.Dr7 = (c.Dr7 & ~DWORD64(0xFFFFFFFFu)) | dr7::armSlotDr7(static_cast<uint32_t>(c.Dr7), 2);
+            held = SetThreadContext(busy, &c) != 0;
+        }
+        ResumeThread(busy);
+    }
+    check(held, "watch: a thread with slot 2 taken");
+
+    g_lines.clear();
+    const int armed = onFootHudProbeWatchArm(ohp::kFlagNode, flagAt, flagAt - 0x30, &sink, nullptr);
+    check(armed > 0 && onFootHudProbeWatchOn(ohp::kFlagNode) && anyLine("watch on: node flag") && !anyLine(" 0 skipped"),
+          "watch: armed on the rig's threads, the taken one skipped");
+    if (busy) {
+        CONTEXT c{};
+        c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+        SuspendThread(busy);
+        check(GetThreadContext(busy, &c) && c.Dr2 == addr(other), "watch: the taken slot is left as it was");
+        ResumeThread(busy);
+    }
+    writeByte(flag, 0);
+    writeByte(flag, 0);
+    writeByte(flag, 1);
+    g_lines.clear();
+    onFootHudProbeWatchDrain(ohp::kFlagNode, &sink, nullptr);
+    check(g_lines.size() == 2 && anyLine("writer #1 of the node flag of") && anyLine("value 0") && anyLine("writer #2 of the node flag of") &&
+              anyLine("value 1"),
+          "watch: one line per writer and value, the repeat only counted");
+    g_lines.clear();
+    onFootHudProbeWatchDisarm(ohp::kFlagNode, "the rig is done", &sink, nullptr);
+    check(anyLine("watch off: node flag") && anyLine("the rig is done; 2 site(s), 3 hit(s)") && !onFootHudProbeWatchOn(ohp::kFlagNode),
+          "watch: off, with its totals");
+    writeByte(flag, 0);
+    g_lines.clear();
+    onFootHudProbeWatchDrain(ohp::kFlagNode, &sink, nullptr);
+    check(g_lines.empty(), "watch: off, no trap");
+    g_lines.clear();
+    check(onFootHudProbeWatchArm(ohp::kFlagGraph, flagAt + 1, 0, &sink, nullptr) == 0 && anyLine("not 4-aligned"),
+          "watch: an unaligned address is refused with a line");
+    SetEvent(g_busyGo);
+    if (busy) {
+        WaitForSingleObject(busy, 5000);
+        CloseHandle(busy);
+    }
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -405,7 +862,10 @@ int main(int argc, char** argv) {
         return 2;
     }
     partA();
+    partA13();
+    partC();  // before Part B: its writer table starts empty
     partB();
+    partB13();
     std::printf("%s: on_foot_hud_probe_test, %d checks, %d failed\n", g_failures ? "FAIL" : "PASS", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

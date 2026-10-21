@@ -175,7 +175,7 @@ inline bool capture(uint64_t node, ReadFn read, void* rctx, Snapshot* s) {
 }
 
 // From the game's threads to the frame thread: many producers, one consumer; a full ring drops and counts.
-template <size_t N>
+template <size_t N, typename T = Snapshot>
 class Ring {
     static_assert(N >= 2 && (N & (N - 1)) == 0, "N is a power of two");
 
@@ -183,7 +183,7 @@ public:
     Ring() {
         for (size_t i = 0; i < N; ++i) m_cells[i].seq.store(i, std::memory_order_relaxed);
     }
-    bool push(const Snapshot& s) noexcept {
+    bool push(const T& s) noexcept {
         size_t pos = m_enqueue.load(std::memory_order_relaxed);
         for (;;) {
             Cell& cell = m_cells[pos & (N - 1)];
@@ -203,7 +203,7 @@ public:
             }
         }
     }
-    bool pop(Snapshot* out) noexcept {
+    bool pop(T* out) noexcept {
         Cell& cell = m_cells[m_dequeue & (N - 1)];
         const size_t seq = cell.seq.load(std::memory_order_acquire);
         if (static_cast<intptr_t>(seq) - static_cast<intptr_t>(m_dequeue + 1) != 0) return false;
@@ -217,7 +217,7 @@ public:
 private:
     struct Cell {
         std::atomic<size_t> seq{0};
-        Snapshot snap;
+        T snap;
     };
     Cell m_cells[N];
     std::atomic<size_t> m_enqueue{0};
@@ -487,6 +487,434 @@ inline int formatFault(uint64_t node, char* out, size_t cap) {
                          "rest; this line is said once)",
                          static_cast<unsigned long long>(node));
 }
+
+// ---- .13: the PostGUI nodes in the game's node graph (docs: "Статика после .12") ------------------------------------------------
+// Flight .12: on foot in stereo the frame's mask asks for the HUD lists, yet the lists 36-39 node is never drawn. The game draws a
+// node only from its graph walk:
+//   0x6BF980 (S, char run): one graph system. S+0x40 its graphs (S+0x38 of them). A graph G is on when byte G+0x14 is not 0; its nodes
+//     are G+0x30 (G+0x28 of them; G+0x18 the room). A node N is on when byte N+0x30 is not 0. With run != 0 it calls, for each on node
+//     of each on graph, the node's +0x10, then in a second round +0x18 (0x58B090: N+0x30 again, then +0x28 ... 0x58F0F0(N)).
+//   0x6BFC60 (G, N) appends N to G's nodes; 0x6BFE60 (G, N) takes it out.
+// So on foot the node is off (H1), out of every graph (H2) or in a graph that is off (H3). The walk hook reads which, before the
+// original; the add and remove hooks say who moved a PostGUI node; two hardware write watches say who wrote N+0x30 and G+0x14.
+enum Point : int { kPointNodeDraw = 0, kPointWalk, kPointAdd, kPointRemove, kPointCount };
+constexpr uintptr_t kPointRva[kPointCount] = {kNodeDrawRva, 0x6BF980u, 0x6BFC60u, 0x6BFE60u};
+// Each point's first 16 bytes in build 334473 (capstone, 2026-10-22). None has a relative operand in the bytes CodeHook moves.
+constexpr uint8_t kPointPrologue[kPointCount][kPrologueBytes] = {
+    {0x40, 0x53, 0x57, 0x41, 0x56, 0x48, 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00, 0x48, 0x8B, 0x81, 0x08},
+    // sub rsp,48h; mov rax,[rcx+20h]; mov [rsp+60h],rbx; mov rbx,[rcx+28h]
+    {0x48, 0x83, 0xEC, 0x48, 0x48, 0x8B, 0x41, 0x20, 0x48, 0x89, 0x5C, 0x24, 0x60, 0x48, 0x8B, 0x59},
+    // mov [rsp+10h],rdx; sub rsp,28h; mov r8,[rcx+28h]; add rcx,18h
+    {0x48, 0x89, 0x54, 0x24, 0x10, 0x48, 0x83, 0xEC, 0x28, 0x4C, 0x8B, 0x41, 0x28, 0x48, 0x83, 0xC1},
+    // mov [rsp+10h],rbx; push rdi; sub rsp,20h; mov rax,[rcx+28h]; lea rdi,[rcx+18h]
+    {0x48, 0x89, 0x5C, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0x41, 0x28, 0x48, 0x8D},
+};
+inline const char* pointName(int p) {
+    switch (p) {
+        case kPointNodeDraw: return "node draw";
+        case kPointWalk: return "graph walk";
+        case kPointAdd: return "graph add";
+        default: return "graph remove";
+    }
+}
+
+// The graph system, the graph, the node.
+constexpr uintptr_t kSysGraphCount = 0x38;  // u64
+constexpr uintptr_t kSysGraphs = 0x40;
+constexpr uintptr_t kGraphOn = 0x14;        // u8
+constexpr uintptr_t kGraphNodeCount = 0x28; // u64
+constexpr uintptr_t kGraphNodes = 0x30;
+constexpr uintptr_t kNodeOn = 0x30;         // u8
+// More than any system or graph the game builds: a larger count is a misread, and the walk's snapshot is dropped.
+constexpr uint64_t kMaxGraphs = 64, kMaxGraphNodes = 256;
+
+// The tracked nodes: the PostGUI pass's two per view, two views (flight .12: Primary bit 8, Secondary bit 49). A cell is keyed by the
+// node's kind and its view's bit number, so a pipeline rebuild that makes new nodes refills the same cells.
+constexpr int kTracked = 4;
+enum Kind : int { kKindHud = 0, kKindUi = 1 };
+inline int kindOf(uint64_t first) { return first == kHudFirst ? kKindHud : kKindUi; }
+inline const char* kindName(int kind) { return kind == kKindHud ? "hud 36-39" : "ui 40-46"; }
+inline uint64_t trackKey(int kind, int32_t viewBitIndex) {
+    return ((static_cast<uint64_t>(kind) + 1) << 32) | static_cast<uint32_t>(viewBitIndex);
+}
+
+// What one walk saw of each tracked node: three bits a cell, OR-ed over a frame's walks, plus whether walks ran at all.
+enum : uint32_t { kSeenOn = 1, kSeenNodeOff = 2, kSeenGraphOff = 4 };
+constexpr uint32_t kSeenShift = 3;
+constexpr uint32_t kWalkedRun = 1u << 16;   // a walk with run != 0 (the one that calls nodes) happened
+constexpr uint32_t kWalkedIdle = 1u << 17;  // a walk with run == 0 happened
+inline uint32_t seenOf(uint32_t word, int cell) { return (word >> (kSeenShift * cell)) & 7u; }
+
+// One walk of system S: where each tracked node (0: none) is. *seen gets the bits, graphs[cell] the first graph holding the node.
+// False when a field could not be read or a count is beyond any the game has; nothing is claimed then.
+inline bool scanWalk(uint64_t system, const uint64_t nodes[kTracked], ReadFn read, void* rctx, uint32_t* seen, uint64_t graphs[kTracked]) {
+    *seen = 0;
+    for (int c = 0; c < kTracked; ++c) graphs[c] = 0;
+    uint64_t count = 0, array = 0;
+    if (!readAs(read, rctx, system + kSysGraphCount, &count) || !readAs(read, rctx, system + kSysGraphs, &array) || count > kMaxGraphs)
+        return false;
+    uint64_t graph[kMaxGraphs];
+    if (count && (array < 0x10000 || !read(rctx, array, graph, static_cast<size_t>(count) * 8))) return false;
+    for (uint64_t g = 0; g < count; ++g) {
+        uint8_t on = 0;
+        uint64_t n = 0, list = 0;
+        if (!readAs(read, rctx, graph[g] + kGraphOn, &on) || !readAs(read, rctx, graph[g] + kGraphNodeCount, &n) ||
+            !readAs(read, rctx, graph[g] + kGraphNodes, &list) || n > kMaxGraphNodes)
+            return false;
+        uint64_t node[kMaxGraphNodes];
+        if (n && (list < 0x10000 || !read(rctx, list, node, static_cast<size_t>(n) * 8))) return false;
+        for (uint64_t i = 0; i < n; ++i) {
+            for (int c = 0; c < kTracked; ++c) {
+                if (!nodes[c] || node[i] != nodes[c]) continue;
+                uint8_t flag = 0;
+                if (!readAs(read, rctx, nodes[c] + kNodeOn, &flag)) return false;
+                const uint32_t bit = !on ? kSeenGraphOff : flag ? kSeenOn : kSeenNodeOff;
+                *seen |= bit << (kSeenShift * c);
+                if (!graphs[c]) graphs[c] = graph[g];
+            }
+        }
+    }
+    return true;
+}
+
+// Is the node still in that graph's list: 1 yes, 0 no, -1 unknown (no graph, or unreadable).
+inline int graphHolds(uint64_t graph, uint64_t node, ReadFn read, void* rctx) {
+    if (!graph || !node) return -1;
+    uint64_t n = 0, list = 0;
+    if (!readAs(read, rctx, graph + kGraphNodeCount, &n) || !readAs(read, rctx, graph + kGraphNodes, &list) || n > kMaxGraphNodes) return -1;
+    uint64_t nodes[kMaxGraphNodes];
+    if (n && (list < 0x10000 || !read(rctx, list, nodes, static_cast<size_t>(n) * 8))) return -1;
+    for (uint64_t i = 0; i < n; ++i)
+        if (nodes[i] == node) return 1;
+    return 0;
+}
+
+enum State : uint8_t { kStateUnknown = 0, kStateOn, kStateNodeOff, kStateNotInGraph, kStateGraphOff, kStateNotWalked, kStateNotFound };
+
+// A frame's state of one node: drawn if any walk found it on; else its flag off (H1); else its graph off (H3). Found in no walk: still
+// in the graph it was last seen in -- the graph is not walked; gone from it -- out of every graph (H2); that graph unknown -- not
+// found. No walk at all this frame: unknown, and the state stays as it was.
+inline State classify(uint32_t seen, bool walkedRun, bool walkedIdle, int inLastGraph) {
+    if (seen & kSeenOn) return kStateOn;
+    if (seen & kSeenNodeOff) return kStateNodeOff;
+    if (seen & kSeenGraphOff) return kStateGraphOff;
+    if (!walkedRun && !walkedIdle) return kStateUnknown;
+    if (!walkedRun) return inLastGraph == 0 ? kStateNotInGraph : kStateNotWalked;
+    return inLastGraph == 1 ? kStateNotWalked : inLastGraph == 0 ? kStateNotInGraph : kStateNotFound;
+}
+inline const char* stateText(State s) {
+    switch (s) {
+        case kStateOn: return "on: in an enabled graph, the node enabled (drawn)";
+        case kStateNodeOff: return "node-off (H1): in an enabled graph, the node's flag +0x30 is 0";
+        case kStateNotInGraph: return "not-in-graph (H2): in no walked graph and gone from its graph";
+        case kStateGraphOff: return "graph-off (H3): its graph's flag +0x14 is 0";
+        case kStateNotWalked: return "graph-not-walked: still in its graph, which no node-calling walk visits";
+        case kStateNotFound: return "not-found: in no walked graph, its graph not known";
+        default: return "unknown";
+    }
+}
+inline const char* stateShort(State s) {
+    switch (s) {
+        case kStateOn: return "on";
+        case kStateNodeOff: return "node-off (H1)";
+        case kStateNotInGraph: return "not-in-graph (H2)";
+        case kStateGraphOff: return "graph-off (H3)";
+        case kStateNotWalked: return "graph-not-walked";
+        case kStateNotFound: return "not-found";
+        default: return "unknown";
+    }
+}
+
+// Which state lines reach the log: a cell's first known state and every change, at most 20 in 30 s for all cells together; a change
+// over the allowance is counted, and written in a later window if it still stands.
+class StateLog {
+public:
+    static constexpr int kPerWindow = 20;
+    static constexpr uint64_t kWindowMs = 30000;
+    bool admit(int cell, State s, uint64_t nowMs) {
+        if (s == kStateUnknown || cell < 0 || cell >= kTracked) return false;
+        if (!m_started || nowMs - m_since >= kWindowMs) {
+            m_started = true;
+            m_since = nowMs;
+            m_inWindow = 0;
+        }
+        if (m_said[cell] && m_last[cell] == s) return false;
+        if (m_inWindow >= kPerWindow) {
+            ++m_held;
+            return false;
+        }
+        ++m_inWindow;
+        m_said[cell] = true;
+        m_last[cell] = s;
+        return true;
+    }
+    void forget(int cell) {  // a new node in the cell: its first state is written again
+        if (cell >= 0 && cell < kTracked) m_said[cell] = false;
+    }
+    State last(int cell) const { return m_said[cell] ? m_last[cell] : kStateUnknown; }
+    uint64_t held() const { return m_held; }
+
+private:
+    bool m_started = false, m_said[kTracked] = {};
+    State m_last[kTracked] = {};
+    uint64_t m_since = 0, m_held = 0;
+    int m_inWindow = 0;
+};
+
+// The callers: "EliteDangerous64.exe+0x..." for the first frame in the game's image, "+0x..." for the next ones, raw outside it.
+constexpr int kStackFrames = 6;
+inline int formatCallers(const uint64_t* stack, int frames, uint64_t base, uint64_t imageSize, char* out, size_t cap) {
+    if (!cap) return 0;
+    out[0] = 0;
+    int n = 0;
+    bool named = false;
+    if (frames <= 0) return std::snprintf(out, cap, "?");
+    for (int i = 0; i < frames && n >= 0 && static_cast<size_t>(n) < cap; ++i) {
+        const uint64_t a = stack[i];
+        const char* sep = i ? " < " : "";
+        if (a >= base && a - base < imageSize) {
+            n += std::snprintf(out + n, cap - n, "%s%s+0x%llX", sep, named ? "" : "EliteDangerous64.exe", static_cast<unsigned long long>(a - base));
+            named = true;
+        } else {
+            n += std::snprintf(out + n, cap - n, "%s0x%llX", sep, static_cast<unsigned long long>(a));
+        }
+    }
+    return n;
+}
+
+// A PostGUI node added to a graph or taken out, with who did it. Numbers only.
+struct GraphEvent {
+    uint8_t remove = 0, frames = 0;
+    uint32_t thread = 0;
+    uint64_t node = 0, first = 0, graph = 0;
+    int64_t countAfter = -1;  // the graph's nodes after the call (-1 unreadable)
+    uint64_t stack[kStackFrames] = {};
+};
+
+inline int formatGraphEvent(const GraphEvent& e, int onFoot, uint64_t base, uint64_t imageSize, char* out, size_t cap) {
+    char callers[400];
+    formatCallers(e.stack, e.frames, base, imageSize, callers, sizeof(callers));
+    return std::snprintf(out, cap, "on-foot hud probe: graph %s: node 0x%llX (%s) graph 0x%llX, %lld node(s) after, on-foot=%s, thread %u, from %s",
+                         e.remove ? "remove" : "add", static_cast<unsigned long long>(e.node), kindName(kindOf(e.first)),
+                         static_cast<unsigned long long>(e.graph), static_cast<long long>(e.countAfter),
+                         onFoot < 0 ? "?" : onFoot ? "yes" : "no", e.thread, callers);
+}
+
+// ---- the write watches -------------------------------------------------------------------------------------------------------------
+// Debug register slot 2 watches the first tracked HUD node's flag N+0x30, slot 3 its graph's G+0x14 -- write, 4 bytes, every thread
+// (slot 0 is the flat camera producer probe's, slot 1 native_vr_probe's). The CPU reports a data breakpoint AFTER the write: the
+// handler records each distinct instruction once (the address after it, the byte's value then, the callers) and counts the rest.
+// A write to the next three bytes traps too; the value tells it apart (unchanged).
+enum Flag : int { kFlagNode = 0, kFlagGraph = 1, kFlagCount = 2 };
+constexpr unsigned kFlagSlot[kFlagCount] = {2, 3};
+inline const char* flagName(int f) { return f == kFlagNode ? "node flag" : "graph flag"; }
+inline uintptr_t flagOffset(int f) { return f == kFlagNode ? kNodeOn : kGraphOn; }
+constexpr int kSites = 8;
+
+struct Site {
+    std::atomic<uint64_t> rip{0};
+    std::atomic<uint64_t> hits{0};
+    std::atomic<uint8_t> ready{0};
+    uint8_t value = 0, frames = 0;
+    uint32_t thread = 0;
+    uint64_t stack[kStackFrames] = {};
+};
+// Lock-free, as nvp::WriterTable: a new site claims a free row by compare-and-swap, the handler fills it and only then sets `ready`.
+class SiteTable {
+public:
+    int record(uint64_t rip, bool* fresh) noexcept {
+        *fresh = false;
+        m_hits.fetch_add(1, std::memory_order_relaxed);
+        for (int i = 0; i < kSites; ++i) {
+            uint64_t seen = m_sites[i].rip.load(std::memory_order_acquire);
+            if (seen == 0) {
+                uint64_t expected = 0;
+                if (m_sites[i].rip.compare_exchange_strong(expected, rip, std::memory_order_acq_rel)) {
+                    m_sites[i].hits.fetch_add(1, std::memory_order_relaxed);
+                    *fresh = true;
+                    return i;
+                }
+                seen = expected;
+            }
+            if (seen == rip) {
+                m_sites[i].hits.fetch_add(1, std::memory_order_relaxed);
+                return i;
+            }
+        }
+        m_overflow.fetch_add(1, std::memory_order_relaxed);
+        return -1;
+    }
+    void publish(int row, uint32_t thread, uint8_t value, const uint64_t* stack, int frames) noexcept {
+        Site& s = m_sites[row];
+        s.thread = thread;
+        s.value = value;
+        s.frames = static_cast<uint8_t>(frames < 0 ? 0 : (frames > kStackFrames ? kStackFrames : frames));
+        for (int i = 0; i < s.frames; ++i) s.stack[i] = stack[i];
+        s.ready.store(1, std::memory_order_release);
+    }
+    // Frame thread: rows published since the last call, each once.
+    bool nextUnsaid(int* row) noexcept {
+        for (int i = 0; i < kSites; ++i) {
+            if (m_said[i] || !m_sites[i].ready.load(std::memory_order_acquire)) continue;
+            m_said[i] = true;
+            *row = i;
+            return true;
+        }
+        return false;
+    }
+    const Site& site(int row) const { return m_sites[row]; }
+    int sites() const {
+        int n = 0;
+        for (const Site& s : m_sites) n += s.rip.load(std::memory_order_acquire) ? 1 : 0;
+        return n;
+    }
+    uint64_t hits() const { return m_hits.load(std::memory_order_relaxed); }
+    uint64_t overflow() const { return m_overflow.load(std::memory_order_relaxed); }
+
+private:
+    Site m_sites[kSites];
+    bool m_said[kSites] = {};
+    std::atomic<uint64_t> m_hits{0}, m_overflow{0};
+};
+
+// More than 100 000 traps in 30 s (a flag the game writes every frame): the watches come off, the rest of the probe goes on.
+class Fuse {
+public:
+    static constexpr uint64_t kWindowMs = 30000, kMaxHits = 100000;
+    bool step(uint64_t nowMs, uint64_t totalHits) {
+        if (!m_started || nowMs - m_since >= kWindowMs) {
+            m_started = true;
+            m_since = nowMs;
+            m_base = totalHits;
+            return false;
+        }
+        return totalHits - m_base > kMaxHits;
+    }
+
+private:
+    bool m_started = false;
+    uint64_t m_since = 0, m_base = 0;
+};
+
+inline int formatWatchOn(int flag, uint64_t address, uint64_t object, uint32_t armed, uint32_t skipped, uint32_t failed, char* out, size_t cap) {
+    return std::snprintf(out, cap,
+                         "on-foot hud probe: watch on: %s 0x%llX (0x%llX+0x%llX) on debug slot %u, write, 4 bytes: %u thread(s), %u skipped "
+                         "(slot taken), %u could not be set",
+                         flagName(flag), static_cast<unsigned long long>(address), static_cast<unsigned long long>(object),
+                         static_cast<unsigned long long>(flagOffset(flag)), kFlagSlot[flag], armed, skipped, failed);
+}
+inline int formatWatchNotOn(int flag, uint64_t address, const char* why, char* out, size_t cap) {
+    return std::snprintf(out, cap, "on-foot hud probe: watch NOT on: %s 0x%llX: %s; the state and graph lines go on", flagName(flag),
+                         static_cast<unsigned long long>(address), why);
+}
+inline int formatWatchOff(int flag, uint64_t address, const char* why, const SiteTable& t, char* out, size_t cap) {
+    return std::snprintf(out, cap, "on-foot hud probe: watch off: %s 0x%llX: %s; %d site(s), %llu hit(s), %llu from sites that did not fit",
+                         flagName(flag), static_cast<unsigned long long>(address), why, t.sites(), static_cast<unsigned long long>(t.hits()),
+                         static_cast<unsigned long long>(t.overflow()));
+}
+// A site is the instruction AND whether it wrote 0: the handler keys a row by siteKey, so one place that writes both 1 and 0 gives two
+// lines, and the 0 is never hidden behind a first 1. A user-mode address never has bit 63.
+constexpr uint64_t kSiteZeroBit = 1ull << 63;
+inline uint64_t siteKey(uint64_t rip, uint8_t value) { return value ? rip : rip | kSiteZeroBit; }
+
+// One line per site: the instruction after the write, the byte then, the callers (unwound from the writer's own context).
+inline int formatWriter(int flag, int row, const Site& s, uint64_t object, uint64_t base, uint64_t imageSize, char* out, size_t cap) {
+    char at[100], callers[400];
+    const uint64_t rip = s.rip.load(std::memory_order_acquire) & ~kSiteZeroBit;
+    formatCallers(&rip, 1, base, imageSize, at, sizeof(at));
+    formatCallers(s.stack, s.frames, base, imageSize, callers, sizeof(callers));
+    return std::snprintf(out, cap, "on-foot hud probe: writer #%d of the %s of 0x%llX: at %s (after the write), value %u, thread %u, from %s",
+                         row + 1, flagName(flag), static_cast<unsigned long long>(object), at, s.value, s.thread, callers);
+}
+
+// ---- the .13 lines ------------------------------------------------------------------------------------------------------------------
+
+inline int formatPointHooked(int point, uint64_t target, size_t moved, char* out, size_t cap) {
+    return std::snprintf(out, cap, "on-foot hud probe: hooked %s at EliteDangerous64.exe+0x%llX (0x%llX), %zu bytes verified, %zu moved; %s",
+                         pointName(point), static_cast<unsigned long long>(kPointRva[point]), static_cast<unsigned long long>(target),
+                         kPrologueBytes, moved,
+                         point == kPointWalk ? "it reads where the PostGUI nodes are before the original"
+                                             : "it calls the original unchanged and then says which PostGUI node moved and who moved it");
+}
+inline int formatPointWrongBytes(int point, char* out, size_t cap) {
+    return std::snprintf(out, cap,
+                         "on-foot hud probe: NOT installed: the %s at EliteDangerous64.exe+0x%llX does not begin with build 334473's %zu "
+                         "bytes; that one was not patched, the others stand",
+                         pointName(point), static_cast<unsigned long long>(kPointRva[point]), kPrologueBytes);
+}
+inline int formatTracked(int kind, int32_t viewBit, uint64_t node, uint64_t was, char* out, size_t cap) {
+    if (!was)
+        return std::snprintf(out, cap, "on-foot hud probe: tracking %s node 0x%llX of view bit %d", kindName(kind),
+                             static_cast<unsigned long long>(node), viewBit);
+    return std::snprintf(out, cap, "on-foot hud probe: tracking %s node 0x%llX of view bit %d (was 0x%llX: the pipeline was rebuilt)",
+                         kindName(kind), static_cast<unsigned long long>(node), viewBit, static_cast<unsigned long long>(was));
+}
+inline int formatGraphOf(int kind, int32_t viewBit, uint64_t node, uint64_t graph, uint64_t was, char* out, size_t cap) {
+    return std::snprintf(out, cap, "on-foot hud probe: %s node 0x%llX of view bit %d is in graph 0x%llX%s", kindName(kind),
+                         static_cast<unsigned long long>(node), viewBit, static_cast<unsigned long long>(graph), was ? " (a new graph)" : "");
+}
+// flag, graphOn: the bytes as the frame thread reads them for the line (-1 unreadable).
+inline int formatState(int kind, int32_t viewBit, State s, uint64_t node, int flag, uint64_t graph, int graphOn, int onFoot, char* out, size_t cap) {
+    char f[8], g[8];
+    if (flag < 0) std::snprintf(f, sizeof(f), "?");
+    else std::snprintf(f, sizeof(f), "%d", flag);
+    if (graphOn < 0) std::snprintf(g, sizeof(g), "?");
+    else std::snprintf(g, sizeof(g), "%d", graphOn);
+    return std::snprintf(out, cap, "on-foot hud probe: state %s view bit %d: %s; node 0x%llX flag=%s graph 0x%llX on=%s on-foot=%s",
+                         kindName(kind), viewBit, stateText(s), static_cast<unsigned long long>(node), f, static_cast<unsigned long long>(graph), g,
+                         onFoot < 0 ? "?" : onFoot ? "yes" : "no");
+}
+
+// The graph's 30-second line, beside the summary: the walks, each tracked node's state, the PostGUI nodes moved, the watches.
+struct GraphCounts {
+    uint64_t walks = 0, idle = 0, unreadable = 0, postgui = 0, other = 0, lost = 0, hits = 0, held = 0;
+};
+struct TrackedView {
+    int kind = 0;
+    int32_t viewBit = -1;
+    State state = kStateUnknown;
+};
+class GraphSummary {
+public:
+    static constexpr uint64_t kWindowMs = 30000;
+    int step(uint64_t nowMs, const GraphCounts& total, const TrackedView* tracked, int n, char* out, size_t cap) {
+        if (!m_started) {
+            m_started = true;
+            m_since = nowMs;
+            m_base = total;
+            return 0;
+        }
+        if (nowMs - m_since < kWindowMs) return 0;
+        const GraphCounts w{total.walks - m_base.walks, total.idle - m_base.idle, total.unreadable - m_base.unreadable,
+                            total.postgui - m_base.postgui, total.other - m_base.other, total.lost - m_base.lost,
+                            total.hits - m_base.hits, total.held - m_base.held};
+        const uint64_t seconds = (nowMs - m_since) / 1000;
+        m_since = nowMs;
+        m_base = total;
+        int len = std::snprintf(out, cap, "on-foot hud probe: %llu s graph: %llu node-calling walk(s), %llu without nodes, %llu unreadable; ",
+                                static_cast<unsigned long long>(seconds), static_cast<unsigned long long>(w.walks),
+                                static_cast<unsigned long long>(w.idle), static_cast<unsigned long long>(w.unreadable));
+        bool hud = false;
+        for (int i = 0; i < n; ++i) hud = hud || tracked[i].kind == kKindHud;
+        if (!hud && len > 0 && static_cast<size_t>(len) < cap)
+            len += std::snprintf(out + len, cap - len, "the hud 36-39 node is not recognised (none drawn since recording began)");
+        for (int i = 0; i < n && len > 0 && static_cast<size_t>(len) < cap; ++i)
+            len += std::snprintf(out + len, cap - len, "%s%s bit %d %s", i ? ", " : "", kindName(tracked[i].kind), tracked[i].viewBit,
+                                 stateShort(tracked[i].state));
+        if (len > 0 && static_cast<size_t>(len) < cap)
+            len += std::snprintf(out + len, cap - len,
+                                 "; graph events: %llu PostGUI, %llu other, %llu lost; watch: %llu hit(s); %llu state line(s) kept back",
+                                 static_cast<unsigned long long>(w.postgui), static_cast<unsigned long long>(w.other),
+                                 static_cast<unsigned long long>(w.lost), static_cast<unsigned long long>(w.hits),
+                                 static_cast<unsigned long long>(w.held));
+        return len;
+    }
+
+private:
+    bool m_started = false;
+    uint64_t m_since = 0;
+    GraphCounts m_base;
+};
 
 }  // namespace ohp
 }  // namespace edvr
