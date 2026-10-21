@@ -6,10 +6,12 @@
 #include "journal_watch.h"
 #include "../common/code_hook.h"
 #include "../common/config.h"
+#include "../common/frame_flag.h"
 #include "../common/log.h"
 #include <windows.h>
 #include <tlhelp32.h>
 #include <atomic>
+#include <cmath>
 #include <cstring>
 
 namespace edvr {
@@ -18,6 +20,7 @@ namespace {
 using Fn1 = void (*)(void*);
 using Fn2 = void (*)(void*, void*);
 using FnWalk = void (*)(void*, uint64_t);
+using FnSwitch = uint64_t (*)(void*, uint64_t);
 
 // One hooked function of the game: its CodeHook, the relay page near it and the forward to its original.
 struct Point {
@@ -58,6 +61,10 @@ std::atomic<uint64_t> g_walks{0}, g_idleWalks{0}, g_walkFaults{0};
 // The graph add and remove hooks: PostGUI nodes' events to the frame thread; the others only counted.
 ohp::Ring<32, ohp::GraphEvent> g_events;
 std::atomic<uint64_t> g_graphPostGui{0}, g_graphOther{0};
+// .15: the passes the PostGUI switch is called with (the switch hook notes them), and the frame mask of the HUD node drawn with each
+// camera (the frame thread's, from the node snapshots).
+ohp::PassTable g_passes;
+ohp::MaskByCamera g_masks;
 
 // ---- the hook side: no lock, no allocation, no log -------------------------------------------------------------------------------
 
@@ -189,12 +196,20 @@ __declspec(noinline) void graphHook(void* graph, void* node) {
     g_events.push(e);
 }
 
+// BEFORE the original, and nothing more: the pass goes in the table, the frame thread reads its cameras. The bool is forwarded as the
+// caller left the whole register, and the original's result is returned.
+__declspec(noinline) uint64_t passSwitchHook(void* pass, uint64_t on) {
+    if (g_recording.load(std::memory_order_relaxed) && pass) g_passes.note(reinterpret_cast<uint64_t>(pass));
+    return reinterpret_cast<FnSwitch>(g_points[ohp::kPointPass].original.load(std::memory_order_acquire))(pass, on);
+}
+
 const void* hookFor(int point) {
     switch (point) {
         case ohp::kPointNodeDraw: return reinterpret_cast<const void*>(&nodeDrawHook);
         case ohp::kPointWalk: return reinterpret_cast<const void*>(&walkHook);
         case ohp::kPointAdd: return reinterpret_cast<const void*>(&graphHook<ohp::kPointAdd>);
-        default: return reinterpret_cast<const void*>(&graphHook<ohp::kPointRemove>);
+        case ohp::kPointRemove: return reinterpret_cast<const void*>(&graphHook<ohp::kPointRemove>);
+        default: return reinterpret_cast<const void*>(&passSwitchHook);
     }
 }
 
@@ -713,6 +728,7 @@ void onFootHudProbeDrain(uint64_t nowMs, int onFoot, OnFootHudProbeSink sink, vo
     ohp::Snapshot s, write;
     while (g_ring.pop(&s)) {
         s.onFoot = onFoot;
+        if (s.first == ohp::kHudFirst) g_masks.note(s.cam, s.ctxMask, nowMs);  // every draw, before the filter: the pose lines' mask
         if (filter.admit(s, nowMs, &write)) say(sink, ctx, ohp::formatSnapshot(write, line, sizeof(line)), line);
     }
     while (filter.due(nowMs, &write)) say(sink, ctx, ohp::formatSnapshot(write, line, sizeof(line)), line);
@@ -727,13 +743,131 @@ void onFootHudProbeDrain(uint64_t nowMs, int onFoot, OnFootHudProbeSink sink, vo
     drainGraph(nowMs, onFoot, sink, ctx);
 }
 
+void onFootHudProbeCameraDrain(uint64_t nowMs, int onFoot, int stereo, const float* head12, OnFootHudProbeSink sink, void* ctx) {
+    // Per cell: the pass seen there, its calls and when it was last called, and the sample its next yaw step starts from.
+    struct Track {
+        uint64_t pass = 0, calls = 0, calledMs = 0, sampleMs = 0;
+        bool sampled = false;
+        int mode = -1;
+        float mainYaw = 0, postYaw = 0, headYaw = 0;
+    };
+    static Track track[ohp::PassTable::kCells];
+    static ohp::Follow follow[ohp::kViews][2];
+    static ohp::SwitchWindow window;
+    static bool started = false;
+    static uint64_t lastMs = 0, nextSampleMs = 0, windowMs = 0, overflowBase = 0;
+    static int lastOnFoot = -2;
+    char line[1600];
+    // The first drain, or the first after recording was off: every pass counts as called now, not as gone.
+    const bool resumed = !started || nowMs - lastMs > ohp::kCalledMs;
+    if (!started) {
+        started = true;
+        windowMs = nowMs;
+        overflowBase = g_passes.overflow();
+    }
+    lastMs = nowMs;
+
+    // The cells: a new pass, its calls, a pass the game no longer calls.
+    for (int c = 0; c < ohp::PassTable::kCells; ++c) {
+        Track& t = track[c];
+        const uint64_t pass = g_passes.pass(c), calls = g_passes.calls(c);
+        if (pass != t.pass) {
+            t = Track{};
+            t.pass = pass;
+            t.calls = calls;
+            t.calledMs = nowMs;
+            if (pass) {
+                ++window.fresh;
+                ohp::PassPose p;
+                ohp::readPass(pass, &sehRead, nullptr, &p);
+                say(sink, ctx, ohp::formatNewPass(p, line, sizeof(line)), line);
+            }
+            continue;
+        }
+        if (!pass) continue;
+        if (calls != t.calls) {
+            window.calls += calls - t.calls;
+            t.calls = calls;
+            t.calledMs = nowMs;
+        } else if (resumed) {
+            t.calledMs = nowMs;
+        } else if (nowMs - t.calledMs >= ohp::kRetireMs) {
+            g_passes.retire(c, pass);
+            ++window.retired;
+            t = Track{};
+        }
+    }
+
+    // The samples: every 0.5 s on foot, 5 s elsewhere, and at once when on foot changes. Each pass called within the last second gives
+    // a pose line, and a yaw step from its sample before when that one is near enough and in the same mode.
+    if (onFoot != lastOnFoot) {
+        lastOnFoot = onFoot;
+        nextSampleMs = nowMs;
+    }
+    if (nowMs >= nextSampleMs) {
+        nextSampleMs = nowMs + (onFoot == 1 ? ohp::kSampleOnFootMs : ohp::kSampleElsewhereMs);
+        const float headYaw = head12 ? ohp::headAngles(head12).yaw : NAN;
+        for (int c = 0; c < ohp::PassTable::kCells; ++c) {
+            Track& t = track[c];
+            if (!t.pass || nowMs - t.calledMs > ohp::kCalledMs) continue;
+            ohp::PassPose p;
+            ohp::readPass(t.pass, &sehRead, nullptr, &p);
+            uint64_t mask = 0;
+            const int by = g_masks.find(p.post.cam, nowMs, &mask) ? 1 : g_masks.find(p.main.cam, nowMs, &mask) ? 2 : 0;
+            say(sink, ctx, ohp::formatPose(p, onFoot, stereo, head12, by, mask, line, sizeof(line)), line);
+            ++window.poses;
+            if (!p.main.read || !p.post.read) {
+                t.sampled = false;
+                continue;
+            }
+            const float mainYaw = ohp::cameraAngles(p.main.m).yaw, postYaw = ohp::cameraAngles(p.post.m).yaw;
+            if (t.sampled && t.mode == stereo && nowMs - t.sampleMs <= ohp::kStepMs && p.view >= 0 && p.view < ohp::kViews && (stereo == 0 || stereo == 1))
+                follow[p.view][stereo].add(ohp::wrapDeg(mainYaw - t.mainYaw), ohp::wrapDeg(postYaw - t.postYaw), ohp::wrapDeg(headYaw - t.headYaw));
+            t.sampled = true;
+            t.sampleMs = nowMs;
+            t.mode = stereo;
+            t.mainYaw = mainYaw;
+            t.postYaw = postYaw;
+            t.headYaw = headYaw;
+        }
+    }
+
+    // Every 30 s: each view and mode's follow line, then the switch's.
+    if (nowMs - windowMs >= ohp::kFollowWindowMs) {
+        const uint64_t seconds = (nowMs - windowMs) / 1000;
+        windowMs = nowMs;
+        for (int v = 0; v < ohp::kViews; ++v) {
+            for (int m = 0; m < 2; ++m) {
+                if (follow[v][m].any()) say(sink, ctx, ohp::formatFollow(v, m, seconds, follow[v][m], line, sizeof(line)), line);
+                follow[v][m] = ohp::Follow{};
+            }
+        }
+        uint64_t passes[ohp::PassTable::kCells] = {};
+        int32_t views[ohp::PassTable::kCells] = {};
+        int n = 0;
+        for (const Track& t : track) {
+            if (!t.pass) continue;
+            passes[n] = t.pass;
+            if (!sehRead(nullptr, t.pass + ohp::kPassView, &views[n], sizeof(views[n]))) views[n] = -1;
+            ++n;
+        }
+        const uint64_t overflow = g_passes.overflow();
+        window.overflow = overflow - overflowBase;
+        overflowBase = overflow;
+        say(sink, ctx, ohp::formatSwitchSummary(seconds, window, passes, views, n, line, sizeof(line)), line);
+        window = ohp::SwitchWindow{};
+    }
+}
+
 void onFootHudProbeFrameBoundary() {
     static uint32_t generation = ~0u;
     static bool on = false, said = false, tried = false;
+    static int stereo = 1;  // experimental.native_vr_on_foot, the pose lines' mode
     const Config& cfg = Config::get();
     const uint32_t now = cfg.generation();
     if (now != generation) {
         generation = now;
+        stereo = cfg.getBool("experimental.native_vr_on_foot", true) ? 1 : 0;
         const bool want = cfg.getBool("experimental.on_foot_hud_probe", false);
         if (!said || want != on) {
             char line[200];
@@ -754,7 +888,10 @@ void onFootHudProbeFrameBoundary() {
     onFootHudProbeSetRecording(recording);
     if (recording) {
         const int onFoot = journalOnFootKnown() ? (journalOnFoot() ? 1 : 0) : -1;
-        onFootHudProbeDrain(GetTickCount64(), onFoot, &logSink, nullptr);
+        const uint64_t nowMs = GetTickCount64();
+        onFootHudProbeDrain(nowMs, onFoot, &logSink, nullptr);
+        float head[12];
+        onFootHudProbeCameraDrain(nowMs, onFoot, stereo, headPose(head) ? head : nullptr, &logSink, nullptr);
     } else {
         onFootHudProbeStopWatches("the key is off", &logSink, nullptr);
     }

@@ -3054,7 +3054,9 @@ REM EDVRonFOOT: build gate for the on-foot HUD probe (src\d3d11\on_foot_hud_prob
 REM on_foot_hud_probe_core.h on a fake game node in the rig's memory: which nodes are ours, the mask, the pockets, the view name, the
 REM change filter, the summary, the ring and every line's text. Part B compiles the REAL glue with the real CodeHook on a synthetic
 REM function with the game's prologue: another build and wrong bytes refused with one line, the node forwarded unchanged, the snapshot
-REM after the original, forward only while off, another vtable not read, an unreadable field survived with one line.
+REM after the original, forward only while off, another vtable not read, an unreadable field survived with one line. .15: the
+REM cameras' angles, the follow slopes, the pass table and their lines; the PostGUI pass switch hooked on its own synthetic function,
+REM the pass forwarded unchanged and noted, the camera drain's pose, follow and switch lines over two 30-second windows.
 if not exist "%OBJ%\onfoothudprobe" mkdir "%OBJ%\onfoothudprobe"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^

@@ -8,10 +8,15 @@
 // game's prologue: another build is refused with one line; wrong bytes are refused with one line and left untouched; then it is
 // hooked; the node reaches the original unchanged, the snapshot is taken after the original (which hands models in during the call);
 // with recording off the hook only forwards; a node of another vtable is not read; an unreadable field is survived with one line.
+// .15: Part A15 drives the cameras' half of the core (the angles of a camera and of the head, the yaw step across +/-180, the follow
+// slopes 1, 0 and -1, too little turn, a jump left out, the pass table, every line's text with "none" for what could not be read);
+// Part B15 hooks a synthetic function that begins with the PostGUI pass switch's bytes and drives the camera drain over two
+// 30-second windows on passes and cameras in the rig's memory.
 #include "../../src/d3d11/on_foot_hud_probe.h"
 #include "../../src/d3d11/on_foot_hud_probe_core.h"
 #include "../../src/d3d11/debug_register_core.h"
 #include <windows.h>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -21,6 +26,7 @@ namespace edvr {
 void breadcrumb(const char*) {}  // production guard.cpp's crash-channel dependency, as the other rigs stub it
 bool journalOnFootKnown() { return false; }  // journal_watch.cpp's, for the frame boundary the rig never calls
 bool journalOnFoot() { return false; }
+bool headPose(float*) { return false; }  // frame_flag.cpp's, for the same
 }  // namespace edvr
 
 using namespace edvr;
@@ -440,9 +446,195 @@ void partA13() {
           "graph summary: the states and the window's counts");
 }
 
+// ---- Part A, .15: the cameras ---------------------------------------------------------------------------------------------------
+
+bool nearDeg(float a, float b) { return std::fabs(a - b) <= 0.05f; }
+
+// A camera's pose block for a yaw, pitch and roll in degrees, as cameraAngles reads it: rows right, up, forward, then the position.
+void cameraBlock(float* m, float yawDeg, float pitchDeg, float rollDeg, float x = 0.f, float y = 0.f, float z = 0.f) {
+    const float a = yawDeg / ohp::kDegrees, p = pitchDeg / ohp::kDegrees, r = rollDeg / ohp::kDegrees;
+    const float right[3] = {std::cos(a), 0.f, -std::sin(a)};
+    const float up[3] = {-std::sin(a) * std::sin(p), std::cos(p), -std::cos(a) * std::sin(p)};
+    for (int i = 0; i < 3; ++i) {
+        m[i] = right[i] * std::cos(r) + up[i] * std::sin(r);
+        m[4 + i] = -right[i] * std::sin(r) + up[i] * std::cos(r);
+    }
+    m[8] = std::sin(a) * std::cos(p);
+    m[9] = std::sin(p);
+    m[10] = std::cos(a) * std::cos(p);
+    m[3] = m[7] = m[11] = 0.f;
+    m[12] = x;
+    m[13] = y;
+    m[14] = z;
+    m[15] = 1.f;
+}
+// The head as headPose has it: OpenVR, row-major 3x4, the axes in the columns, forward -Z (the third column is the negated forward).
+void headBlock(float* m12, float yawDeg, float pitchDeg) {
+    float m[16];
+    cameraBlock(m, yawDeg, pitchDeg, 0.f);
+    for (int i = 0; i < 3; ++i) {
+        m12[4 * i + 0] = m[i];
+        m12[4 * i + 1] = m[4 + i];
+        m12[4 * i + 2] = -m[8 + i];
+        m12[4 * i + 3] = 0.f;
+    }
+}
+
+void partA15() {
+    float m[16];
+    cameraBlock(m, 30.f, 0.f, 0.f);
+    ohp::Angles a = ohp::cameraAngles(m);
+    check(nearDeg(a.yaw, 30.f) && nearDeg(a.pitch, 0.f) && nearDeg(a.roll, 0.f), "angles: a camera turned 30 deg");
+    cameraBlock(m, -30.f, 0.f, 0.f);
+    check(nearDeg(ohp::cameraAngles(m).yaw, -30.f), "angles: a camera turned -30 deg");
+    cameraBlock(m, 30.f, 20.f, 10.f);
+    a = ohp::cameraAngles(m);
+    check(nearDeg(a.yaw, 30.f) && nearDeg(a.pitch, 20.f) && nearDeg(a.roll, 10.f), "angles: a camera at yaw 30, pitch 20, roll 10");
+    float h[12];
+    headBlock(h, 30.f, 20.f);
+    a = ohp::headAngles(h);
+    check(nearDeg(a.yaw, 30.f) && nearDeg(a.pitch, 20.f), "angles: the head turned 30 and up 20");
+    headBlock(h, -30.f, 0.f);
+    check(nearDeg(ohp::headAngles(h).yaw, -30.f), "angles: the head turned -30");
+
+    // The yaw step.
+    check(nearDeg(ohp::wrapDeg(-170.f - 170.f), 20.f) && nearDeg(ohp::wrapDeg(170.f - -170.f), -20.f) && nearDeg(ohp::wrapDeg(180.f), 180.f) &&
+              nearDeg(ohp::wrapDeg(-180.f), 180.f) && nearDeg(ohp::wrapDeg(10.f), 10.f) && std::isnan(ohp::wrapDeg(NAN)),
+          "step: across +/-180 the short way, in (-180, 180]");
+
+    // The follow slopes.
+    ohp::Follow same, still, back;
+    for (int i = 0; i < 6; ++i) {
+        const float d = i % 2 ? -10.f : 10.f;
+        same.add(d, d, d);
+        still.add(d, 0.f, NAN);
+        back.add(d, -d, -d);
+    }
+    char line[1600], want[800];
+    check(ohp::formatFollow(0, 1, 30, same, line, sizeof(line)) > 0 &&
+              std::strcmp(line, "on-foot hud probe: 30 s follow view 0 stereo: postgui/main k=1.00 (main turned 60 deg); main/head k=1.00 (head "
+                                "turned 60 deg); 6 step(s), 0 left out (a yaw step over 90 deg)") == 0,
+          "follow: turning the same way, 1");
+    ohp::formatFollow(1, 0, 30, still, line, sizeof(line));
+    check(std::strstr(line, "follow view 1 cinema: postgui/main k=0.00 (main turned 60 deg); main/head no head pose") != nullptr,
+          "follow: not turning, 0; no head pose");
+    ohp::formatFollow(0, 1, 30, back, line, sizeof(line));
+    check(std::strstr(line, "postgui/main k=-1.00") && std::strstr(line, "main/head k=-1.00"), "follow: turning the other way, -1");
+    ohp::Follow little;
+    little.add(10.f, 10.f, 3.f);
+    little.add(-5.f, -5.f, 3.f);
+    ohp::formatFollow(0, 1, 30, little, line, sizeof(line));
+    check(std::strstr(line, "postgui/main too little turn (main 15 deg); main/head too little turn (head 6 deg)") != nullptr,
+          "follow: under 20 deg in all, too little");
+    ohp::Follow jumpy;
+    for (int i = 0; i < 3; ++i) jumpy.add(10.f, 10.f, NAN);
+    jumpy.add(100.f, 0.f, NAN);
+    jumpy.add(10.f, 10.f, 95.f);
+    jumpy.add(10.f, INFINITY, NAN);
+    check(jumpy.steps == 3 && jumpy.jumps == 3 && nearDeg(static_cast<float>(jumpy.mainTurn), 30.f) && jumpy.headSteps == 0,
+          "follow: a step over 90 deg, or not finite, is left out and counted");
+    ohp::formatFollow(0, 1, 30, jumpy, line, sizeof(line));
+    check(std::strstr(line, "postgui/main k=1.00 (main turned 30 deg)") && std::strstr(line, "3 step(s), 3 left out"), "follow text: the jumps");
+    check(!ohp::Follow{}.any() && jumpy.any(), "follow: an empty one has nothing to say");
+
+    // The pass table.
+    static ohp::PassTable table;
+    table.note(0xA0);
+    table.note(0xA0);
+    table.note(0xB0);
+    table.note(0xC0);
+    table.note(0xD0);
+    table.note(0xE0);
+    check(table.pass(0) == 0xA0 && table.calls(0) == 2 && table.pass(3) == 0xD0 && table.overflow() == 1,
+          "passes: four cells, a repeat counted in its own cell, the fifth did not fit");
+    table.retire(0, 0xA0);
+    table.note(0xB0);
+    check(table.pass(0) == 0 && table.calls(1) == 2, "passes: a freed cell does not take a pass already in another");
+    table.note(0xE0);
+    check(table.pass(0) == 0xE0 && table.overflow() == 1, "passes: a new pass takes the freed cell");
+    table.retire(1, 0x999);
+    check(table.pass(1) == 0xB0, "passes: retiring another pass than the cell's does nothing");
+
+    // A pass and its cameras, and the lines.
+    static struct {
+        uint8_t pass[0x60];
+        uint8_t main[0x260];
+        uint8_t post[0x260];
+    } f = {};
+    put<int32_t>(f.pass, ohp::kPassView, 0);
+    put(f.pass, ohp::kPassMainCamera, addr(f.main));
+    put(f.pass, ohp::kPassPostGuiCamera, addr(f.post));
+    cameraBlock(m, 30.f, 0.f, 0.f, 1.f, 2.f, 3.f);
+    std::memcpy(f.main + ohp::kCamPose, m, sizeof(m));
+    const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    std::memcpy(f.post + ohp::kCamPose, identity, sizeof(identity));
+    put<uint32_t>(f.post, ohp::kCamFlags250, 0xF);
+    ohp::PassPose p;
+    ohp::readPass(addr(f.pass), &plainRead, nullptr, &p);
+    check(p.view == 0 && p.main.read && p.post.read && p.post.flagsRead && p.post.flags250 == 0xF && p.main.cam == addr(f.main) &&
+              p.post.cam == addr(f.post),
+          "pose: the pass and both cameras read");
+    ohp::formatPose(p, 1, 1, h, 1, 0x204, line, sizeof(line));
+    std::snprintf(want, sizeof(want),
+                  "on-foot hud probe: pose view 0 stereo on-foot=yes pass 0x%llX: main 0x%llX yaw 30.0 pitch 0.0 roll 0.0 at (1.00,2.00,3.00); "
+                  "postgui 0x%llX yaw 0.0 pitch 0.0 roll 0.0 at (0.00,0.00,0.00) rows (1.000,0.000,0.000; 0.000,1.000,0.000; 0.000,0.000,1.000) "
+                  "flags250=0xF; postgui-main yaw -30.0; head yaw -30.0 pitch 0.0; hud mask 0x204",
+                  static_cast<unsigned long long>(addr(f.pass)), static_cast<unsigned long long>(addr(f.main)),
+                  static_cast<unsigned long long>(addr(f.post)));
+    check(std::strcmp(line, want) == 0, "pose text: both cameras, the PostGUI rows, the difference, the head, the mask");
+    put(f.pass, ohp::kPassPostGuiCamera, uint64_t(0x10));  // a pointer no game would have
+    ohp::readPass(addr(f.pass), &plainRead, nullptr, &p);
+    ohp::formatPose(p, 0, 0, nullptr, 2, 0x20C, line, sizeof(line));
+    check(std::strstr(line, "pose view 0 cinema on-foot=no") &&
+              std::strstr(line, "; postgui 0x10 none; postgui-main none; head none; hud mask 0x20C (by the main camera)") && !std::strstr(line, "rows"),
+          "pose text: an unreadable camera and no head pose are none");
+    ohp::formatPose(p, -1, -1, nullptr, 0, 0, line, sizeof(line));
+    check(std::strstr(line, "pose view 0 ? on-foot=?") && std::strstr(line, "; hud mask ?"), "pose text: nothing known, ?");
+    put(f.pass, ohp::kPassPostGuiCamera, addr(f.main));
+    ohp::readPass(addr(f.pass), &plainRead, nullptr, &p);
+    ohp::formatNewPass(p, line, sizeof(line));
+    std::snprintf(want, sizeof(want), "on-foot hud probe: pass switch: new pass 0x%llX, view 0: main camera 0x%llX, PostGUI camera 0x%llX (the same camera)",
+                  static_cast<unsigned long long>(addr(f.pass)), static_cast<unsigned long long>(addr(f.main)),
+                  static_cast<unsigned long long>(addr(f.main)));
+    check(std::strcmp(line, want) == 0, "text: a new pass whose PostGUI camera is the main one");
+    ohp::readPass(0x10, &plainRead, nullptr, &p);
+    ohp::formatNewPass(p, line, sizeof(line));
+    check(std::strstr(line, "new pass 0x10, view ?: main camera 0x0, PostGUI camera 0x0") && !std::strstr(line, "same"), "text: an unreadable pass");
+
+    // The masks by camera.
+    ohp::MaskByCamera masks;
+    uint64_t mask = 0;
+    masks.note(0xCA0, 0x204, 1000);
+    masks.note(0xCA0, 0x20C, 1500);
+    check(masks.find(0xCA0, 2000, &mask) && mask == 0x20C, "masks: the last per camera");
+    check(!masks.find(0xCA0, 2501, &mask) && !masks.find(0xCB0, 2000, &mask) && !masks.find(0, 2000, &mask),
+          "masks: none older than a second, of another camera, of no camera");
+    for (uint64_t c = 1; c <= 8; ++c) masks.note(0x1000 + c, c, 3000 + c);
+    check(!masks.find(0xCA0, 1600, &mask) && masks.find(0x1001, 3100, &mask) && mask == 1, "masks: eight cameras, the oldest made room");
+
+    // The switch's lines.
+    ohp::SwitchWindow w;
+    w.calls = 3600;
+    w.fresh = 2;
+    w.retired = 1;
+    w.poses = 120;
+    const uint64_t passes[2] = {0xAA0, 0xBB0};
+    const int32_t views[2] = {0, -1};
+    ohp::formatSwitchSummary(30, w, passes, views, 2, line, sizeof(line));
+    check(std::strcmp(line, "on-foot hud probe: 30 s pass switch: 3600 call(s); 2 pass(es) now: view 0 0xAA0, view ? 0xBB0; 2 new, 1 retired, 0 did "
+                            "not fit; 120 pose line(s)") == 0,
+          "text: the switch's 30-second line");
+    ohp::formatSwitchSummary(30, ohp::SwitchWindow{}, passes, views, 0, line, sizeof(line));
+    check(std::strstr(line, "0 call(s); 0 pass(es) now; 0 new") != nullptr, "text: a switch never called");
+    check(ohp::formatPointHooked(ohp::kPointPass, 0x1428AD4A0ull, 6, line, sizeof(line)) > 0 &&
+              std::strstr(line, "hooked pass switch at EliteDangerous64.exe+0x28AD4A0 (0x1428AD4A0), 16 bytes verified, 6 moved; it only notes the pass"),
+          "text: the switch hooked");
+}
+
 // ---- Part B: the real glue on a synthetic function -------------------------------------------------------------------------------
 
 FakeGame g_game;
+void (*g_draw)(void*) = nullptr;  // the hooked synthetic node draw, for Part B15
 volatile uint64_t g_originalSaw = 0;
 volatile int g_originalCalls = 0;
 bool g_handIn = false;
@@ -485,6 +677,7 @@ void partB() {
     const uintptr_t base = g_game.base();
     using Fn1 = void (*)(void*);
     auto draw = reinterpret_cast<Fn1>(page);
+    g_draw = draw;
 
     // Another build: a fake image whose PE stamp is not 334473's.
     std::vector<uint8_t> pe(0x200, 0);
@@ -787,6 +980,172 @@ void partB13() {
     check(g_lines.empty(), "graph glue: no writer after the watch is off");
 }
 
+// ---- Part B, .15: the pass switch on a synthetic function, the camera drain ---------------------------------------------------------
+
+volatile uint64_t g_switchPass = 0, g_switchOn = 0;
+volatile int g_switchCalls = 0;
+
+uint64_t fakeSwitch(uint8_t* pass, uint64_t on) {
+    g_switchPass = addr(pass);
+    g_switchOn = on;
+    ++g_switchCalls;
+    return 0x5A5A;
+}
+// The switch's 16 bytes (push rbx; sub rsp,20h; mov rbx,[rcx+2E0h]; cmp [rbx+70h],dl), undone (add rsp,20h; pop rbx), then the jump
+// into the stand-in.
+void writeSwitch(uint8_t* at) {
+    const uint8_t code[] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0x99, 0xE0, 0x02, 0x00, 0x00, 0x38, 0x53, 0x70,
+                            0x48, 0x83, 0xC4, 0x20, 0x5B};
+    std::memcpy(at, code, sizeof(code));
+    writeTail(at, sizeof(code), reinterpret_cast<const void*>(&fakeSwitch));
+}
+
+// A pass of the game: its view, its main camera here, its PostGUI camera wherever the rig says, and its PostGUI feature (the switch's
+// first instructions read pass+0x2E0 and that one's +0x70).
+struct FakePass {
+    uint8_t pass[0x340] = {};
+    uint8_t feature[0x80] = {};
+    uint8_t main[0x300] = {};
+    void build(int32_t view, uint64_t postCamera) {
+        put<int32_t>(pass, ohp::kPassView, view);
+        put(pass, ohp::kPassMainCamera, addr(main));
+        put(pass, ohp::kPassPostGuiCamera, postCamera);
+        put(pass, 0x2E0, addr(feature));
+    }
+};
+void setCamera(uint8_t* cam, float yawDeg, float x = 0.f, float y = 0.f, float z = 0.f) {
+    float m[16];
+    cameraBlock(m, yawDeg, 0.f, 0.f, x, y, z);
+    std::memcpy(cam + ohp::kCamPose, m, sizeof(m));
+}
+// Yaw steps of 10 deg: three up, three down, over and over.
+float triangle(int i) {
+    const int k = i % 6;
+    return 10.f * static_cast<float>(k < 3 ? k : 6 - k);
+}
+
+void partB15() {
+    auto* page = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
+    void* noAccess = VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_NOACCESS);
+    if (!page || !noAccess || !g_draw) {
+        check(false, "pass glue: a code page, a page that cannot be read, the hooked node draw");
+        return;
+    }
+    writeSwitch(page);
+    page[2] = 0x90;  // the switch's bytes are wrong at first
+    FlushInstructionCache(GetCurrentProcess(), page, 4096);
+    const uintptr_t base = g_game.base();
+    g_lines.clear();
+    check(!onFootHudProbeInstallPoint(ohp::kPointPass, base, addr(page), &sink, nullptr) && g_lines.size() == 1 &&
+              anyLine("NOT installed: the pass switch at EliteDangerous64.exe+0x28AD4A0 does not begin") && anyLine("the others stand") &&
+              page[0] == 0x40 && page[2] == 0x90,
+          "pass glue: wrong bytes, one line, untouched");
+    page[2] = 0x48;
+    FlushInstructionCache(GetCurrentProcess(), page, 4096);
+    g_lines.clear();
+    check(onFootHudProbeInstallPoint(ohp::kPointPass, base, addr(page), &sink, nullptr) && g_lines.size() == 1 &&
+              anyLine("hooked pass switch at EliteDangerous64.exe+0x28AD4A0") && anyLine("6 moved") && page[0] == 0xE9,
+          "pass glue: the right bytes are hooked, six moved");
+
+    using FnSwitch = uint64_t (*)(void*, uint64_t);
+    auto sw = reinterpret_cast<FnSwitch>(page);
+    static FakePass a, b;
+    a.build(0, addr(g_game.cam));  // view 0's PostGUI camera is the one the HUD node is drawn with
+    b.build(1, addr(noAccess));    // view 1's cannot be read
+    setCamera(a.main, 30.f, 1.f, 2.f, 3.f);
+    setCamera(b.main, 0.f);
+    setCamera(g_game.cam, 0.f);
+    float head[12];
+    headBlock(head, 10.f, 0.f);
+
+    // Off: only forwarded -- the whole register as the caller left it, the original's result back -- and nothing noted.
+    onFootHudProbeSetRecording(false);
+    const uint64_t result = sw(a.pass, 0x100000001ull);
+    check(result == 0x5A5A && g_switchCalls == 1 && g_switchPass == addr(a.pass) && g_switchOn == 0x100000001ull,
+          "pass glue: off, forwarded unchanged with the original's result");
+    onFootHudProbeSetRecording(true);
+    const uint64_t t0 = 200000;
+    g_lines.clear();
+    onFootHudProbeCameraDrain(t0, 1, 1, head, &sink, nullptr);
+    check(g_lines.empty(), "pass glue: a call while off is not noted");
+
+    // On: each pass noted and said once; the pose lines wait for the half second.
+    sw(a.pass, 1);
+    sw(b.pass, 1);
+    g_lines.clear();
+    onFootHudProbeCameraDrain(t0 + 100, 1, 1, head, &sink, nullptr);
+    char want[600];
+    std::snprintf(want, sizeof(want), "pass switch: new pass 0x%llX, view 0: main camera 0x%llX, PostGUI camera 0x%llX",
+                  static_cast<unsigned long long>(addr(a.pass)), static_cast<unsigned long long>(addr(a.main)),
+                  static_cast<unsigned long long>(addr(g_game.cam)));
+    check(anyLine(want) && countLines("new pass") == 2 && countLines("pose view") == 0 && g_switchCalls == 3 && g_switchOn == 1,
+          "pass glue: on, both passes noted, said and forwarded");
+
+    // The half second: a pose line a pass. View 0's HUD node, drawn with its PostGUI camera, gives the mask.
+    g_draw(g_game.node);
+    onFootHudProbeDrain(t0 + 500, 1, &sink, nullptr);
+    sw(a.pass, 1);
+    sw(b.pass, 1);
+    g_lines.clear();
+    onFootHudProbeCameraDrain(t0 + 500, 1, 1, head, &sink, nullptr);
+    std::snprintf(want, sizeof(want),
+                  "pose view 0 stereo on-foot=yes pass 0x%llX: main 0x%llX yaw 30.0 pitch 0.0 roll 0.0 at (1.00,2.00,3.00); postgui 0x%llX yaw 0.0",
+                  static_cast<unsigned long long>(addr(a.pass)), static_cast<unsigned long long>(addr(a.main)),
+                  static_cast<unsigned long long>(addr(g_game.cam)));
+    check(anyLine(want) && anyLine("flags250=0xF; postgui-main yaw -30.0; head yaw 10.0 pitch 0.0; hud mask 0x4"),
+          "pass glue: view 0's pose line, the head, the mask of the node drawn with the PostGUI camera");
+    std::snprintf(want, sizeof(want), "; postgui 0x%llX none; postgui-main none; head yaw 10.0 pitch 0.0; hud mask ?",
+                  static_cast<unsigned long long>(addr(noAccess)));
+    check(countLines("pose view") == 2 && anyLine("pose view 1 stereo on-foot=yes") && anyLine(want),
+          "pass glue: view 1's PostGUI camera cannot be read: none, and no mask");
+
+    // Thirty seconds on foot in stereo, the head turning and both cameras with it: both slopes 1; view 1 has no steps.
+    uint64_t t = t0 + 500;
+    int i = 0;
+    while (t < t0 + 30000) {
+        ++i;
+        t += 500;
+        const float yaw = 30.f + triangle(i);
+        setCamera(a.main, yaw, 1.f, 2.f, 3.f);
+        setCamera(g_game.cam, yaw - 30.f);
+        headBlock(head, yaw - 20.f, 0.f);
+        sw(a.pass, 1);
+        sw(b.pass, 1);
+        if (t == t0 + 30000) g_lines.clear();
+        onFootHudProbeCameraDrain(t, 1, 1, head, &sink, nullptr);
+    }
+    check(anyLine("30 s follow view 0 stereo: postgui/main k=1.00 (main turned 590 deg); main/head k=1.00 (head turned 590 deg); 59 step(s), 0 left "
+                  "out") &&
+              countLines("follow view 1") == 0,
+          "pass glue: 30 s, the PostGUI camera turning with the main one, the main one with the head: 1 and 1");
+    check(anyLine("30 s pass switch: 120 call(s); 2 pass(es) now: view 0 0x") && anyLine(", view 1 0x") &&
+              anyLine("2 new, 0 retired, 0 did not fit; 120 pose line(s)"),
+          "pass glue: the switch's 30-second line");
+
+    // Thirty seconds in cinema, the PostGUI camera still, no head pose, view 1's pass no longer called: 0, and that pass retired.
+    for (int n = 0; n < 60; ++n) {
+        ++i;
+        t += 500;
+        setCamera(a.main, 30.f + triangle(i), 1.f, 2.f, 3.f);
+        sw(a.pass, 1);
+        if (t == t0 + 60000) g_lines.clear();
+        onFootHudProbeCameraDrain(t, 1, 0, nullptr, &sink, nullptr);
+    }
+    check(anyLine("30 s follow view 0 cinema: postgui/main k=0.00 (main turned 590 deg); main/head no head pose; 59 step(s)") &&
+              countLines("follow view 0 stereo") == 0 && anyLine("pose view 0 cinema") && anyLine("head none"),
+          "pass glue: 30 s in cinema, the PostGUI camera still: 0; the mode change makes no step");
+    check(anyLine("30 s pass switch: 60 call(s); 1 pass(es) now: view 0 0x") && anyLine("0 new, 1 retired, 0 did not fit; 62 pose line(s)"),
+          "pass glue: a pass not called for 2 s is retired");
+    sw(b.pass, 1);
+    g_lines.clear();
+    onFootHudProbeCameraDrain(t + 100, 1, 0, nullptr, &sink, nullptr);
+    std::snprintf(want, sizeof(want), "new pass 0x%llX, view 1", static_cast<unsigned long long>(addr(b.pass)));
+    check(anyLine(want), "pass glue: a retired pass called again is new again");
+
+    onFootHudProbeSetRecording(false);
+    onFootHudProbeStopWatches("the rig is done", &sink, nullptr);
+}
+
 // ---- Part C: the write watch, real, on this rig's threads -------------------------------------------------------------------------
 
 __declspec(noinline) void writeByte(volatile uint8_t* p, uint8_t v) { *p = v; }
@@ -863,9 +1222,11 @@ int main(int argc, char** argv) {
     }
     partA();
     partA13();
+    partA15();
     partC();  // before Part B: its writer table starts empty
     partB();
     partB13();
+    partB15();
     std::printf("%s: on_foot_hud_probe_test, %d checks, %d failed\n", g_failures ? "FAIL" : "PASS", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

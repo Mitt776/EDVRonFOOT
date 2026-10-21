@@ -31,6 +31,14 @@
 //     are re-armed when the journal's on-foot changes (threads started since), come off with the key, and come off for good after
 //     100 000 hits in 30 s.
 // Each point checks its own 16 bytes: wrong bytes refuse that one hook with one line and leave the others.
+//
+// .15 (flight .14: the lists 36-39 node is drawn on foot in stereo, but only the crosshair and the prompts, sliding off their objects
+// as the head turns): a fifth hook on the PostGUI pass switch (EliteDangerous64.exe+0x28AD4A0), BEFORE the original, only puts the pass
+// in a four-cell table. The frame thread says each new pass, gives back the cell of one the game no longer calls, and every 0.5 s on
+// foot (5 s elsewhere) writes a pose line per pass: the view, the main and the PostGUI camera's yaw, pitch, roll and position, the
+// PostGUI camera's raw rows, the head's yaw and pitch, the frame mask of the HUD node drawn with that camera, the mode
+// (experimental.native_vr_on_foot). Every 30 s, per view and mode: how the PostGUI camera's yaw followed the main camera's, and the
+// main camera's the head's; and the switch's own line (its calls: none means the hook never ran).
 #include <cstddef>
 #include <cstdint>
 
@@ -47,7 +55,7 @@ void onFootHudProbeFrameBoundary();
 // accepts is base + its RVA. `checkIdentity` checks base's PE stamp first. One line through `sink` either way. True once hooked
 // (later calls return true and say nothing). Frame thread.
 bool onFootHudProbeInstall(uintptr_t base, uintptr_t targetOverride, bool checkIdentity, OnFootHudProbeSink sink, void* ctx);
-// Hook one of the graph points (ohp::kPointWalk, kPointAdd, kPointRemove) at base + its RVA, or at `targetOverride`. No identity check:
+// Hook one of the other points (ohp::kPointWalk, kPointAdd, kPointRemove, kPointPass) at base + its RVA, or at `targetOverride`. No identity check:
 // the frame boundary calls it only once onFootHudProbeInstall passed it. One line either way; true once hooked. Frame thread.
 bool onFootHudProbeInstallPoint(int point, uintptr_t base, uintptr_t targetOverride, OnFootHudProbeSink sink, void* ctx);
 // The write watches (flag: ohp::kFlagNode on debug slot 2, ohp::kFlagGraph on slot 3), exposed for the rig. Arm puts the slot on every
@@ -68,5 +76,9 @@ uint64_t onFootHudProbeFaults();
 // graph's side: tracked nodes and their graphs, each node's state on a change, the graph events, the watches (armed, re-armed, their
 // writers, the fuse) and the graph's 30-second line. `onFoot` is the journal's answer (-1 unknown, 0, 1). Frame thread.
 void onFootHudProbeDrain(uint64_t nowMs, int onFoot, OnFootHudProbeSink sink, void* ctx);
+// .15, after onFootHudProbeDrain (which notes each HUD node's frame mask by its camera): the passes the switch hook noted -- a new
+// one's line, a retired one, the pose lines when due, the follow lines and the switch's line every 30 s. `stereo` is
+// experimental.native_vr_on_foot (1, 0); `head12` the head pose in headPose's layout, or null. Frame thread.
+void onFootHudProbeCameraDrain(uint64_t nowMs, int onFoot, int stereo, const float* head12, OnFootHudProbeSink sink, void* ctx);
 
 }  // namespace edvr

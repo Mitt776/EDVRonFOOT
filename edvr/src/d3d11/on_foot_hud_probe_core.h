@@ -21,6 +21,7 @@
 //     name ("PostGUIView_%s", a game string: length at +0, characters from +0x14), V+0x28 the view's bit, V+0x30 the bit's number.
 //   The camera: +0x18 and +0x250 flags, +0x8D0 and +0x8E0 masks, +0x8E8 its pocket.
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -497,8 +498,9 @@ inline int formatFault(uint64_t node, char* out, size_t cap) {
 //   0x6BFC60 (G, N) appends N to G's nodes; 0x6BFE60 (G, N) takes it out.
 // So on foot the node is off (H1), out of every graph (H2) or in a graph that is off (H3). The walk hook reads which, before the
 // original; the add and remove hooks say who moved a PostGUI node; two hardware write watches say who wrote N+0x30 and G+0x14.
-enum Point : int { kPointNodeDraw = 0, kPointWalk, kPointAdd, kPointRemove, kPointCount };
-constexpr uintptr_t kPointRva[kPointCount] = {kNodeDrawRva, 0x6BF980u, 0x6BFC60u, 0x6BFE60u};
+// .15 adds the PostGUI pass switch (kPointPass; "the PostGUI pass's cameras" below).
+enum Point : int { kPointNodeDraw = 0, kPointWalk, kPointAdd, kPointRemove, kPointPass, kPointCount };
+constexpr uintptr_t kPointRva[kPointCount] = {kNodeDrawRva, 0x6BF980u, 0x6BFC60u, 0x6BFE60u, 0x28AD4A0u};
 // Each point's first 16 bytes in build 334473 (capstone, 2026-10-22). None has a relative operand in the bytes CodeHook moves.
 constexpr uint8_t kPointPrologue[kPointCount][kPrologueBytes] = {
     {0x40, 0x53, 0x57, 0x41, 0x56, 0x48, 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00, 0x48, 0x8B, 0x81, 0x08},
@@ -508,13 +510,16 @@ constexpr uint8_t kPointPrologue[kPointCount][kPrologueBytes] = {
     {0x48, 0x89, 0x54, 0x24, 0x10, 0x48, 0x83, 0xEC, 0x28, 0x4C, 0x8B, 0x41, 0x28, 0x48, 0x83, 0xC1},
     // mov [rsp+10h],rbx; push rdi; sub rsp,20h; mov rax,[rcx+28h]; lea rdi,[rcx+18h]
     {0x48, 0x89, 0x5C, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0x41, 0x28, 0x48, 0x8D},
+    // push rbx; sub rsp,20h; mov rbx,[rcx+2E0h]; cmp [rbx+70h],dl
+    {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0x99, 0xE0, 0x02, 0x00, 0x00, 0x38, 0x53, 0x70},
 };
 inline const char* pointName(int p) {
     switch (p) {
         case kPointNodeDraw: return "node draw";
         case kPointWalk: return "graph walk";
         case kPointAdd: return "graph add";
-        default: return "graph remove";
+        case kPointRemove: return "graph remove";
+        default: return "pass switch";
     }
 }
 
@@ -833,8 +838,9 @@ inline int formatPointHooked(int point, uint64_t target, size_t moved, char* out
     return std::snprintf(out, cap, "on-foot hud probe: hooked %s at EliteDangerous64.exe+0x%llX (0x%llX), %zu bytes verified, %zu moved; %s",
                          pointName(point), static_cast<unsigned long long>(kPointRva[point]), static_cast<unsigned long long>(target),
                          kPrologueBytes, moved,
-                         point == kPointWalk ? "it reads where the PostGUI nodes are before the original"
-                                             : "it calls the original unchanged and then says which PostGUI node moved and who moved it");
+                         point == kPointWalk   ? "it reads where the PostGUI nodes are before the original"
+                         : point == kPointPass ? "it only notes the pass before the original and calls it unchanged"
+                                               : "it calls the original unchanged and then says which PostGUI node moved and who moved it");
 }
 inline int formatPointWrongBytes(int point, char* out, size_t cap) {
     return std::snprintf(out, cap,
@@ -915,6 +921,287 @@ private:
     uint64_t m_since = 0;
     GraphCounts m_base;
 };
+
+// ---- .15: the PostGUI pass's cameras (docs: "После .14") --------------------------------------------------------------------------
+// Flight .14: with the game's HUD switch held on, the lists 36-39 node is drawn on foot in stereo -- but it brings only the crosshair
+// and the prompts above objects, and they slide off their objects as the head turns; the main HUD is not there. M1 (no HUD models in
+// stereo), M2 (the PostGUI camera looks elsewhere and culls them) and M3 (another view or list) differ in the cameras:
+//   0x28AD4A0 (pass, bool): the FirstPersonPostGUI switch (pass+0x2E0 its feature). The frame function 0x2889A00 calls it every frame
+//     for view 0 and, while pass+0x328 is not 0, for view 1. Its hook (kPointPass) only notes the pass, before the original.
+//   0x28A7370, the pass's setup: pass+8 the view's number, +0x48 its main camera, +0x50 its PostGUI camera -- set up for view 0 only,
+//     as a copy of the main camera's pose block with the position zeroed.
+//   The camera's pose block, +0x20..+0x5F: the rotation rows +0x20, +0x30, +0x40 (4 floats each; the second "up", the third
+//     "forward") and the position +0x50.
+// The frame thread reads both cameras of each pass the switch is called with: a pose line every 0.5 s on foot (5 s elsewhere), and
+// every 30 s how the PostGUI camera's yaw followed the main camera's, and the main camera's the head's.
+constexpr uintptr_t kPassView = 0x8;  // i32
+constexpr uintptr_t kPassMainCamera = 0x48;
+constexpr uintptr_t kPassPostGuiCamera = 0x50;
+constexpr uintptr_t kCamPose = 0x20;
+constexpr int kPoseFloats = 16;  // +0x20..+0x5F
+constexpr int kViews = 4;        // views 0-3 get a follow summary of their own (the game makes PostGUI for 0 and 1)
+constexpr uint64_t kSampleOnFootMs = 500, kSampleElsewhereMs = 5000;
+constexpr uint64_t kCalledMs = 1000;  // a pass the switch was called with within this is sampled
+constexpr uint64_t kRetireMs = 2000;  // one it was not called with for this long gives its cell back (a rebuilt pipeline)
+constexpr uint64_t kStepMs = 1500;    // two samples further apart make no step: the 5-second ones never do
+constexpr uint64_t kFollowWindowMs = 30000;
+
+// The passes the switch is called with. Lock-free, as the census: the hook looks for its pass and counts the call; a new pass claims
+// an empty cell by compare-and-swap; a full table counts what did not fit. The frame thread gives back the cell of a pass the game no
+// longer calls, as a boarding or a disembark makes new ones.
+class PassTable {
+public:
+    static constexpr int kCells = 4;
+    void note(uint64_t pass) noexcept {
+        for (Cell& c : m_cells) {
+            if (c.pass.load(std::memory_order_acquire) == pass) {
+                c.calls.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+        }
+        for (Cell& c : m_cells) {
+            uint64_t now = 0;
+            if (c.pass.compare_exchange_strong(now, pass, std::memory_order_acq_rel) || now == pass) {
+                c.calls.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+        }
+        m_overflow.fetch_add(1, std::memory_order_relaxed);
+    }
+    uint64_t pass(int cell) const noexcept { return m_cells[cell].pass.load(std::memory_order_acquire); }
+    uint64_t calls(int cell) const noexcept { return m_cells[cell].calls.load(std::memory_order_relaxed); }
+    void retire(int cell, uint64_t pass) noexcept {
+        uint64_t expected = pass;
+        m_cells[cell].pass.compare_exchange_strong(expected, 0, std::memory_order_acq_rel);
+    }
+    uint64_t overflow() const noexcept { return m_overflow.load(std::memory_order_relaxed); }
+
+private:
+    struct Cell {
+        std::atomic<uint64_t> pass{0};
+        std::atomic<uint64_t> calls{0};
+    };
+    Cell m_cells[kCells];
+    std::atomic<uint64_t> m_overflow{0};
+};
+
+// The angles, in degrees. The game's axes are not known: the pose line also carries the PostGUI camera's raw rows, and the main
+// finding does not depend on them -- both of the game's cameras are in the same convention.
+constexpr float kDegrees = 57.2957795f;
+struct Angles {
+    float yaw = 0, pitch = 0, roll = 0;
+};
+inline float clampUnit(float v) { return v > 1.f ? 1.f : v < -1.f ? -1.f : v; }
+// A camera's pose block: right m[0..2], up m[4..6], forward m[8..10]. Yaw atan2(f.x, f.z), pitch asin(f.y), roll atan2(right.y, up.y).
+inline Angles cameraAngles(const float* m) {
+    Angles a;
+    a.yaw = std::atan2(m[8], m[10]) * kDegrees;
+    a.pitch = std::asin(clampUnit(m[9])) * kDegrees;
+    a.roll = std::atan2(m[1], m[5]) * kDegrees;
+    return a;
+}
+// The head (headPose: OpenVR, row-major 3x4, forward -Z, so forward is the negated third column): yaw atan2(-m[2], -m[10]), pitch
+// asin(-m[6]); no roll.
+inline Angles headAngles(const float* m12) {
+    Angles a;
+    a.yaw = std::atan2(-m12[2], -m12[10]) * kDegrees;
+    a.pitch = std::asin(clampUnit(-m12[6])) * kDegrees;
+    return a;
+}
+// A yaw step in (-180, 180]; not a number stays one.
+inline float wrapDeg(float d) {
+    d = std::fmod(d + 180.f, 360.f);
+    if (d <= 0.f) d += 360.f;
+    return d - 180.f;
+}
+
+// One view in one mode over a 30-second window: the yaw steps between neighbouring samples. k = sum(dPost*dMain) / sum(dMain^2), the
+// slope of the PostGUI camera's steps on the main camera's (1 the same, 0 not at all, -1 the other way); the same for the main camera
+// on the head (about 1 in size, its sign the axes' convention). Too little: the main camera (for the first) or the head (for the
+// second) turned less than 20 degrees in all. A step over 90 degrees in any yaw, or not finite, is a jump: left out and counted.
+struct Follow {
+    static constexpr float kJumpDeg = 90.f, kMinTurnDeg = 20.f;
+    double postMain = 0, mainMain = 0, mainTurn = 0;
+    double mainHead = 0, headHead = 0, headTurn = 0;
+    uint32_t steps = 0, headSteps = 0, jumps = 0;
+
+    // dHead: not a number when either sample had no head pose.
+    void add(float dMain, float dPost, float dHead) {
+        const bool head = !std::isnan(dHead);
+        if (!std::isfinite(dMain) || !std::isfinite(dPost) || (head && !std::isfinite(dHead)) || std::fabs(dMain) > kJumpDeg ||
+            std::fabs(dPost) > kJumpDeg || (head && std::fabs(dHead) > kJumpDeg)) {
+            ++jumps;
+            return;
+        }
+        ++steps;
+        postMain += double(dPost) * dMain;
+        mainMain += double(dMain) * dMain;
+        mainTurn += std::fabs(dMain);
+        if (!head) return;
+        ++headSteps;
+        mainHead += double(dMain) * dHead;
+        headHead += double(dHead) * dHead;
+        headTurn += std::fabs(dHead);
+    }
+    bool any() const { return steps || jumps; }
+};
+
+inline int formatFollow(int view, int stereo, uint64_t seconds, const Follow& f, char* out, size_t cap) {
+    char post[96], head[96];
+    if (f.mainTurn >= Follow::kMinTurnDeg && f.mainMain > 0)
+        std::snprintf(post, sizeof(post), "k=%.2f (main turned %.0f deg)", f.postMain / f.mainMain, f.mainTurn);
+    else
+        std::snprintf(post, sizeof(post), "too little turn (main %.0f deg)", f.mainTurn);
+    if (!f.headSteps)
+        std::snprintf(head, sizeof(head), "no head pose");
+    else if (f.headTurn >= Follow::kMinTurnDeg && f.headHead > 0)
+        std::snprintf(head, sizeof(head), "k=%.2f (head turned %.0f deg)", f.mainHead / f.headHead, f.headTurn);
+    else
+        std::snprintf(head, sizeof(head), "too little turn (head %.0f deg)", f.headTurn);
+    return std::snprintf(out, cap, "on-foot hud probe: %llu s follow view %d %s: postgui/main %s; main/head %s; %u step(s), %u left out (a yaw "
+                                   "step over 90 deg)",
+                         static_cast<unsigned long long>(seconds), view, stereo ? "stereo" : "cinema", post, head, f.steps, f.jumps);
+}
+
+// A pass as the frame thread reads it: the view, both cameras. Each part is best effort.
+struct CameraPose {
+    uint64_t cam = 0;
+    bool read = false, flagsRead = false;
+    float m[kPoseFloats] = {};
+    uint32_t flags250 = 0;
+};
+struct PassPose {
+    uint64_t pass = 0;
+    int32_t view = -1;  // -1: unreadable
+    CameraPose main, post;
+};
+inline void readCamera(uint64_t slot, ReadFn read, void* rctx, CameraPose* c) {
+    *c = CameraPose{};
+    if (!readAs(read, rctx, slot, &c->cam)) c->cam = 0;
+    c->read = readAs(read, rctx, c->cam + kCamPose, &c->m);
+    c->flagsRead = readAs(read, rctx, c->cam + kCamFlags250, &c->flags250);
+}
+inline void readPass(uint64_t pass, ReadFn read, void* rctx, PassPose* p) {
+    *p = PassPose{};
+    p->pass = pass;
+    if (!readAs(read, rctx, pass + kPassView, &p->view)) p->view = -1;
+    readCamera(pass + kPassMainCamera, read, rctx, &p->main);
+    readCamera(pass + kPassPostGuiCamera, read, rctx, &p->post);
+}
+
+// The frame mask of the HUD node drawn with a camera (the node snapshots' ctx+0x250 and ctx+0x270), the last per camera, eight
+// cameras; one not drawn for a second is not found.
+class MaskByCamera {
+public:
+    static constexpr int kCameras = 8;
+    static constexpr uint64_t kFreshMs = 1000;
+    void note(uint64_t cam, uint64_t mask, uint64_t nowMs) {
+        if (!cam) return;
+        Entry* slot = nullptr;
+        for (Entry& e : m_entries)
+            if (e.used && e.cam == cam) slot = &e;
+        if (!slot) {
+            slot = &m_entries[0];
+            for (Entry& e : m_entries) {
+                if (!e.used) {
+                    slot = &e;
+                    break;
+                }
+                if (e.seen < slot->seen) slot = &e;
+            }
+        }
+        *slot = Entry{true, cam, mask, nowMs};
+    }
+    bool find(uint64_t cam, uint64_t nowMs, uint64_t* mask) const {
+        if (!cam) return false;
+        for (const Entry& e : m_entries) {
+            if (!e.used || e.cam != cam || nowMs < e.seen || nowMs - e.seen > kFreshMs) continue;
+            *mask = e.mask;
+            return true;
+        }
+        return false;
+    }
+
+private:
+    struct Entry {
+        bool used = false;
+        uint64_t cam = 0, mask = 0, seen = 0;
+    };
+    Entry m_entries[kCameras];
+};
+
+inline const char* viewText(int32_t view, char* buf, size_t cap) {
+    if (view < 0) std::snprintf(buf, cap, "?");
+    else std::snprintf(buf, cap, "%d", view);
+    return buf;
+}
+
+// One camera's part of the pose line: "<name> 0x... yaw .. pitch .. roll .. at (x,y,z)", or "<name> 0x... none" when its pose
+// could not be read.
+inline int formatCamera(const char* name, const CameraPose& c, char* out, size_t cap) {
+    if (!c.read) return std::snprintf(out, cap, "%s 0x%llX none", name, static_cast<unsigned long long>(c.cam));
+    const Angles a = cameraAngles(c.m);
+    return std::snprintf(out, cap, "%s 0x%llX yaw %.1f pitch %.1f roll %.1f at (%.2f,%.2f,%.2f)", name, static_cast<unsigned long long>(c.cam),
+                         a.yaw, a.pitch, a.roll, c.m[12], c.m[13], c.m[14]);
+}
+
+// The pose line of one pass. stereo: experimental.native_vr_on_foot (1 stereo, 0 cinema, -1 unknown). head12: headPose's matrix, or
+// null. maskBy: 1 the HUD node drawn with the PostGUI camera gave `mask`, 2 the one drawn with the main camera, 0 neither in the
+// last second. The PostGUI camera's raw rows go with it, three decimals, so the angles can be worked out again from the log.
+inline int formatPose(const PassPose& p, int onFoot, int stereo, const float* head12, int maskBy, uint64_t mask, char* out, size_t cap) {
+    char v[16], main[160], post[160], rows[200] = "", flags[32] = "", diff[48], head[64], hud[64];
+    formatCamera("main", p.main, main, sizeof(main));
+    formatCamera("postgui", p.post, post, sizeof(post));
+    if (p.post.read) {
+        const float* m = p.post.m;
+        std::snprintf(rows, sizeof(rows), " rows (%.3f,%.3f,%.3f; %.3f,%.3f,%.3f; %.3f,%.3f,%.3f)", m[0], m[1], m[2], m[4], m[5], m[6], m[8],
+                      m[9], m[10]);
+    }
+    if (p.post.flagsRead) std::snprintf(flags, sizeof(flags), " flags250=0x%X", p.post.flags250);
+    if (p.main.read && p.post.read)
+        std::snprintf(diff, sizeof(diff), "postgui-main yaw %.1f", wrapDeg(cameraAngles(p.post.m).yaw - cameraAngles(p.main.m).yaw));
+    else
+        std::snprintf(diff, sizeof(diff), "postgui-main none");
+    if (head12) {
+        const Angles h = headAngles(head12);
+        std::snprintf(head, sizeof(head), "head yaw %.1f pitch %.1f", h.yaw, h.pitch);
+    } else {
+        std::snprintf(head, sizeof(head), "head none");
+    }
+    if (maskBy == 1) std::snprintf(hud, sizeof(hud), "hud mask 0x%llX", static_cast<unsigned long long>(mask));
+    else if (maskBy == 2) std::snprintf(hud, sizeof(hud), "hud mask 0x%llX (by the main camera)", static_cast<unsigned long long>(mask));
+    else std::snprintf(hud, sizeof(hud), "hud mask ?");
+    return std::snprintf(out, cap, "on-foot hud probe: pose view %s %s on-foot=%s pass 0x%llX: %s; %s%s%s; %s; %s; %s", viewText(p.view, v, sizeof(v)),
+                         stereo < 0 ? "?" : stereo ? "stereo" : "cinema", onFoot < 0 ? "?" : onFoot ? "yes" : "no",
+                         static_cast<unsigned long long>(p.pass), main, post, rows, flags, diff, head, hud);
+}
+
+inline int formatNewPass(const PassPose& p, char* out, size_t cap) {
+    char v[16];
+    return std::snprintf(out, cap, "on-foot hud probe: pass switch: new pass 0x%llX, view %s: main camera 0x%llX, PostGUI camera 0x%llX%s",
+                         static_cast<unsigned long long>(p.pass), viewText(p.view, v, sizeof(v)), static_cast<unsigned long long>(p.main.cam),
+                         static_cast<unsigned long long>(p.post.cam), p.post.cam && p.post.cam == p.main.cam ? " (the same camera)" : "");
+}
+
+// The switch's 30-second line, beside the follow lines: its calls (none: the hook never ran), the passes in the table now, those that
+// came and went, those that did not fit, the pose lines written.
+struct SwitchWindow {
+    uint64_t calls = 0, fresh = 0, retired = 0, overflow = 0, poses = 0;
+};
+inline int formatSwitchSummary(uint64_t seconds, const SwitchWindow& w, const uint64_t* passes, const int32_t* views, int n, char* out, size_t cap) {
+    int len = std::snprintf(out, cap, "on-foot hud probe: %llu s pass switch: %llu call(s); %d pass(es) now", static_cast<unsigned long long>(seconds),
+                            static_cast<unsigned long long>(w.calls), n);
+    for (int i = 0; i < n && len > 0 && static_cast<size_t>(len) < cap; ++i) {
+        char v[16];
+        len += std::snprintf(out + len, cap - len, "%s view %s 0x%llX", i ? "," : ":", viewText(views[i], v, sizeof(v)),
+                             static_cast<unsigned long long>(passes[i]));
+    }
+    if (len > 0 && static_cast<size_t>(len) < cap)
+        len += std::snprintf(out + len, cap - len, "; %llu new, %llu retired, %llu did not fit; %llu pose line(s)",
+                             static_cast<unsigned long long>(w.fresh), static_cast<unsigned long long>(w.retired),
+                             static_cast<unsigned long long>(w.overflow), static_cast<unsigned long long>(w.poses));
+    return len;
+}
 
 }  // namespace ohp
 }  // namespace edvr
