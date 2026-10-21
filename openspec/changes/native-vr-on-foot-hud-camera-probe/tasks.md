@@ -47,11 +47,11 @@
 
 - [x] 3.1 Исследование `docs/research/native-vr-on-foot.md`: в `## Status` следующий шаг — прогулка `.15` (кинотеатр,
   потом стерео, повороты головы). Проверка: `## Status` не длиннее 60 строк.
-- [ ] 3.2 Полная сборка `edvr\build_edvronfoot.bat` по абсолютному пути. Проверка:
+- [x] 3.2 Полная сборка `edvr\build_edvronfoot.bat` по абсолютному пути. Проверка:
   - «all gates passed», терпимый сбой — `weapon_motion`; при одиночном таймауте `openxr_present_test` — один повтор;
   - коммит, тег `v0.19.1-edvronfoot.15`;
   - `--dll-only` проходит.
-- [ ] 3.3 Установка при закрытой игре: `py -3.12 edvr\tools\install_edvr.py --target "C:\Steam\steamapps\common\Elite
+- [x] 3.3 Установка при закрытой игре: `py -3.12 edvr\tools\install_edvr.py --target "C:\Steam\steamapps\common\Elite
   Dangerous\Products\elite-dangerous-odyssey-64" --all --tag edvronfoot --dry-run`, затем без `--dry-run`. В живом
   `edvr.ini` через Edit — `on_foot_hud_probe = 1`. Проверка:
   - `edvronfoot_game.ps1 -Action Status` показывает `.15`;
