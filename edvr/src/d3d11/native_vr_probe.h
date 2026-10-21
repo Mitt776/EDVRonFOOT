@@ -41,8 +41,9 @@ using NativeVrProbeSink = void (*)(void* ctx, const char* line);
 
 // Once a frame at the Present boundary (device_hook.cpp's tkNativeVrProbe). Reads experimental.native_vr_probe and
 // experimental.native_vr_on_foot (on when missing); the first time either is on, installs the hooks; while the probe is on, the hooks
-// record; while native_vr_on_foot is on, the cinema-on-foot switch is off and the source holds; drains the ring into the log and ends
-// a hold by the journal. Render thread only.
+// record; while native_vr_on_foot is on, the cinema-on-foot switch is off and the source holds, and with
+// experimental.native_vr_on_foot_game_hud (on when missing) the game HUD switch is on; drains the ring into the log and ends a hold by
+// the journal. Render thread only.
 void nativeVrProbeFrameBoundary();
 
 // The pieces the frame boundary is made of, exposed for the rig.
@@ -90,5 +91,12 @@ void nativeVrWriterWatchStep(uint64_t nowMs, bool recording, NativeVrProbeSink s
 // answer changes while the switch is ours. Frame thread.
 uint32_t nativeVrCinemaSwitchFind(uintptr_t base, NativeVrProbeSink sink, void* ctx);
 void nativeVrCinemaSwitchStep(uint8_t* address, uint32_t rva, bool key, int onFoot, NativeVrProbeSink sink, void* ctx);
+
+// experimental.native_vr_on_foot_game_hud: the game's own on-foot HUD in headset stereo. Find: the HUD switch's RVA (an int; -1 auto)
+// by its reader's code (nvp::findHudSwitch), one line, 0 if not found (or not 4-aligned). Once, at the install. Step
+// (nvp::hudSwitchStep): once a frame, the int at `address` is turned -1 -> 1 while `key` (this key and native_vr_on_foot) is on, and
+// our 1 back to -1 when it goes off, with a line on each change. Frame thread.
+uint32_t nativeVrHudSwitchFind(uintptr_t base, NativeVrProbeSink sink, void* ctx);
+void nativeVrHudSwitchStep(int32_t* address, uint32_t rva, bool key, int onFoot, NativeVrProbeSink sink, void* ctx);
 
 }  // namespace edvr

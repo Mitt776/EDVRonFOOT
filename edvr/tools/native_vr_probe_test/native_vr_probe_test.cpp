@@ -1071,6 +1071,9 @@ nvp::SwitchFind findIn(const std::vector<uint8_t>& img) {
     s[2].rva = kImgRdata, s[2].size = 0x800;
     return nvp::findCinemaSwitch(img.data(), s, 3);
 }
+// The game HUD switch's reader (Part H); Part G's glue checks use it too.
+void putHudPattern(std::vector<uint8_t>& img, uint32_t at, uint32_t target, uint8_t movMr = 0x05, uint8_t viewRex = 0x49,
+                   uint8_t viewMr = 0x8F, uint8_t floatMr = 0x80);
 
 void partG() {
     {
@@ -1192,6 +1195,232 @@ void partG() {
     check(noAccess && nativeVrCinemaSwitchFind(reinterpret_cast<uintptr_t>(noAccess), &sink, nullptr) == 0 && countLines("not found") == 1,
           "glue find: unreadable headers fault into a not-found, no crash");
     if (noAccess) VirtualFree(noAccess, 0, MEM_RELEASE);
+
+    // The game HUD switch's glue on the same synthetic PE (its pattern and step are Part H's).
+    makePe(pe, 3);
+    putHudPattern(pe, 0x1100, 0x2014);
+    g_lines.clear();
+    const uint32_t hud = nativeVrHudSwitchFind(reinterpret_cast<uintptr_t>(pe.data()), &sink, nullptr);
+    check(hud == 0x2014 && countLines("game HUD switch found at EliteDangerous64.exe+0x2014 (read at +0x1100") == 1,
+          "glue hud find: the one pattern, one line");
+    check(nativeVrCinemaSwitchFind(reinterpret_cast<uintptr_t>(pe.data()), &sink, nullptr) == 0,
+          "glue hud find: the cinema search does not take it");
+    makePe(pe, 3);
+    putHudPattern(pe, 0x1100, 0x2013);
+    g_lines.clear();
+    check(nativeVrHudSwitchFind(reinterpret_cast<uintptr_t>(pe.data()), &sink, nullptr) == 0 && countLines("not 4-byte aligned") == 1,
+          "glue hud find: an unaligned int is refused, said");
+    makePe(pe, 3);
+    g_lines.clear();
+    check(nativeVrHudSwitchFind(reinterpret_cast<uintptr_t>(pe.data()), &sink, nullptr) == 0 &&
+              countLines("game HUD switch not found: no read of its kind") == 1,
+          "glue hud find: no pattern, 0 and one line");
+
+    alignas(4) int32_t hudInt = -1;
+    g_lines.clear();
+    nativeVrHudSwitchStep(&hudInt, 0x5E85B94u, false, 0, &sink, nullptr);
+    check(hudInt == -1 && g_lines.empty(), "glue hud switch: key off, the int and the log are untouched");
+    nativeVrHudSwitchStep(&hudInt, 0x5E85B94u, true, 0, &sink, nullptr);
+    check(hudInt == 1 && countLines("game HUD on: the game's HUD switch (EliteDangerous64.exe+0x5E85B94) -1 (auto) -> 1 (on)") == 1,
+          "glue hud switch: key on, the int is 1, one line");
+    nativeVrHudSwitchStep(&hudInt, 0x5E85B94u, true, 1, &sink, nullptr);
+    check(hudInt == 1 && g_lines.size() == 1, "glue hud switch: next frame, nothing more");
+    for (int i = 0; i < 100; ++i) {
+        hudInt = -1;
+        nativeVrHudSwitchStep(&hudInt, 0x5E85B94u, true, 1, &sink, nullptr);
+    }
+    check(hudInt == 1 && countLines("back to -1; 1 again") == 3 && anyLine("(100 time(s))"),
+          "glue hud switch: the game puts -1 back a hundred times: 1 each time, said at 1, 10, 100");
+    nativeVrHudSwitchStep(&hudInt, 0x5E85B94u, false, 0, &sink, nullptr);
+    check(hudInt == -1 && countLines("game HUD off: the HUD switch is the game's -1 (auto) again") == 1,
+          "glue hud switch: key off, the game's -1 is back");
+    alignas(4) int32_t hudOdd = 0;
+    g_lines.clear();
+    nativeVrHudSwitchStep(&hudOdd, 0x5E85B94u, true, 0, &sink, nullptr);
+    nativeVrHudSwitchStep(&hudOdd, 0x5E85B94u, true, 0, &sink, nullptr);
+    check(hudOdd == 0 && countLines("game HUD cannot work (the HUD switch holds 0") == 1, "glue hud switch: a 0 is left alone, said once");
+    nativeVrHudSwitchStep(&hudOdd, 0x5E85B94u, false, 0, &sink, nullptr);
+    g_lines.clear();
+    nativeVrHudSwitchStep(nullptr, 0, true, 0, &sink, nullptr);
+    nativeVrHudSwitchStep(nullptr, 0, true, 0, &sink, nullptr);
+    check(countLines("game HUD cannot work (the HUD switch was not found") == 1, "glue hud switch: not found, said once");
+    nativeVrHudSwitchStep(nullptr, 0, false, 0, &sink, nullptr);
+    void* noAccessHud = VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_NOACCESS);
+    g_lines.clear();
+    if (noAccessHud) {
+        nativeVrHudSwitchStep(static_cast<int32_t*>(noAccessHud), 0x5E85B94u, true, 0, &sink, nullptr);
+        nativeVrHudSwitchStep(static_cast<int32_t*>(noAccessHud), 0x5E85B94u, false, 0, &sink, nullptr);
+        VirtualFree(noAccessHud, 0, MEM_RELEASE);
+    }
+    check(noAccessHud && countLines("game HUD cannot work (the HUD switch could not be read)") == 1,
+          "glue hud switch: an unreadable int faults into a refusal, no crash");
+}
+
+// ---- Part H: the game HUD switch (experimental.native_vr_on_foot_game_hud) --------------------------------------------------------
+// The reader's 33 bytes at `at` (an RVA) pointing at `target`, as build 334473 has them at 0x288A055; the overrides swap registers.
+void putHudPattern(std::vector<uint8_t>& img, uint32_t at, uint32_t target, uint8_t movMr, uint8_t viewRex, uint8_t viewMr,
+                   uint8_t floatMr) {
+    const uint8_t code[nvp::kHudPatternBytes] = {0x8B, movMr, 0,    0,    0,    0,    0x0F, 0x57, 0xFF, viewRex, 0x8B,
+                                                 viewMr, 0x80, 0x11, 0,    0,    0x41, 0x3B, 0xC4, 0x75, 0x14,    0x48,
+                                                 0x8B, 0x41, 0x18, 0xF3, 0x0F, 0x10, floatMr, 0x6C, 0x01, 0,    0};
+    std::memcpy(&img[at], code, sizeof(code));
+    const int32_t disp = static_cast<int32_t>(target) - static_cast<int32_t>(at + 6);
+    std::memcpy(&img[at + 2], &disp, sizeof(disp));
+}
+nvp::SwitchFind findHudIn(const std::vector<uint8_t>& img) {
+    nvp::ImageSection s[3];
+    s[0].rva = kImgText, s[0].size = 0x1000, s[0].execute = true;
+    s[1].rva = kImgData, s[1].size = 0x800, s[1].write = true;
+    s[2].rva = kImgRdata, s[2].size = 0x800;
+    return nvp::findHudSwitch(img.data(), s, 3);
+}
+
+void partH() {
+    {
+        // The game's own bytes, copied from EliteDangerous64.exe 334473 at 0x288A055, disp32 and all.
+        const uint8_t real[nvp::kHudPatternBytes] = {0x8B, 0x05, 0x39, 0xBB, 0x5F, 0x03, 0x0F, 0x57, 0xFF, 0x49, 0x8B,
+                                                     0x8F, 0x80, 0x11, 0x00, 0x00, 0x41, 0x3B, 0xC4, 0x75, 0x14, 0x48,
+                                                     0x8B, 0x41, 0x18, 0xF3, 0x0F, 0x10, 0x80, 0x6C, 0x01, 0x00, 0x00};
+        check(nvp::hudPatternAt(real), "hud find: build 334473's reader is the pattern");
+        int32_t disp;
+        std::memcpy(&disp, real + 2, sizeof(disp));
+        check(0x288A055u + 6u + static_cast<uint32_t>(disp) == 0x5E85B94u, "hud find: its disp32 lands on 0x5E85B94");
+        // The same in a synthetic image: the reader at 0x1100 for 0x288A055, the int at 0x2014 (aligned) for 0x5E85B94.
+        std::vector<uint8_t> img(kImgSize, 0xCC);
+        check(findHudIn(img).result == nvp::kFindNone, "hud find: no pattern, not found");
+        std::memcpy(&img[0x1100], real, sizeof(real));
+        const int32_t synth = 0x2014 - (0x1100 + 6);
+        std::memcpy(&img[0x1102], &synth, sizeof(synth));
+        nvp::SwitchFind f = findHudIn(img);
+        check(f.result == nvp::kFindFound && f.matches == 1 && f.readerRva == 0x1100 && f.byteRva == 0x2014,
+              "hud find: one pattern, the int's RVA is the mov's end plus disp32");
+        putHudPattern(img, 0x1800, 0x2020);
+        f = findHudIn(img);
+        check(f.result == nvp::kFindMany && f.matches == 2, "hud find: two patterns, refused with the count");
+        check(findIn(img).result == nvp::kFindNone, "hud find: the cinema search does not take the HUD's reader");
+    }
+    {
+        std::vector<uint8_t> img(kImgSize, 0xCC);
+        putHudPattern(img, 0x1100, 0x2010, 0x0D, 0x4C, 0x8E, 0x86);
+        check(findHudIn(img).result == nvp::kFindFound && findHudIn(img).byteRva == 0x2010, "hud find: other registers, found");
+        putHudPattern(img, 0x1100, 0x2900);
+        check(findHudIn(img).result == nvp::kFindNotWritable, "hud find: the int in a section that cannot be written, refused");
+        putHudPattern(img, 0x1100, 0x5000);
+        check(findHudIn(img).result == nvp::kFindOutside, "hud find: the int outside every section, refused");
+        std::vector<uint8_t> notRip(kImgSize, 0xCC);
+        putHudPattern(notRip, 0x1100, 0x2010, 0x45);
+        check(findHudIn(notRip).result == nvp::kFindNone, "hud find: a first mov that is not RIP-relative is not the pattern");
+        std::vector<uint8_t> sib(kImgSize, 0xCC);
+        putHudPattern(sib, 0x1100, 0x2010, 0x05, 0x49, 0x8C);
+        check(findHudIn(sib).result == nvp::kFindNone, "hud find: [+0x1180] through a SIB byte is not the pattern");
+        std::vector<uint8_t> otherField(kImgSize, 0xCC);
+        putHudPattern(otherField, 0x1100, 0x2010);
+        otherField[0x1100 + 29] = 0x70;
+        check(findHudIn(otherField).result == nvp::kFindNone, "hud find: a float other than +0x16C is not the pattern");
+        std::vector<uint8_t> je(kImgSize, 0xCC);
+        putHudPattern(je, 0x1100, 0x2010);
+        je[0x1100 + 19] = 0x74;
+        check(findHudIn(je).result == nvp::kFindNone, "hud find: a je, not a jne, is not the pattern");
+        std::vector<uint8_t> inData(kImgSize, 0xCC);
+        putHudPattern(inData, 0x2100, 0x2010);
+        check(findHudIn(inData).result == nvp::kFindNone, "hud find: the pattern in a section that does not execute is not looked at");
+        std::vector<uint8_t> atEnd(kImgSize, 0xCC);
+        putHudPattern(atEnd, kImgText + 0x1000 - static_cast<uint32_t>(nvp::kHudPatternBytes), 0x2010);
+        check(findHudIn(atEnd).result == nvp::kFindFound, "hud find: the pattern in the code section's last bytes, found");
+    }
+    {
+        char line[400];
+        nvp::SwitchFind f;
+        f.result = nvp::kFindFound, f.matches = 1, f.readerRva = 0x288A055, f.byteRva = 0x5E85B94;
+        nvp::formatHudFind(f, 9, line, sizeof(line));
+        check(std::strstr(line, "native-vr-on-foot: game HUD switch found at EliteDangerous64.exe+0x5E85B94 (read at +0x288A055") &&
+                  std::strstr(line, "9 ms"),
+              "hud text: found, with the reader and the time");
+        f.result = nvp::kFindNone;
+        nvp::formatHudFind(f, 1, line, sizeof(line));
+        check(std::strstr(line, "game HUD switch not found: no read of its kind") && std::strstr(line, "turns its HUD off as before"),
+              "hud text: none");
+        f.result = nvp::kFindMany, f.matches = 2;
+        nvp::formatHudFind(f, 1, line, sizeof(line));
+        check(std::strstr(line, "2 reads of its kind") != nullptr, "hud text: many, with the count");
+        f.result = nvp::kFindNotWritable;
+        nvp::formatHudFind(f, 1, line, sizeof(line));
+        check(std::strstr(line, "cannot be written (+0x5E85B94") != nullptr, "hud text: not writable, with the address");
+        f.result = nvp::kFindOutside;
+        nvp::formatHudFind(f, 1, line, sizeof(line));
+        check(std::strstr(line, "outside the game's image (+0x5E85B94") != nullptr, "hud text: outside, with the address");
+    }
+    {
+        nvp::SwitchState s;
+        nvp::ValueStep r = nvp::hudSwitchStep(s, false, true, -1);
+        check(!r.write && r.kind == nvp::kSwitchNone && !s.ours, "hud switch: key off, the game's -1 is left alone");
+        r = nvp::hudSwitchStep(s, true, true, -1);
+        check(r.write && r.value == 1 && r.kind == nvp::kSwitchSet && s.ours, "hud switch: key on, -1 becomes 1 and is ours");
+        r = nvp::hudSwitchStep(s, true, true, 1);
+        check(!r.write && r.kind == nvp::kSwitchNone, "hud switch: our 1 in place, nothing to do");
+        r = nvp::hudSwitchStep(s, true, true, -1);
+        check(r.write && r.value == 1 && r.kind == nvp::kSwitchAgain && s.again == 1, "hud switch: the game puts -1 back: 1 again, counted");
+        r = nvp::hudSwitchStep(s, false, true, 1);
+        check(r.write && r.value == -1 && r.kind == nvp::kSwitchRestored && !s.ours, "hud switch: key off, our 1 goes back to the game's -1");
+        r = nvp::hudSwitchStep(s, false, true, -1);
+        check(!r.write && r.kind == nvp::kSwitchNone, "hud switch: key off and restored, nothing more");
+
+        nvp::SwitchState left;
+        nvp::hudSwitchStep(left, true, true, -1);
+        r = nvp::hudSwitchStep(left, false, true, 0);
+        check(!r.write && r.kind == nvp::kSwitchLeft, "hud switch: key off over a value that is not our 1: left as it is");
+
+        nvp::SwitchState g;
+        r = nvp::hudSwitchStep(g, true, true, 1);
+        check(!r.write && r.kind == nvp::kSwitchGameOff && !g.ours, "hud switch: a 1 before us is the game's own, not ours");
+        r = nvp::hudSwitchStep(g, false, true, 1);
+        check(!r.write && r.kind == nvp::kSwitchNone, "hud switch: and key off never writes over it");
+
+        for (int32_t odd : {0, 7}) {
+            nvp::SwitchState x;
+            r = nvp::hudSwitchStep(x, true, true, odd);
+            const bool refused = !r.write && r.kind == nvp::kSwitchStrange;
+            r = nvp::hudSwitchStep(x, true, true, -1);
+            check(refused && !r.write && r.kind == nvp::kSwitchNone, "hud switch: 0 or 7 is refused and stays refused while the key is on");
+            nvp::hudSwitchStep(x, false, true, -1);
+            r = nvp::hudSwitchStep(x, true, true, -1);
+            check(r.write && r.kind == nvp::kSwitchSet, "hud switch: key off and on again tries afresh");
+        }
+        nvp::SwitchState u;
+        nvp::hudSwitchStep(u, true, true, -1);
+        r = nvp::hudSwitchStep(u, true, false, 0);
+        check(!r.write && r.kind == nvp::kSwitchStrange && !u.ours, "hud switch: unreadable while ours: refused, no longer ours");
+
+        bool onlyOurs = true;
+        for (int key = 0; key < 2; ++key)
+            for (int32_t v = -3; v < 8; ++v)
+                for (int ok = 0; ok < 2; ++ok) {
+                    nvp::SwitchState a, b;
+                    b.ours = true;
+                    for (const nvp::ValueStep& q : {nvp::hudSwitchStep(a, key != 0, ok != 0, v), nvp::hudSwitchStep(b, key != 0, ok != 0, v)})
+                        if (q.write && !(ok && ((q.value == 1 && v == -1) || (q.value == -1 && v == 1)))) onlyOurs = false;
+                }
+        check(onlyOurs, "hud switch: in no case is anything written but -1 -> 1 or 1 -> -1, and never over an unread value");
+    }
+    {
+        char line[400];
+        nvp::SwitchState s;
+        nvp::ValueStep r = nvp::hudSwitchStep(s, true, true, -1);
+        nvp::formatHudSwitch(r, s, true, -1, 0, 0x5E85B94u, line, sizeof(line));
+        check(std::strstr(line, "native-vr-on-foot: game HUD on: the game's HUD switch (EliteDangerous64.exe+0x5E85B94) -1 (auto) -> 1 (on)") &&
+                  std::strstr(line, "on foot (journal): no"),
+              "hud text: the on line, by the RVA it was found at");
+        nvp::ValueStep strange;
+        strange.kind = nvp::kSwitchStrange;
+        nvp::formatHudSwitch(strange, s, true, 7, 0, 0x5E85B94u, line, sizeof(line));
+        check(std::strstr(line, "game HUD cannot work (the HUD switch holds 7, not the game's -1)") != nullptr, "hud text: the refusal says the value");
+        nvp::formatGameHudKey(true, true, line, sizeof(line));
+        check(std::strstr(line, "game HUD on (experimental.native_vr_on_foot_game_hud = 1)") != nullptr, "hud text: the key on");
+        nvp::formatGameHudKey(true, false, line, sizeof(line));
+        check(std::strstr(line, "game HUD idle") && std::strstr(line, "native_vr_on_foot = 0"), "hud text: the key on without native VR on foot");
+        nvp::formatGameHudKey(false, true, line, sizeof(line));
+        check(std::strstr(line, "game HUD off (experimental.native_vr_on_foot_game_hud = 0)") != nullptr, "hud text: the key off");
+    }
 }
 }  // namespace
 
@@ -1204,6 +1433,7 @@ int main(int argc, char** argv) {
     partB();
     partF();
     partG();
+    partH();
     std::printf("%s: native_vr_probe_test, %d checks, %d failed\n", g_failures ? "FAIL" : "PASS", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

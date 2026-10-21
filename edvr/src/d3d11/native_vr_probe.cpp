@@ -138,10 +138,28 @@ __declspec(noinline) bool sehSwapByte(uint8_t* p, uint8_t from, uint8_t to) noex
     }
 }
 
-// The image's identity and sections from its own headers, then the switch's pattern in its executable sections (nvp::findCinemaSwitch).
+// The game HUD switch (nvp::hudSwitchStep): an aligned int, read and compare-and-swapped the same way.
+__declspec(noinline) bool sehReadInt(const int32_t* p, int32_t* value) noexcept {
+    __try {
+        *value = *reinterpret_cast<const volatile int32_t*>(p);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+__declspec(noinline) bool sehSwapInt(int32_t* p, int32_t from, int32_t to) noexcept {
+    __try {
+        return _InterlockedCompareExchange(reinterpret_cast<volatile long*>(p), to, from) == from;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// The image's identity and sections from its own headers, then a switch's pattern in its executable sections (nvp::findPatternTarget).
 // False if the headers could not be read or name more sections than fit; a fault while scanning is a not-found.
 constexpr int kMaxSections = 32;
-__declspec(noinline) bool sehFindSwitch(uintptr_t base, nvp::SwitchFind* found, uint32_t* timestamp, uint32_t* imageSize) noexcept {
+__declspec(noinline) bool sehFindSwitch(uintptr_t base, nvp::SwitchFind* found, uint32_t* timestamp, uint32_t* imageSize,
+                                        const nvp::PatternShape& shape = nvp::kCinemaShape) noexcept {
     __try {
         const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
         const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
@@ -158,7 +176,7 @@ __declspec(noinline) bool sehFindSwitch(uintptr_t base, nvp::SwitchFind* found, 
             sections[i].write = (h[i].Characteristics & IMAGE_SCN_MEM_WRITE) != 0;
             if (sections[i].rva + static_cast<uint64_t>(sections[i].size) > *imageSize) sections[i].size = 0;  // never past the image
         }
-        *found = nvp::findCinemaSwitch(reinterpret_cast<const uint8_t*>(base), sections, count);
+        *found = nvp::findPatternTarget(reinterpret_cast<const uint8_t*>(base), sections, count, shape);
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         *found = nvp::SwitchFind{};
@@ -783,6 +801,51 @@ void nativeVrCinemaSwitchStep(uint8_t* address, uint32_t rva, bool key, int onFo
     lastOnFoot = onFoot;
 }
 
+uint32_t nativeVrHudSwitchFind(uintptr_t base, NativeVrProbeSink sink, void* ctx) {
+    nvp::SwitchFind found;
+    uint32_t timestamp = 0, imageSize = 0;
+    const uint64_t startMs = GetTickCount64();
+    char line[400];
+    if (!sehFindSwitch(base, &found, &timestamp, &imageSize, nvp::kHudShape)) {
+        say(sink, ctx, "native-vr-on-foot: game HUD switch not searched: the game's image headers could not be read; on foot the game "
+                       "turns its HUD off as before");
+        return 0;
+    }
+    if (nvp::formatHudFind(found, GetTickCount64() - startMs, line, sizeof(line)) > 0) sink(ctx, line);
+    if (found.result != nvp::kFindFound) return 0;
+    // An int the compare-and-swap can take whole: the game's is aligned; one that is not is not the switch we know.
+    if (found.byteRva % sizeof(int32_t) != 0) {
+        say(sink, ctx, "native-vr-on-foot: game HUD switch at +0x%X is not 4-byte aligned; nothing will be written there", found.byteRva);
+        return 0;
+    }
+    return found.byteRva;
+}
+
+void nativeVrHudSwitchStep(int32_t* address, uint32_t rva, bool key, int onFoot, NativeVrProbeSink sink, void* ctx) {
+    static nvp::SwitchState state;
+    static bool saidNoAddress = false;
+    char line[400];
+    if (!address) {
+        if (key && !saidNoAddress)
+            sink(ctx, "native-vr-on-foot: game HUD cannot work (the HUD switch was not found, see its line); nothing written; on foot "
+                      "the game turns its HUD off as before");
+        saidNoAddress = key;
+        return;
+    }
+    int32_t value = 0;
+    const bool readOk = sehReadInt(address, &value);
+    const nvp::ValueStep step = nvp::hudSwitchStep(state, key, readOk, value);
+    if (step.write && !sehSwapInt(address, value, step.value)) {
+        // The game changed it between the read and the write: next frame decides again on what it holds then.
+        if (step.kind == nvp::kSwitchSet) state.ours = false;
+        if (step.kind == nvp::kSwitchAgain) --state.again;
+        return;
+    }
+    if (step.kind != nvp::kSwitchAgain || nvp::switchAgainSaid(state.again)) {
+        if (nvp::formatHudSwitch(step, state, readOk, value, onFoot, rva, line, sizeof(line)) > 0) sink(ctx, line);
+    }
+}
+
 int nativeVrProbeInstall(uintptr_t base, const uintptr_t* targetsOverride, bool checkIdentity, NativeVrProbeSink sink, void* ctx) {
     if (checkIdentity) {
         uint32_t timestamp = 0, imageSize = 0;
@@ -884,6 +947,8 @@ void nativeVrProbeFrameBoundary() {
     static bool onFootKey = false, saidOnFoot = false, saidOnFootUnarmed = false;
     static int armed = 0;
     static uint32_t switchRva = 0;  // the cinema-on-foot switch, found once at the install (0: not found)
+    static uint32_t hudRva = 0;     // the game HUD switch, likewise
+    static bool gameHudKey = false, saidGameHud = false;
     const Config& cfg = Config::get();
     const uint32_t now = cfg.generation();
     if (now != generation) {
@@ -904,6 +969,15 @@ void nativeVrProbeFrameBoundary() {
             Log::get().note("%s", line);
             saidOnFoot = true;
         }
+        // The game's own on-foot HUD: on when missing, and only ever with native_vr_on_foot.
+        const bool wantGameHud = cfg.getBool("experimental.native_vr_on_foot_game_hud", true);
+        if (!saidGameHud || wantGameHud != gameHudKey || (wantOnFoot != onFootKey && wantGameHud)) {
+            char line[200];
+            nvp::formatGameHudKey(wantGameHud, wantOnFoot, line, sizeof(line));
+            Log::get().note("%s", line);
+            saidGameHud = true;
+        }
+        gameHudKey = wantGameHud;
         onFootKey = wantOnFoot;
     }
     const int onFoot = journalOnFootKnown() ? (journalOnFoot() ? 1 : 0) : -1;
@@ -918,6 +992,7 @@ void nativeVrProbeFrameBoundary() {
         // The switch is data, not a hook, and found by its reader's code: any build where that code is the one match (the hooks
         // above are build 332841's only).
         switchRva = nativeVrCinemaSwitchFind(reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)), &logSink, nullptr);
+        hudRva = nativeVrHudSwitchFind(reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)), &logSink, nullptr);
     }
     const bool sourceArmed = nativeVrProbeArmed(nvp::kPointSource);
     if (onFootKey && tried && !sourceArmed && !saidOnFootUnarmed) {
@@ -933,6 +1008,9 @@ void nativeVrProbeFrameBoundary() {
     if (tried)
         nativeVrCinemaSwitchStep(switchRva ? reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr)) + switchRva : nullptr, switchRva,
                                  onFootKey, onFoot, &logSink, nullptr);
+    if (tried)
+        nativeVrHudSwitchStep(hudRva ? reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr)) + hudRva) : nullptr,
+                              hudRva, onFootKey && gameHudKey, onFoot, &logSink, nullptr);
     nativeVrProbeSetRecording(on && armed > 0);
     if (armed > 0) {
         const uint64_t nowMs = GetTickCount64();
