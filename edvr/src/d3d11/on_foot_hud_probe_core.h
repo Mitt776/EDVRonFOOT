@@ -497,7 +497,8 @@ inline int formatFault(uint64_t node, char* out, size_t cap) {
 //     of each on graph, the node's +0x10, then in a second round +0x18 (0x58B090: N+0x30 again, then +0x28 ... 0x58F0F0(N)).
 //   0x6BFC60 (G, N) appends N to G's nodes; 0x6BFE60 (G, N) takes it out.
 // So on foot the node is off (H1), out of every graph (H2) or in a graph that is off (H3). The walk hook reads which, before the
-// original; the add and remove hooks say who moved a PostGUI node; two hardware write watches say who wrote N+0x30 and G+0x14.
+// original; the add and remove hooks say who moved a PostGUI node. Two hardware write watches said who wrote N+0x30 and G+0x14 (flight
+// .13: H1, one writer); .16 gave their debug slots to the PostGUI camera and the frame mask (".16: the write watches" below).
 // .15 adds the PostGUI pass switch (kPointPass; "the PostGUI pass's cameras" below).
 enum Point : int { kPointNodeDraw = 0, kPointWalk, kPointAdd, kPointRemove, kPointPass, kPointCount };
 constexpr uintptr_t kPointRva[kPointCount] = {kNodeDrawRva, 0x6BF980u, 0x6BFC60u, 0x6BFE60u, 0x28AD4A0u};
@@ -705,84 +706,8 @@ inline int formatGraphEvent(const GraphEvent& e, int onFoot, uint64_t base, uint
                          onFoot < 0 ? "?" : onFoot ? "yes" : "no", e.thread, callers);
 }
 
-// ---- the write watches -------------------------------------------------------------------------------------------------------------
-// Debug register slot 2 watches the first tracked HUD node's flag N+0x30, slot 3 its graph's G+0x14 -- write, 4 bytes, every thread
-// (slot 0 is the flat camera producer probe's, slot 1 native_vr_probe's). The CPU reports a data breakpoint AFTER the write: the
-// handler records each distinct instruction once (the address after it, the byte's value then, the callers) and counts the rest.
-// A write to the next three bytes traps too; the value tells it apart (unchanged).
-enum Flag : int { kFlagNode = 0, kFlagGraph = 1, kFlagCount = 2 };
-constexpr unsigned kFlagSlot[kFlagCount] = {2, 3};
-inline const char* flagName(int f) { return f == kFlagNode ? "node flag" : "graph flag"; }
-inline uintptr_t flagOffset(int f) { return f == kFlagNode ? kNodeOn : kGraphOn; }
-constexpr int kSites = 8;
-
-struct Site {
-    std::atomic<uint64_t> rip{0};
-    std::atomic<uint64_t> hits{0};
-    std::atomic<uint8_t> ready{0};
-    uint8_t value = 0, frames = 0;
-    uint32_t thread = 0;
-    uint64_t stack[kStackFrames] = {};
-};
-// Lock-free, as nvp::WriterTable: a new site claims a free row by compare-and-swap, the handler fills it and only then sets `ready`.
-class SiteTable {
-public:
-    int record(uint64_t rip, bool* fresh) noexcept {
-        *fresh = false;
-        m_hits.fetch_add(1, std::memory_order_relaxed);
-        for (int i = 0; i < kSites; ++i) {
-            uint64_t seen = m_sites[i].rip.load(std::memory_order_acquire);
-            if (seen == 0) {
-                uint64_t expected = 0;
-                if (m_sites[i].rip.compare_exchange_strong(expected, rip, std::memory_order_acq_rel)) {
-                    m_sites[i].hits.fetch_add(1, std::memory_order_relaxed);
-                    *fresh = true;
-                    return i;
-                }
-                seen = expected;
-            }
-            if (seen == rip) {
-                m_sites[i].hits.fetch_add(1, std::memory_order_relaxed);
-                return i;
-            }
-        }
-        m_overflow.fetch_add(1, std::memory_order_relaxed);
-        return -1;
-    }
-    void publish(int row, uint32_t thread, uint8_t value, const uint64_t* stack, int frames) noexcept {
-        Site& s = m_sites[row];
-        s.thread = thread;
-        s.value = value;
-        s.frames = static_cast<uint8_t>(frames < 0 ? 0 : (frames > kStackFrames ? kStackFrames : frames));
-        for (int i = 0; i < s.frames; ++i) s.stack[i] = stack[i];
-        s.ready.store(1, std::memory_order_release);
-    }
-    // Frame thread: rows published since the last call, each once.
-    bool nextUnsaid(int* row) noexcept {
-        for (int i = 0; i < kSites; ++i) {
-            if (m_said[i] || !m_sites[i].ready.load(std::memory_order_acquire)) continue;
-            m_said[i] = true;
-            *row = i;
-            return true;
-        }
-        return false;
-    }
-    const Site& site(int row) const { return m_sites[row]; }
-    int sites() const {
-        int n = 0;
-        for (const Site& s : m_sites) n += s.rip.load(std::memory_order_acquire) ? 1 : 0;
-        return n;
-    }
-    uint64_t hits() const { return m_hits.load(std::memory_order_relaxed); }
-    uint64_t overflow() const { return m_overflow.load(std::memory_order_relaxed); }
-
-private:
-    Site m_sites[kSites];
-    bool m_said[kSites] = {};
-    std::atomic<uint64_t> m_hits{0}, m_overflow{0};
-};
-
-// More than 100 000 traps in 30 s (a flag the game writes every frame): the watches come off, the rest of the probe goes on.
+// The write watches' fuse (".16: the write watches" below): more than 100 000 traps in 30 s (a place the game writes all the time)
+// and the watches come off for good, the rest of the probe goes on.
 class Fuse {
 public:
     static constexpr uint64_t kWindowMs = 30000, kMaxHits = 100000;
@@ -800,37 +725,6 @@ private:
     bool m_started = false;
     uint64_t m_since = 0, m_base = 0;
 };
-
-inline int formatWatchOn(int flag, uint64_t address, uint64_t object, uint32_t armed, uint32_t skipped, uint32_t failed, char* out, size_t cap) {
-    return std::snprintf(out, cap,
-                         "on-foot hud probe: watch on: %s 0x%llX (0x%llX+0x%llX) on debug slot %u, write, 4 bytes: %u thread(s), %u skipped "
-                         "(slot taken), %u could not be set",
-                         flagName(flag), static_cast<unsigned long long>(address), static_cast<unsigned long long>(object),
-                         static_cast<unsigned long long>(flagOffset(flag)), kFlagSlot[flag], armed, skipped, failed);
-}
-inline int formatWatchNotOn(int flag, uint64_t address, const char* why, char* out, size_t cap) {
-    return std::snprintf(out, cap, "on-foot hud probe: watch NOT on: %s 0x%llX: %s; the state and graph lines go on", flagName(flag),
-                         static_cast<unsigned long long>(address), why);
-}
-inline int formatWatchOff(int flag, uint64_t address, const char* why, const SiteTable& t, char* out, size_t cap) {
-    return std::snprintf(out, cap, "on-foot hud probe: watch off: %s 0x%llX: %s; %d site(s), %llu hit(s), %llu from sites that did not fit",
-                         flagName(flag), static_cast<unsigned long long>(address), why, t.sites(), static_cast<unsigned long long>(t.hits()),
-                         static_cast<unsigned long long>(t.overflow()));
-}
-// A site is the instruction AND whether it wrote 0: the handler keys a row by siteKey, so one place that writes both 1 and 0 gives two
-// lines, and the 0 is never hidden behind a first 1. A user-mode address never has bit 63.
-constexpr uint64_t kSiteZeroBit = 1ull << 63;
-inline uint64_t siteKey(uint64_t rip, uint8_t value) { return value ? rip : rip | kSiteZeroBit; }
-
-// One line per site: the instruction after the write, the byte then, the callers (unwound from the writer's own context).
-inline int formatWriter(int flag, int row, const Site& s, uint64_t object, uint64_t base, uint64_t imageSize, char* out, size_t cap) {
-    char at[100], callers[400];
-    const uint64_t rip = s.rip.load(std::memory_order_acquire) & ~kSiteZeroBit;
-    formatCallers(&rip, 1, base, imageSize, at, sizeof(at));
-    formatCallers(s.stack, s.frames, base, imageSize, callers, sizeof(callers));
-    return std::snprintf(out, cap, "on-foot hud probe: writer #%d of the %s of 0x%llX: at %s (after the write), value %u, thread %u, from %s",
-                         row + 1, flagName(flag), static_cast<unsigned long long>(object), at, s.value, s.thread, callers);
-}
 
 // ---- the .13 lines ------------------------------------------------------------------------------------------------------------------
 
@@ -1089,13 +983,13 @@ inline void readPass(uint64_t pass, ReadFn read, void* rctx, PassPose* p) {
     readCamera(pass + kPassPostGuiCamera, read, rctx, &p->post);
 }
 
-// The frame mask of the HUD node drawn with a camera (the node snapshots' ctx+0x250 and ctx+0x270), the last per camera, eight
-// cameras; one not drawn for a second is not found.
+// The frame mask of the HUD node drawn with a camera (the node snapshots' ctx+0x250 and ctx+0x270) and the draw context it is in
+// (.16's mask watch), the last per camera, eight cameras; one not drawn for a second is not found.
 class MaskByCamera {
 public:
     static constexpr int kCameras = 8;
     static constexpr uint64_t kFreshMs = 1000;
-    void note(uint64_t cam, uint64_t mask, uint64_t nowMs) {
+    void note(uint64_t cam, uint64_t ctx, uint64_t mask, uint64_t nowMs) {
         if (!cam) return;
         Entry* slot = nullptr;
         for (Entry& e : m_entries)
@@ -1110,13 +1004,14 @@ public:
                 if (e.seen < slot->seen) slot = &e;
             }
         }
-        *slot = Entry{true, cam, mask, nowMs};
+        *slot = Entry{true, cam, ctx, mask, nowMs};
     }
-    bool find(uint64_t cam, uint64_t nowMs, uint64_t* mask) const {
+    bool find(uint64_t cam, uint64_t nowMs, uint64_t* mask, uint64_t* ctx = nullptr) const {
         if (!cam) return false;
         for (const Entry& e : m_entries) {
             if (!e.used || e.cam != cam || nowMs < e.seen || nowMs - e.seen > kFreshMs) continue;
             *mask = e.mask;
+            if (ctx) *ctx = e.ctx;
             return true;
         }
         return false;
@@ -1125,7 +1020,7 @@ public:
 private:
     struct Entry {
         bool used = false;
-        uint64_t cam = 0, mask = 0, seen = 0;
+        uint64_t cam = 0, ctx = 0, mask = 0, seen = 0;
     };
     Entry m_entries[kCameras];
 };
@@ -1202,6 +1097,221 @@ inline int formatSwitchSummary(uint64_t seconds, const SwitchWindow& w, const ui
                              static_cast<unsigned long long>(w.overflow), static_cast<unsigned long long>(w.poses));
     return len;
 }
+
+// ---- .16: the write watches (docs: "Статика: кто пишет позу камеры PostGUI", "Статика: кто ставит бит _HUD") ---------------------
+// Flight .15: on foot in stereo the PostGUI camera holds the head's pose (in cinema the identity), and the frame mask never asks for
+// list 39 _HUD. The static reading after it:
+//   - 0x287D660 (in cinema 0x28457F0) writes the PostGUI camera's pose every frame through the pose copy 0x59F300, whose first store is
+//     the camera's +0x20 (a watch there reports the address after it, +0x59F313);
+//   - the frame mask ctx+0x270 is the fifth argument of the draw context's "begin view" 0x588A60 (its store reports +0x588A75), whose
+//     callers are virtual and were not found.
+// Debug register slot 2 watches the first float of view 0's PostGUI camera (cam+0x20), slot 3 the low four bytes of the frame mask of
+// view 0's HUD node (ctx+0x270: the PostGUI lists' bits 0-10 are all there) -- write, 4 bytes, every thread (slot 0 is the flat camera
+// producer probe's, slot 1 native_vr_probe's). The CPU reports a data breakpoint AFTER the write: the handler records each distinct
+// instruction once (the address after it, the value it wrote, where the commander was, the callers) and counts the rest by place;
+// for the mask, also how many of them carried the _HUD bit.
+enum Watch : int { kWatchCamera = 0, kWatchMask = 1, kWatchCount = 2 };
+constexpr unsigned kWatchSlot[kWatchCount] = {2, 3};
+inline const char* watchName(int w) { return w == kWatchCamera ? "postgui camera" : "frame mask"; }
+inline uintptr_t watchOffset(int w) { return w == kWatchCamera ? kCamPose : kCtxMask; }
+constexpr uint64_t kHudBit = 1ull << (kHudFirst + kHudCount - 1);  // list 39 _HUD: bit 3 of the PostGUI set, 0x8
+constexpr uint64_t kWatchCheckMs = 2000;  // how often the frame thread checks that the watches are on their targets
+constexpr int kSites = 8;
+
+// Where the commander was at a write: in the ship (or the journal does not say), on foot in stereo, on foot in cinema
+// (experimental.native_vr_on_foot). The frame thread publishes it every frame; the handler reads it.
+enum Place : int { kPlaceShip = 0, kPlaceStereo = 1, kPlaceCinema = 2, kPlaces = 3 };
+inline int placeOf(int onFoot, int stereo) { return onFoot != 1 ? kPlaceShip : stereo == 0 ? kPlaceCinema : kPlaceStereo; }
+inline const char* placeName(int p) { return p == kPlaceStereo ? "on foot in stereo" : p == kPlaceCinema ? "on foot in cinema" : "in the ship"; }
+inline const char* placeShort(int p) { return p == kPlaceStereo ? "stereo" : p == kPlaceCinema ? "cinema" : "ship"; }
+
+// One instruction that wrote the watched place: its writes by place (for the mask, with the _HUD bit by place) and the last value, all
+// kept by the handler; the first write's value, place, thread and callers, published once.
+struct Site {
+    std::atomic<uint64_t> rip{0};
+    std::atomic<uint64_t> hits{0};
+    std::atomic<uint64_t> at[kPlaces]{}, hud[kPlaces]{};
+    std::atomic<uint64_t> last{0};
+    std::atomic<uint8_t> ready{0};
+    uint8_t place = 0, frames = 0;
+    uint32_t thread = 0;
+    uint64_t value = 0;
+    uint64_t stack[kStackFrames] = {};
+};
+// Lock-free, as nvp::WriterTable: a new site claims a free row by compare-and-swap, the handler fills it and only then sets `ready`.
+class SiteTable {
+public:
+    int record(uint64_t rip, int place, uint64_t value, bool hud, bool* fresh) noexcept {
+        *fresh = false;
+        m_hits.fetch_add(1, std::memory_order_relaxed);
+        const int p = place >= 0 && place < kPlaces ? place : kPlaceShip;
+        for (int i = 0; i < kSites; ++i) {
+            uint64_t seen = m_sites[i].rip.load(std::memory_order_acquire);
+            if (seen == 0) {
+                uint64_t expected = 0;
+                if (m_sites[i].rip.compare_exchange_strong(expected, rip, std::memory_order_acq_rel)) {
+                    count(m_sites[i], p, value, hud);
+                    *fresh = true;
+                    return i;
+                }
+                seen = expected;
+            }
+            if (seen == rip) {
+                count(m_sites[i], p, value, hud);
+                return i;
+            }
+        }
+        m_overflow.fetch_add(1, std::memory_order_relaxed);
+        return -1;
+    }
+    void publish(int row, uint32_t thread, int place, uint64_t value, const uint64_t* stack, int frames) noexcept {
+        Site& s = m_sites[row];
+        s.thread = thread;
+        s.place = static_cast<uint8_t>(place >= 0 && place < kPlaces ? place : kPlaceShip);
+        s.value = value;
+        s.frames = static_cast<uint8_t>(frames < 0 ? 0 : (frames > kStackFrames ? kStackFrames : frames));
+        for (int i = 0; i < s.frames; ++i) s.stack[i] = stack[i];
+        s.ready.store(1, std::memory_order_release);
+    }
+    // Frame thread: rows published since the last call, each once.
+    bool nextUnsaid(int* row) noexcept {
+        for (int i = 0; i < kSites; ++i) {
+            if (m_said[i] || !m_sites[i].ready.load(std::memory_order_acquire)) continue;
+            m_said[i] = true;
+            *row = i;
+            return true;
+        }
+        return false;
+    }
+    const Site& site(int row) const { return m_sites[row]; }
+    int sites() const {
+        int n = 0;
+        for (const Site& s : m_sites) n += s.rip.load(std::memory_order_acquire) ? 1 : 0;
+        return n;
+    }
+    uint64_t hits() const { return m_hits.load(std::memory_order_relaxed); }
+    uint64_t overflow() const { return m_overflow.load(std::memory_order_relaxed); }
+
+private:
+    static void count(Site& s, int p, uint64_t value, bool hud) noexcept {
+        s.hits.fetch_add(1, std::memory_order_relaxed);
+        s.at[p].fetch_add(1, std::memory_order_relaxed);
+        if (hud) s.hud[p].fetch_add(1, std::memory_order_relaxed);
+        s.last.store(value, std::memory_order_relaxed);
+    }
+    Site m_sites[kSites];
+    bool m_said[kSites] = {};
+    std::atomic<uint64_t> m_hits{0}, m_overflow{0};
+};
+
+// The value a watch saw written: the camera's first float (1.000 for the identity), the mask's bits.
+inline int formatWatchValue(int w, uint64_t v, char* out, size_t cap) {
+    if (w == kWatchCamera) {
+        const uint32_t bits = static_cast<uint32_t>(v);
+        float f = 0.f;
+        std::memcpy(&f, &bits, sizeof(f));
+        return std::snprintf(out, cap, "%.3f", f);
+    }
+    return std::snprintf(out, cap, "0x%llX", static_cast<unsigned long long>(v));
+}
+
+inline int formatWatchOn(int w, uint64_t address, uint64_t object, uint32_t armed, uint32_t skipped, uint32_t failed, char* out, size_t cap) {
+    return std::snprintf(out, cap,
+                         "on-foot hud probe: watch on: %s 0x%llX (0x%llX+0x%llX) on debug slot %u, write, 4 bytes: %u thread(s), %u skipped "
+                         "(slot taken), %u could not be set",
+                         watchName(w), static_cast<unsigned long long>(address), static_cast<unsigned long long>(object),
+                         static_cast<unsigned long long>(watchOffset(w)), kWatchSlot[w], armed, skipped, failed);
+}
+inline int formatWatchNotOn(int w, uint64_t address, const char* why, char* out, size_t cap) {
+    return std::snprintf(out, cap, "on-foot hud probe: watch NOT on: %s 0x%llX: %s; the pose, state and graph lines go on", watchName(w),
+                         static_cast<unsigned long long>(address), why);
+}
+inline int formatWatchOff(int w, uint64_t address, const char* why, const SiteTable& t, char* out, size_t cap) {
+    return std::snprintf(out, cap, "on-foot hud probe: watch off: %s 0x%llX: %s; %d site(s), %llu hit(s), %llu from sites that did not fit",
+                         watchName(w), static_cast<unsigned long long>(address), why, t.sites(), static_cast<unsigned long long>(t.hits()),
+                         static_cast<unsigned long long>(t.overflow()));
+}
+inline int formatWatchMoves(int w, uint64_t from, uint64_t to, char* out, size_t cap) {
+    return std::snprintf(out, cap, "on-foot hud probe: watch moves: %s 0x%llX -> 0x%llX (view 0's %s is another now)", watchName(w),
+                         static_cast<unsigned long long>(from), static_cast<unsigned long long>(to),
+                         w == kWatchCamera ? "PostGUI camera" : "HUD node's draw context");
+}
+
+// One line per site: the instruction after the write, the value it wrote first and where, the callers (unwound from the writer's own
+// context); for the mask, whether that first value carried the _HUD bit.
+inline int formatWriter(int w, int row, const Site& s, uint64_t object, uint64_t base, uint64_t imageSize, char* out, size_t cap) {
+    char at[100], callers[400], value[40];
+    const uint64_t rip = s.rip.load(std::memory_order_acquire);
+    formatCallers(&rip, 1, base, imageSize, at, sizeof(at));
+    formatCallers(s.stack, s.frames, base, imageSize, callers, sizeof(callers));
+    formatWatchValue(w, s.value, value, sizeof(value));
+    return std::snprintf(out, cap, "on-foot hud probe: writer #%d of the %s of 0x%llX: at %s (after the write), value %s%s, %s, thread %u, from %s",
+                         row + 1, watchName(w), static_cast<unsigned long long>(object), at, value,
+                         w != kWatchMask ? "" : s.value & kHudBit ? " (the _HUD bit on)" : " (the _HUD bit off)", placeName(s.place), s.thread,
+                         callers);
+}
+
+// A watch's 30-second line while it is on: the window's writes, then each site that wrote in it -- its writes in the ship, on foot in
+// stereo, on foot in cinema, for the mask how many of them carried the _HUD bit, and the last value it wrote. "0 write(s)" when the
+// watch stood quiet: a watch that is not on has no line at all.
+class WatchSummary {
+public:
+    static constexpr uint64_t kWindowMs = 30000;
+    int step(uint64_t nowMs, int w, uint64_t address, const SiteTable& t, char* out, size_t cap) {
+        if (!m_started) {
+            m_started = true;
+            m_since = nowMs;
+            take(t);
+            return 0;
+        }
+        if (nowMs - m_since < kWindowMs) return 0;
+        const uint64_t seconds = (nowMs - m_since) / 1000;
+        m_since = nowMs;
+        const uint64_t hits = t.hits() - m_hits, overflow = t.overflow() - m_overflow;
+        int len = std::snprintf(out, cap, "on-foot hud probe: %llu s watch %s 0x%llX: %llu write(s)%s", static_cast<unsigned long long>(seconds),
+                                watchName(w), static_cast<unsigned long long>(address), static_cast<unsigned long long>(hits),
+                                hits ? "" : ": it is on and stood quiet");
+        for (int i = 0; i < kSites && len > 0 && static_cast<size_t>(len) < cap; ++i) {
+            const Site& s = t.site(i);
+            if (!s.rip.load(std::memory_order_acquire)) continue;
+            uint64_t n[kPlaces], h[kPlaces], any = 0;
+            for (int p = 0; p < kPlaces; ++p) {
+                n[p] = s.at[p].load(std::memory_order_relaxed) - m_at[i][p];
+                h[p] = s.hud[p].load(std::memory_order_relaxed) - m_hud[i][p];
+                any += n[p];
+            }
+            if (!any) continue;
+            char value[40];
+            formatWatchValue(w, s.last.load(std::memory_order_relaxed), value, sizeof(value));
+            len += std::snprintf(out + len, cap - len, "; #%d %s %llu, %s %llu, %s %llu", i + 1, placeShort(kPlaceShip),
+                                 static_cast<unsigned long long>(n[kPlaceShip]), placeShort(kPlaceStereo),
+                                 static_cast<unsigned long long>(n[kPlaceStereo]), placeShort(kPlaceCinema),
+                                 static_cast<unsigned long long>(n[kPlaceCinema]));
+            if (w == kWatchMask && len > 0 && static_cast<size_t>(len) < cap)
+                len += std::snprintf(out + len, cap - len, " (with _HUD %llu, %llu, %llu)", static_cast<unsigned long long>(h[kPlaceShip]),
+                                     static_cast<unsigned long long>(h[kPlaceStereo]), static_cast<unsigned long long>(h[kPlaceCinema]));
+            if (len > 0 && static_cast<size_t>(len) < cap) len += std::snprintf(out + len, cap - len, ", last %s", value);
+        }
+        if (len > 0 && static_cast<size_t>(len) < cap)
+            len += std::snprintf(out + len, cap - len, "; %llu from sites that did not fit", static_cast<unsigned long long>(overflow));
+        take(t);
+        return len;
+    }
+
+private:
+    void take(const SiteTable& t) {
+        m_hits = t.hits();
+        m_overflow = t.overflow();
+        for (int i = 0; i < kSites; ++i)
+            for (int p = 0; p < kPlaces; ++p) {
+                m_at[i][p] = t.site(i).at[p].load(std::memory_order_relaxed);
+                m_hud[i][p] = t.site(i).hud[p].load(std::memory_order_relaxed);
+            }
+    }
+    bool m_started = false;
+    uint64_t m_since = 0, m_hits = 0, m_overflow = 0;
+    uint64_t m_at[kSites][kPlaces] = {}, m_hud[kSites][kPlaces] = {};
+};
 
 }  // namespace ohp
 }  // namespace edvr

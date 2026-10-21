@@ -3056,7 +3056,9 @@ REM change filter, the summary, the ring and every line's text. Part B compiles 
 REM function with the game's prologue: another build and wrong bytes refused with one line, the node forwarded unchanged, the snapshot
 REM after the original, forward only while off, another vtable not read, an unreadable field survived with one line. .15: the
 REM cameras' angles, the follow slopes, the pass table and their lines; the PostGUI pass switch hooked on its own synthetic function,
-REM the pass forwarded unchanged and noted, the camera drain's pose, follow and switch lines over two 30-second windows.
+REM the pass forwarded unchanged and noted, the camera drain's pose, follow and switch lines over two 30-second windows. .16: the
+REM write watches moved to view 0's PostGUI camera (slot 2) and its HUD node's frame mask (slot 3): sites by place with the _HUD bit,
+REM their lines and 30-second lines; both armed for real on the rig's threads, the camera drain arming, moving and dropping them.
 if not exist "%OBJ%\onfoothudprobe" mkdir "%OBJ%\onfoothudprobe"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^

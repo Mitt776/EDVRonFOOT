@@ -12,6 +12,11 @@
 // slopes 1, 0 and -1, too little turn, a jump left out, the pass table, every line's text with "none" for what could not be read);
 // Part B15 hooks a synthetic function that begins with the PostGUI pass switch's bytes and drives the camera drain over two
 // 30-second windows on passes and cameras in the rig's memory.
+// .16: Part A16 drives the watches' half of the core (the place, the sites by place with the _HUD bit, the ninth site counted, every
+// line's text, the 30-second line and a quiet one, the fuse, the draw context by camera); Part C arms both watches for real on this
+// rig's threads (the taken slot skipped, one line per writer with its value and place, off with the totals, an unaligned address
+// refused); Part B15 sees the camera drain watch view 0's PostGUI camera at once and the frame mask once the HUD node is drawn with
+// it, write each one's 30-second line, move the camera's watch to a new camera and take both off with the key.
 #include "../../src/d3d11/on_foot_hud_probe.h"
 #include "../../src/d3d11/on_foot_hud_probe_core.h"
 #include "../../src/d3d11/debug_register_core.h"
@@ -380,34 +385,6 @@ void partA13() {
     while (events.pop(&out)) ++popped;
     check(popped == 32 && events.dropped() == 3, "events: a full ring drops and counts");
 
-    // The sites.
-    static ohp::SiteTable sites;
-    bool fresh = false;
-    const int row = sites.record(base + 0x1000, &fresh);
-    check(row == 0 && fresh, "sites: a new site");
-    sites.publish(row, 9, 0, stack, 2);
-    check(sites.record(base + 0x1000, &fresh) == 0 && !fresh && sites.site(0).hits.load() == 2, "sites: a repeat only counted");
-    int r = -1;
-    check(sites.nextUnsaid(&r) && r == 0 && !sites.nextUnsaid(&r), "sites: said once");
-    check(ohp::formatWriter(ohp::kFlagNode, 0, sites.site(0), 0xAB0, base, size, line, sizeof(line)) > 0 &&
-              std::strcmp(line, "on-foot hud probe: writer #1 of the node flag of 0xAB0: at EliteDangerous64.exe+0x1000 (after the write), "
-                                "value 0, thread 9, from EliteDangerous64.exe+0x28ADA4D < +0x28575C0") == 0,
-          "text: a writer");
-    for (uint64_t i = 1; i < 10; ++i) sites.record(base + 0x2000 + i, &fresh);
-    check(sites.sites() == ohp::kSites && sites.overflow() == 2 && sites.hits() == 11, "sites: the ninth site is overflow");
-    check(ohp::formatWatchOff(ohp::kFlagNode, 0xAE0, "the key is off", sites, line, sizeof(line)) > 0 &&
-              std::strstr(line, "watch off: node flag 0xAE0: the key is off; 8 site(s), 11 hit(s), 2 from sites that did not fit"),
-          "text: watch off");
-    check(ohp::formatWatchOn(ohp::kFlagGraph, 0xC14, 0xC00, 40, 1, 2, line, sizeof(line)) > 0 &&
-              std::strstr(line, "watch on: graph flag 0xC14 (0xC00+0x14) on debug slot 3, write, 4 bytes: 40 thread(s), 1 skipped"),
-          "text: watch on");
-
-    // The fuse.
-    ohp::Fuse fuse;
-    check(!fuse.step(0, 0) && !fuse.step(1000, 100000), "fuse: 100 000 in the window is allowed");
-    check(fuse.step(2000, 100001), "fuse: one more trips it");
-    check(!fuse.step(31000, 150000) && !fuse.step(32000, 160000), "fuse: a new window starts over");
-
     // The lines.
     check(ohp::formatPointHooked(ohp::kPointWalk, 0x1406BF980ull, 8, line, sizeof(line)) > 0 &&
               std::strstr(line, "hooked graph walk at EliteDangerous64.exe+0x6BF980 (0x1406BF980), 16 bytes verified, 8 moved; it reads"),
@@ -604,12 +581,12 @@ void partA15() {
     // The masks by camera.
     ohp::MaskByCamera masks;
     uint64_t mask = 0;
-    masks.note(0xCA0, 0x204, 1000);
-    masks.note(0xCA0, 0x20C, 1500);
+    masks.note(0xCA0, 0xC00, 0x204, 1000);
+    masks.note(0xCA0, 0xC00, 0x20C, 1500);
     check(masks.find(0xCA0, 2000, &mask) && mask == 0x20C, "masks: the last per camera");
     check(!masks.find(0xCA0, 2501, &mask) && !masks.find(0xCB0, 2000, &mask) && !masks.find(0, 2000, &mask),
           "masks: none older than a second, of another camera, of no camera");
-    for (uint64_t c = 1; c <= 8; ++c) masks.note(0x1000 + c, c, 3000 + c);
+    for (uint64_t c = 1; c <= 8; ++c) masks.note(0x1000 + c, 0xC00, c, 3000 + c);
     check(!masks.find(0xCA0, 1600, &mask) && masks.find(0x1001, 3100, &mask) && mask == 1, "masks: eight cameras, the oldest made room");
 
     // The switch's lines.
@@ -629,6 +606,112 @@ void partA15() {
     check(ohp::formatPointHooked(ohp::kPointPass, 0x1428AD4A0ull, 6, line, sizeof(line)) > 0 &&
               std::strstr(line, "hooked pass switch at EliteDangerous64.exe+0x28AD4A0 (0x1428AD4A0), 16 bytes verified, 6 moved; it only notes the pass"),
           "text: the switch hooked");
+}
+
+// ---- Part A, .16: the watches' sites, places and lines ------------------------------------------------------------------------------
+
+void partA16() {
+    const uint64_t base = 0x140000000ull, size = 0x640C000ull;
+    const uint64_t stack[2] = {base + 0x28ADA4D, base + 0x28575C0};
+    char line[1600];
+
+    // The place: in the ship unless the journal says on foot; then the mode.
+    check(ohp::placeOf(1, 1) == ohp::kPlaceStereo && ohp::placeOf(1, 0) == ohp::kPlaceCinema && ohp::placeOf(0, 1) == ohp::kPlaceShip &&
+              ohp::placeOf(-1, 0) == ohp::kPlaceShip,
+          "place: stereo, cinema, the ship, unknown counts as the ship");
+    check(ohp::kHudBit == 0x8 && ohp::kWatchSlot[ohp::kWatchCamera] == 2 && ohp::kWatchSlot[ohp::kWatchMask] == 3 &&
+              ohp::watchOffset(ohp::kWatchCamera) == 0x20 && ohp::watchOffset(ohp::kWatchMask) == 0x270,
+          "watches: list 39's bit, the slots, the offsets");
+
+    // The camera's sites: by place, the last value kept, the first one published.
+    static ohp::SiteTable cams;
+    bool fresh = false;
+    const int row = cams.record(base + 0x59F313, ohp::kPlaceStereo, 0x3F5DB3D7, false, &fresh);  // 0.866: cos 30 deg
+    check(row == 0 && fresh, "sites: a new site");
+    cams.publish(row, 9, ohp::kPlaceStereo, 0x3F5DB3D7, stack, 2);
+    check(cams.record(base + 0x59F313, ohp::kPlaceCinema, 0x3F800000, false, &fresh) == 0 && !fresh && cams.site(0).hits.load() == 2 &&
+              cams.site(0).at[ohp::kPlaceStereo].load() == 1 && cams.site(0).at[ohp::kPlaceCinema].load() == 1 &&
+              cams.site(0).at[ohp::kPlaceShip].load() == 0 && cams.site(0).last.load() == 0x3F800000,
+          "sites: a repeat only counted, by place, its value the last");
+    int r = -1;
+    check(cams.nextUnsaid(&r) && r == 0 && !cams.nextUnsaid(&r), "sites: said once");
+    check(ohp::formatWriter(ohp::kWatchCamera, 0, cams.site(0), 0xCA0, base, size, line, sizeof(line)) > 0 &&
+              std::strcmp(line, "on-foot hud probe: writer #1 of the postgui camera of 0xCA0: at EliteDangerous64.exe+0x59F313 (after the "
+                                "write), value 0.866, on foot in stereo, thread 9, from EliteDangerous64.exe+0x28ADA4D < +0x28575C0") == 0,
+          "text: a camera writer, its value and place, no _HUD bit");
+
+    // The mask's sites: the _HUD bit counted by place, as the handler tells it.
+    static ohp::SiteTable masks;
+    masks.record(base + 0x588A75, ohp::kPlaceCinema, 0x20C, true, &fresh);
+    masks.publish(0, 9, ohp::kPlaceCinema, 0x20C, stack, 2);
+    masks.record(base + 0x588A75, ohp::kPlaceStereo, 0x204, false, &fresh);
+    check(masks.site(0).hud[ohp::kPlaceCinema].load() == 1 && masks.site(0).hud[ohp::kPlaceStereo].load() == 0 &&
+              masks.site(0).at[ohp::kPlaceStereo].load() == 1,
+          "sites: the mask's _HUD bit by place");
+    check(ohp::formatWriter(ohp::kWatchMask, 0, masks.site(0), 0xC00, base, size, line, sizeof(line)) > 0 &&
+              std::strcmp(line, "on-foot hud probe: writer #1 of the frame mask of 0xC00: at EliteDangerous64.exe+0x588A75 (after the write), "
+                                "value 0x20C (the _HUD bit on), on foot in cinema, thread 9, from EliteDangerous64.exe+0x28ADA4D < +0x28575C0") == 0,
+          "text: a mask writer, the _HUD bit on");
+    masks.publish(0, 9, ohp::kPlaceShip, 0x204, stack, 0);
+    check(ohp::formatWriter(ohp::kWatchMask, 0, masks.site(0), 0xC00, base, size, line, sizeof(line)) > 0 &&
+              std::strstr(line, "value 0x204 (the _HUD bit off), in the ship, thread 9, from ?"),
+          "text: a mask writer, the _HUD bit off, no callers");
+
+    // The 30-second line: the window's writes per site and place; a quiet watch says so.
+    ohp::WatchSummary ws;
+    check(ws.step(0, ohp::kWatchMask, 0xE70, masks, line, sizeof(line)) == 0, "watch summary: the first call starts the window");
+    for (int i = 0; i < 3; ++i) masks.record(base + 0x588A75, ohp::kPlaceCinema, 0x20C, true, &fresh);
+    masks.record(base + 0x588A75, ohp::kPlaceStereo, 0x204, false, &fresh);
+    masks.record(base + 0x588B00, ohp::kPlaceStereo, 0x200, false, &fresh);
+    check(ws.step(29999, ohp::kWatchMask, 0xE70, masks, line, sizeof(line)) == 0, "watch summary: not before 30 s");
+    check(ws.step(30000, ohp::kWatchMask, 0xE70, masks, line, sizeof(line)) > 0 &&
+              std::strcmp(line, "on-foot hud probe: 30 s watch frame mask 0xE70: 5 write(s); #1 ship 0, stereo 1, cinema 3 (with _HUD 0, 0, 3), "
+                                "last 0x204; #2 ship 0, stereo 1, cinema 0 (with _HUD 0, 0, 0), last 0x200; 0 from sites that did not fit") == 0,
+          "watch summary: the mask's window by site and place, with the _HUD bit");
+    check(ws.step(60000, ohp::kWatchMask, 0xE70, masks, line, sizeof(line)) > 0 &&
+              std::strcmp(line, "on-foot hud probe: 30 s watch frame mask 0xE70: 0 write(s): it is on and stood quiet; 0 from sites that did not "
+                                "fit") == 0,
+          "watch summary: a quiet watch says so");
+
+    // The ninth site is only counted, in the table and in the line; the camera's line has no _HUD part.
+    for (uint64_t i = 1; i < 10; ++i) cams.record(base + 0x2000 + i, ohp::kPlaceShip, 0, false, &fresh);
+    check(cams.sites() == ohp::kSites && cams.overflow() == 2 && cams.hits() == 11, "sites: the ninth site is overflow");
+    ohp::WatchSummary wc;
+    wc.step(0, ohp::kWatchCamera, 0xCC0, cams, line, sizeof(line));
+    cams.record(base + 0x59F313, ohp::kPlaceStereo, 0x3F800000, false, &fresh);
+    cams.record(base + 0x59F313, ohp::kPlaceStereo, 0x3F800000, false, &fresh);
+    cams.record(base + 0x3000, ohp::kPlaceStereo, 0, false, &fresh);
+    check(wc.step(30000, ohp::kWatchCamera, 0xCC0, cams, line, sizeof(line)) > 0 &&
+              std::strcmp(line, "on-foot hud probe: 30 s watch postgui camera 0xCC0: 3 write(s); #1 ship 0, stereo 2, cinema 0, last 1.000; 1 from "
+                                "sites that did not fit") == 0,
+          "watch summary: the camera's window, the site that did not fit counted");
+
+    // The watch lines.
+    check(ohp::formatWatchOff(ohp::kWatchCamera, 0xCC0, "the key is off", cams, line, sizeof(line)) > 0 &&
+              std::strstr(line, "watch off: postgui camera 0xCC0: the key is off; 8 site(s), 14 hit(s), 3 from sites that did not fit"),
+          "text: watch off");
+    check(ohp::formatWatchOn(ohp::kWatchMask, 0xE70, 0xC00, 40, 1, 2, line, sizeof(line)) > 0 &&
+              std::strstr(line, "watch on: frame mask 0xE70 (0xC00+0x270) on debug slot 3, write, 4 bytes: 40 thread(s), 1 skipped"),
+          "text: watch on");
+    check(ohp::formatWatchNotOn(ohp::kWatchCamera, 0xCC0, "no thread took it", line, sizeof(line)) > 0 &&
+              std::strstr(line, "watch NOT on: postgui camera 0xCC0: no thread took it; the pose, state and graph lines go on"),
+          "text: watch not on");
+    check(ohp::formatWatchMoves(ohp::kWatchMask, 0xE70, 0xF70, line, sizeof(line)) > 0 &&
+              std::strcmp(line, "on-foot hud probe: watch moves: frame mask 0xE70 -> 0xF70 (view 0's HUD node's draw context is another now)") == 0,
+          "text: a watch moves");
+
+    // The fuse.
+    ohp::Fuse fuse;
+    check(!fuse.step(0, 0) && !fuse.step(1000, 100000), "fuse: 100 000 in the window is allowed");
+    check(fuse.step(2000, 100001), "fuse: one more trips it");
+    check(!fuse.step(31000, 150000) && !fuse.step(32000, 160000), "fuse: a new window starts over");
+
+    // The draw context by camera, for the mask's watch.
+    ohp::MaskByCamera byCam;
+    byCam.note(0xCA0, 0xC00, 0x20C, 1000);
+    uint64_t mask = 0, ctx = 0;
+    check(byCam.find(0xCA0, 1500, &mask, &ctx) && mask == 0x20C && ctx == 0xC00 && !byCam.find(0xCA0, 2001, &mask, &ctx),
+          "mask by camera: the draw context with the mask, not when stale");
 }
 
 // ---- Part B: the real glue on a synthetic function -------------------------------------------------------------------------------
@@ -741,8 +824,8 @@ void partB() {
     onFootHudProbeDrain(100000, 1, &sink, nullptr);
     check(countLines("on-foot hud probe: node 0x") == 1 && anyLine("on-foot=yes") && anyLine("| 39 pass=yes here=yes"),
           "glue: the line, after the original's hand-in, stamped on foot");
-    check(anyLine("tracking hud 36-39 node 0x") && anyLine("of view bit 1") && anyLine("watch on: node flag"),
-          "glue: the hud node drawn is tracked and its flag watched");
+    check(anyLine("tracking hud 36-39 node 0x") && anyLine("of view bit 1") && !anyLine("watch on"),
+          "glue: the hud node drawn is tracked, no watch from the node drain (.16: the camera drain's)");
     draw(g_game.node);
     g_lines.clear();
     onFootHudProbeDrain(100100, 1, &sink, nullptr);
@@ -890,7 +973,7 @@ void partB13() {
     put<uint8_t>(g_game.node, ohp::kNodeOn, 1);
     onFootHudProbeSetRecording(true);
     g_lines.clear();
-    onFootHudProbeDrain(130000, 0, &sink, nullptr);  // the writes above, as writers of the watched flag
+    onFootHudProbeDrain(130000, 0, &sink, nullptr);
 
     // The state is read BEFORE the original: the stand-in switches the node off while it runs.
     g_walkFlip = true;
@@ -903,23 +986,19 @@ void partB13() {
     std::snprintf(want, sizeof(want), "is in graph 0x%llX", static_cast<unsigned long long>(addr(g_graphs.graph[0])));
     check(anyLine(want) && countLines("state hud 36-39 view bit 1: on: in an enabled graph") == 1 && anyLine("on-foot=no"),
           "graph glue: in its graph and on, as the walk found it on its way in");
-    check(anyLine("watch on: graph flag"), "graph glue: its graph's flag watched once the graph is known");
-    check(anyLine("writer #") && anyLine("of the node flag of 0x") && anyLine("value 0"), "graph glue: the node flag's writer, the stand-in");
+    check(!anyLine("watch") && !anyLine("writer #"), "graph glue: the graph's side puts no watch (.16 gave the slots to the camera drain)");
 
     walk(g_graphs.system, 1);
     g_lines.clear();
     onFootHudProbeDrain(130200, 1, &sink, nullptr);
     check(countLines("state hud 36-39 view bit 1: node-off (H1)") == 1 && anyLine("flag=0") && anyLine("on-foot=yes"), "graph glue: H1");
-    check(anyLine("watch off: node flag") && anyLine("re-armed") && anyLine("watch on: node flag"),
-          "graph glue: on foot changed, the watches re-armed");
 
     put<uint8_t>(g_game.node, ohp::kNodeOn, 1);
     put<uint8_t>(g_graphs.graph[0], ohp::kGraphOn, 0);
     walk(g_graphs.system, 1);
     g_lines.clear();
     onFootHudProbeDrain(130300, 1, &sink, nullptr);
-    check(countLines("state hud 36-39 view bit 1: graph-off (H3)") == 1 && anyLine("on=0") && anyLine("of the graph flag of 0x"),
-          "graph glue: H3, and the graph flag's writer");
+    check(countLines("state hud 36-39 view bit 1: graph-off (H3)") == 1 && anyLine("on=0"), "graph glue: H3");
 
     put<uint8_t>(g_graphs.graph[0], ohp::kGraphOn, 1);
     g_graphs.clear(0);
@@ -967,17 +1046,6 @@ void partB13() {
     check(anyLine("30 s graph: 5 node-calling walk(s), 1 without nodes") && anyLine("hud 36-39 bit 1 graph-not-walked") &&
               anyLine("graph events: 2 PostGUI, 1 other"),
           "graph glue: the graph's summary");
-
-    // The key off: both watches come off with their totals, and a write after it is not seen.
-    g_lines.clear();
-    onFootHudProbeStopWatches("the key is off", &sink, nullptr);
-    check(anyLine("watch off: node flag") && anyLine("watch off: graph flag") && countLines("the key is off") == 2 &&
-              !onFootHudProbeWatchOn(ohp::kFlagNode) && !onFootHudProbeWatchOn(ohp::kFlagGraph),
-          "graph glue: the key off takes the watches off");
-    put<uint8_t>(g_game.node, ohp::kNodeOn, 0);
-    g_lines.clear();
-    onFootHudProbeWatchDrain(ohp::kFlagNode, &sink, nullptr);
-    check(g_lines.empty(), "graph glue: no writer after the watch is off");
 }
 
 // ---- Part B, .15: the pass switch on a synthetic function, the camera drain ---------------------------------------------------------
@@ -1018,6 +1086,10 @@ void setCamera(uint8_t* cam, float yawDeg, float x = 0.f, float y = 0.f, float z
     cameraBlock(m, yawDeg, 0.f, 0.f, x, y, z);
     std::memcpy(cam + ohp::kCamPose, m, sizeof(m));
 }
+// .16: one store each, through volatile, from one place in the rig (Part C's watch and Part B15's see the same instruction).
+__declspec(noinline) void writeFloat(volatile float* p, float v) { *p = v; }
+__declspec(noinline) void writeMask(volatile uint64_t* p, uint64_t v) { *p = v; }
+volatile uint64_t* gameMask() { return reinterpret_cast<volatile uint64_t*>(g_game.ctx + ohp::kCtxMask); }
 // Yaw steps of 10 deg: three up, three down, over and over.
 float triangle(int i) {
     const int k = i % 6;
@@ -1080,6 +1152,10 @@ void partB15() {
                   static_cast<unsigned long long>(addr(g_game.cam)));
     check(anyLine(want) && countLines("new pass") == 2 && countLines("pose view") == 0 && g_switchCalls == 3 && g_switchOn == 1,
           "pass glue: on, both passes noted, said and forwarded");
+    std::snprintf(want, sizeof(want), "watch on: postgui camera 0x%llX (0x%llX+0x20) on debug slot 2, write, 4 bytes",
+                  static_cast<unsigned long long>(addr(g_game.cam) + 0x20), static_cast<unsigned long long>(addr(g_game.cam)));
+    check(anyLine(want) && !anyLine("watch on: frame mask"),
+          "pass glue .16: view 0's PostGUI camera watched at once; no HUD node drawn with it lately, no mask watch yet");
 
     // The half second: a pose line a pass. View 0's HUD node, drawn with its PostGUI camera, gives the mask.
     g_draw(g_game.node);
@@ -1099,7 +1175,9 @@ void partB15() {
     check(countLines("pose view") == 2 && anyLine("pose view 1 stereo on-foot=yes") && anyLine(want),
           "pass glue: view 1's PostGUI camera cannot be read: none, and no mask");
 
-    // Thirty seconds on foot in stereo, the head turning and both cameras with it: both slopes 1; view 1 has no steps.
+    // Thirty seconds on foot in stereo, the head turning and both cameras with it: both slopes 1; view 1 has no steps. .16: the HUD
+    // node drawn with view 0's PostGUI camera every step, so the next check (2 s on) watches its frame mask; the game writes the
+    // camera each step and the mask, without the _HUD bit, after the drain.
     uint64_t t = t0 + 500;
     int i = 0;
     while (t < t0 + 30000) {
@@ -1111,8 +1189,19 @@ void partB15() {
         headBlock(head, yaw - 20.f, 0.f);
         sw(a.pass, 1);
         sw(b.pass, 1);
-        if (t == t0 + 30000) g_lines.clear();
+        g_draw(g_game.node);
+        onFootHudProbeDrain(t, 1, &sink, nullptr);
+        if (t == t0 + 30000) {
+            std::snprintf(want, sizeof(want), "watch on: frame mask 0x%llX (0x%llX+0x270) on debug slot 3",
+                          static_cast<unsigned long long>(addr(g_game.ctx) + 0x270), static_cast<unsigned long long>(addr(g_game.ctx)));
+            check(anyLine(want), "pass glue .16: the frame mask of the HUD node drawn with view 0's PostGUI camera watched");
+            std::snprintf(want, sizeof(want), "of the postgui camera of 0x%llX: at ", static_cast<unsigned long long>(addr(g_game.cam)));
+            check(anyLine(want) && anyLine("(after the write), value ") && anyLine(", on foot in stereo, thread "),
+                  "pass glue .16: the camera's writer, its value and place");
+            g_lines.clear();
+        }
         onFootHudProbeCameraDrain(t, 1, 1, head, &sink, nullptr);
+        writeMask(gameMask(), 0x204);
     }
     check(anyLine("30 s follow view 0 stereo: postgui/main k=1.00 (main turned 590 deg); main/head k=1.00 (head turned 590 deg); 59 step(s), 0 left "
                   "out") &&
@@ -1122,14 +1211,28 @@ void partB15() {
               anyLine("2 new, 0 retired, 0 did not fit; 120 pose line(s)"),
           "pass glue: the switch's 30-second line");
 
-    // Thirty seconds in cinema, the PostGUI camera still, no head pose, view 1's pass no longer called: 0, and that pass retired.
+    // Thirty seconds in cinema, the PostGUI camera still, no head pose, view 1's pass no longer called: 0, and that pass retired. .16:
+    // the mask now with the _HUD bit; each watch's 30-second line (the camera's window began at its arming, t0 + 100, the mask's at
+    // t0 + 2500): the camera written 59 times on foot in stereo; the mask 56 times there without the bit and 4 in cinema with it.
     for (int n = 0; n < 60; ++n) {
         ++i;
         t += 500;
         setCamera(a.main, 30.f + triangle(i), 1.f, 2.f, 3.f);
         sw(a.pass, 1);
-        if (t == t0 + 60000) g_lines.clear();
+        g_draw(g_game.node);
+        onFootHudProbeDrain(t, 1, &sink, nullptr);
+        if (t == t0 + 60000) {
+            std::snprintf(want, sizeof(want), "30 s watch postgui camera 0x%llX: 59 write(s); ",
+                          static_cast<unsigned long long>(addr(g_game.cam) + 0x20));
+            check(anyLine(want) && anyLine(" ship 0, stereo 59, cinema 0, last 0.985; 0 from sites that did not fit"),
+                  "pass glue .16: the camera's 30-second line");
+            std::snprintf(want, sizeof(want), "30 s watch frame mask 0x%llX: 60 write(s); #1 ship 0, stereo 56, cinema 4 (with _HUD 0, 0, 4), last 0x20C",
+                          static_cast<unsigned long long>(addr(g_game.ctx) + 0x270));
+            check(anyLine(want), "pass glue .16: the mask's 30-second line, the _HUD bit only in cinema");
+            g_lines.clear();
+        }
         onFootHudProbeCameraDrain(t, 1, 0, nullptr, &sink, nullptr);
+        writeMask(gameMask(), 0x20C);
     }
     check(anyLine("30 s follow view 0 cinema: postgui/main k=0.00 (main turned 590 deg); main/head no head pose; 59 step(s)") &&
               countLines("follow view 0 stereo") == 0 && anyLine("pose view 0 cinema") && anyLine("head none"),
@@ -1142,13 +1245,36 @@ void partB15() {
     std::snprintf(want, sizeof(want), "new pass 0x%llX, view 1", static_cast<unsigned long long>(addr(b.pass)));
     check(anyLine(want), "pass glue: a retired pass called again is new again");
 
+    // .16: view 0's PostGUI camera is another now: at the next check its watch moves with a line; the mask's stays.
+    static uint8_t cam2[0x900];
+    setCamera(cam2, 0.f);
+    put(a.pass, ohp::kPassPostGuiCamera, addr(cam2));
+    sw(a.pass, 1);
+    g_lines.clear();
+    onFootHudProbeCameraDrain(t + 2200, 1, 0, nullptr, &sink, nullptr);
+    std::snprintf(want, sizeof(want), "watch moves: postgui camera 0x%llX -> 0x%llX (view 0's PostGUI camera is another now)",
+                  static_cast<unsigned long long>(addr(g_game.cam) + 0x20), static_cast<unsigned long long>(addr(cam2) + 0x20));
+    check(anyLine(want) && anyLine("watch off: postgui camera") && anyLine("its target moved") &&
+              onFootHudProbeWatchAddress(ohp::kWatchCamera) == addr(cam2) + 0x20 &&
+              onFootHudProbeWatchAddress(ohp::kWatchMask) == addr(g_game.ctx) + 0x270,
+          "pass glue .16: a new PostGUI camera moves its watch, the mask's stays");
+
+    // The key off: both watches come off with their totals, and a write after it is not seen.
     onFootHudProbeSetRecording(false);
-    onFootHudProbeStopWatches("the rig is done", &sink, nullptr);
+    g_lines.clear();
+    onFootHudProbeStopWatches("the key is off", &sink, nullptr);
+    check(anyLine("watch off: postgui camera") && anyLine("watch off: frame mask") && countLines("the key is off") == 2 &&
+              !onFootHudProbeWatchOn(ohp::kWatchCamera) && !onFootHudProbeWatchOn(ohp::kWatchMask),
+          "pass glue .16: the key off takes both watches off");
+    setCamera(cam2, 5.f);
+    writeMask(gameMask(), 0x204);
+    g_lines.clear();
+    onFootHudProbeWatchDrain(ohp::kWatchCamera, &sink, nullptr);
+    onFootHudProbeWatchDrain(ohp::kWatchMask, &sink, nullptr);
+    check(g_lines.empty(), "pass glue .16: no writer after the watches are off");
 }
 
-// ---- Part C: the write watch, real, on this rig's threads -------------------------------------------------------------------------
-
-__declspec(noinline) void writeByte(volatile uint8_t* p, uint8_t v) { *p = v; }
+// ---- Part C: the write watches, real, on this rig's threads -----------------------------------------------------------------------
 
 HANDLE g_busyGo = nullptr;
 DWORD WINAPI busyThread(void*) {
@@ -1157,10 +1283,10 @@ DWORD WINAPI busyThread(void*) {
 }
 
 void partC() {
-    alignas(16) static uint8_t flagBytes[16] = {1};
+    alignas(16) static float camera[16] = {1.f};     // a pose block: its first float is the watched place
+    alignas(16) static uint64_t mask[2] = {0x204};  // a frame mask
     alignas(16) static uint8_t other[16] = {};
-    volatile uint8_t* const flag = flagBytes;  // written through volatile: each write is a store the watch sees
-    const uint64_t flagAt = addr(flagBytes);
+    const uint64_t camAt = addr(camera), maskAt = addr(mask);
     // A thread that already holds slot 2 for someone else.
     g_busyGo = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     HANDLE busy = CreateThread(nullptr, 0, &busyThread, nullptr, 0, nullptr);
@@ -1178,9 +1304,9 @@ void partC() {
     check(held, "watch: a thread with slot 2 taken");
 
     g_lines.clear();
-    const int armed = onFootHudProbeWatchArm(ohp::kFlagNode, flagAt, flagAt - 0x30, &sink, nullptr);
-    check(armed > 0 && onFootHudProbeWatchOn(ohp::kFlagNode) && anyLine("watch on: node flag") && !anyLine(" 0 skipped"),
-          "watch: armed on the rig's threads, the taken one skipped");
+    const int armed = onFootHudProbeWatchArm(ohp::kWatchCamera, camAt, camAt - 0x20, &sink, nullptr);
+    check(armed > 0 && onFootHudProbeWatchOn(ohp::kWatchCamera) && anyLine("watch on: postgui camera") && !anyLine(" 0 skipped"),
+          "watch: the camera's armed on the rig's threads, the taken one skipped");
     if (busy) {
         CONTEXT c{};
         c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
@@ -1188,24 +1314,39 @@ void partC() {
         check(GetThreadContext(busy, &c) && c.Dr2 == addr(other), "watch: the taken slot is left as it was");
         ResumeThread(busy);
     }
-    writeByte(flag, 0);
-    writeByte(flag, 0);
-    writeByte(flag, 1);
+    check(onFootHudProbeWatchArm(ohp::kWatchMask, maskAt, maskAt - 0x270, &sink, nullptr) > 0 && onFootHudProbeWatchOn(ohp::kWatchMask) &&
+              anyLine("watch on: frame mask") && anyLine("on debug slot 3"),
+          "watch: the mask's armed on slot 3");
+    // The camera written on foot in stereo; the mask, twice, in cinema with the _HUD bit; once more in the ship without it.
+    onFootHudProbeSetPlace(ohp::kPlaceStereo);
+    writeFloat(camera, 0.5f);
+    writeFloat(camera, 0.5f);
+    onFootHudProbeSetPlace(ohp::kPlaceCinema);
+    writeMask(mask, 0x20C);
+    writeMask(mask, 0x20C);
+    onFootHudProbeSetPlace(ohp::kPlaceShip);
+    writeMask(mask, 0x204);
     g_lines.clear();
-    onFootHudProbeWatchDrain(ohp::kFlagNode, &sink, nullptr);
-    check(g_lines.size() == 2 && anyLine("writer #1 of the node flag of") && anyLine("value 0") && anyLine("writer #2 of the node flag of") &&
-              anyLine("value 1"),
-          "watch: one line per writer and value, the repeat only counted");
+    onFootHudProbeWatchDrain(ohp::kWatchCamera, &sink, nullptr);
+    onFootHudProbeWatchDrain(ohp::kWatchMask, &sink, nullptr);
+    check(g_lines.size() == 2 && anyLine("writer #1 of the postgui camera of") && anyLine("value 0.500, on foot in stereo") &&
+              anyLine("writer #1 of the frame mask of") && anyLine("value 0x20C (the _HUD bit on), on foot in cinema"),
+          "watch: one line per writer, with the value it wrote and where; the repeats only counted");
     g_lines.clear();
-    onFootHudProbeWatchDisarm(ohp::kFlagNode, "the rig is done", &sink, nullptr);
-    check(anyLine("watch off: node flag") && anyLine("the rig is done; 2 site(s), 3 hit(s)") && !onFootHudProbeWatchOn(ohp::kFlagNode),
-          "watch: off, with its totals");
-    writeByte(flag, 0);
+    onFootHudProbeWatchDisarm(ohp::kWatchCamera, "the rig is done", &sink, nullptr);
+    onFootHudProbeWatchDisarm(ohp::kWatchMask, "the rig is done", &sink, nullptr);
+    check(anyLine("watch off: postgui camera") && anyLine("watch off: frame mask") && countLines("the rig is done; 1 site(s), 2 hit(s)") == 1 &&
+              countLines("the rig is done; 1 site(s), 3 hit(s)") == 1 && !onFootHudProbeWatchOn(ohp::kWatchCamera) &&
+              !onFootHudProbeWatchOn(ohp::kWatchMask),
+          "watch: off, with their totals");
+    writeFloat(camera, 1.f);
+    writeMask(mask, 0x20C);
     g_lines.clear();
-    onFootHudProbeWatchDrain(ohp::kFlagNode, &sink, nullptr);
+    onFootHudProbeWatchDrain(ohp::kWatchCamera, &sink, nullptr);
+    onFootHudProbeWatchDrain(ohp::kWatchMask, &sink, nullptr);
     check(g_lines.empty(), "watch: off, no trap");
     g_lines.clear();
-    check(onFootHudProbeWatchArm(ohp::kFlagGraph, flagAt + 1, 0, &sink, nullptr) == 0 && anyLine("not 4-aligned"),
+    check(onFootHudProbeWatchArm(ohp::kWatchMask, maskAt + 1, 0, &sink, nullptr) == 0 && anyLine("not 4-aligned"),
           "watch: an unaligned address is refused with a line");
     SetEvent(g_busyGo);
     if (busy) {
@@ -1223,7 +1364,8 @@ int main(int argc, char** argv) {
     partA();
     partA13();
     partA15();
-    partC();  // before Part B: its writer table starts empty
+    partA16();
+    partC();  // before Part B: its writer tables start empty
     partB();
     partB13();
     partB15();

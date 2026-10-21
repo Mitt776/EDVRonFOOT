@@ -214,12 +214,14 @@ const void* hookFor(int point) {
 }
 
 // ---- the write watches: the handler side (any thread; no lock, no allocation, no log) ----------------------------------------------
-// Slot 2 the node flag, slot 3 the graph flag (ohp::kFlagSlot): the same technique as native_vr_probe.cpp's writer watch (slot 1).
+// .16: slot 2 view 0's PostGUI camera, slot 3 its HUD node's frame mask (ohp::kWatchSlot): the same technique as native_vr_probe.cpp's
+// writer watch (slot 1).
 
-std::atomic<uintptr_t> g_watchAddress[ohp::kFlagCount];
-std::atomic<uintptr_t> g_watchPrevious[ohp::kFlagCount];
-std::atomic<bool> g_watchActive[ohp::kFlagCount];
-ohp::SiteTable g_sites[ohp::kFlagCount];
+std::atomic<uintptr_t> g_watchAddress[ohp::kWatchCount];
+std::atomic<uintptr_t> g_watchPrevious[ohp::kWatchCount];
+std::atomic<bool> g_watchActive[ohp::kWatchCount];
+ohp::SiteTable g_sites[ohp::kWatchCount];
+std::atomic<int> g_place{ohp::kPlaceShip};  // where the commander is (ohp::Place), the frame thread's, for the handler
 
 DWORD64& slotRegister(CONTEXT* c, unsigned slot) { return slot == 2 ? c->Dr2 : c->Dr3; }
 
@@ -251,8 +253,8 @@ __declspec(noinline) int sehUnwind(const CONTEXT* at, uint64_t* stack) noexcept 
 LONG CALLBACK watchHandler(EXCEPTION_POINTERS* ep) {
     if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP) return EXCEPTION_CONTINUE_SEARCH;
     CONTEXT* c = ep->ContextRecord;
-    for (int f = 0; f < ohp::kFlagCount; ++f) {
-        const unsigned slot = ohp::kFlagSlot[f];
+    for (int f = 0; f < ohp::kWatchCount; ++f) {
+        const unsigned slot = ohp::kWatchSlot[f];
         // Never cleared once set, and the one before kept: a trap that arrives after its thread was disarmed is still ours.
         const uintptr_t address = g_watchAddress[f].load(std::memory_order_acquire);
         const uintptr_t previous = g_watchPrevious[f].load(std::memory_order_acquire);
@@ -270,14 +272,16 @@ LONG CALLBACK watchHandler(EXCEPTION_POINTERS* ep) {
             dr = 0;
             return EXCEPTION_CONTINUE_EXECUTION;
         }
-        uint8_t value = 0;
-        sehRead(nullptr, address, &value, 1);
+        // The camera's first float; the whole mask (the watch covers its low half, the _HUD bit among them).
+        uint64_t value = 0;
+        sehRead(nullptr, address, &value, f == ohp::kWatchMask ? 8 : 4);
+        const int place = g_place.load(std::memory_order_relaxed);
         bool fresh = false;
-        const int row = g_sites[f].record(ohp::siteKey(static_cast<uint64_t>(c->Rip), value), &fresh);
+        const int row = g_sites[f].record(static_cast<uint64_t>(c->Rip), place, value, f == ohp::kWatchMask && (value & ohp::kHudBit) != 0, &fresh);
         if (fresh) {
             uint64_t stack[ohp::kStackFrames] = {};
             const int frames = sehUnwind(c, stack);
-            g_sites[f].publish(row, GetCurrentThreadId(), value, stack, frames);
+            g_sites[f].publish(row, GetCurrentThreadId(), place, value, stack, frames);
         }
         return EXCEPTION_CONTINUE_EXECUTION;
     }
@@ -349,9 +353,9 @@ int setThreadWatchSafe(DWORD tid, unsigned slot, uintptr_t address, bool arm) no
 }
 
 constexpr size_t kWatchThreads = 1024;
-DWORD g_watchTids[ohp::kFlagCount][kWatchThreads];
-size_t g_watchTidCount[ohp::kFlagCount] = {};
-uint64_t g_watchObject[ohp::kFlagCount] = {};  // the node or graph the flag belongs to, for the lines
+DWORD g_watchTids[ohp::kWatchCount][kWatchThreads];
+size_t g_watchTidCount[ohp::kWatchCount] = {};
+uint64_t g_watchObject[ohp::kWatchCount] = {};  // the camera or draw context of the watched place, for the lines
 PVOID g_watchHandler = nullptr;
 
 void say(OnFootHudProbeSink sink, void* ctx, int n, const char* line) {
@@ -516,28 +520,28 @@ void onFootHudProbeSetRecording(bool on) { g_recording.store(on, std::memory_ord
 uint64_t onFootHudProbeCalls() { return g_calls.load(std::memory_order_relaxed); }
 uint64_t onFootHudProbeFaults() { return g_faults.load(std::memory_order_relaxed); }
 
-int onFootHudProbeWatchArm(int flag, uintptr_t address, uint64_t object, OnFootHudProbeSink sink, void* ctx) {
+int onFootHudProbeWatchArm(int watch, uintptr_t address, uint64_t object, OnFootHudProbeSink sink, void* ctx) {
     char line[400];
-    if (flag < 0 || flag >= ohp::kFlagCount || g_watchTidCount[flag] || !address) return 0;
+    if (watch < 0 || watch >= ohp::kWatchCount || g_watchTidCount[watch] || !address) return 0;
     if (address & 3) {
-        say(sink, ctx, ohp::formatWatchNotOn(flag, address, "the address is not 4-aligned", line, sizeof(line)), line);
+        say(sink, ctx, ohp::formatWatchNotOn(watch, address, "the address is not 4-aligned", line, sizeof(line)), line);
         return 0;
     }
     if (!g_watchHandler) g_watchHandler = AddVectoredExceptionHandler(1, &watchHandler);
     if (!g_watchHandler) {
-        say(sink, ctx, ohp::formatWatchNotOn(flag, address, "the exception handler could not be added", line, sizeof(line)), line);
+        say(sink, ctx, ohp::formatWatchNotOn(watch, address, "the exception handler could not be added", line, sizeof(line)), line);
         return 0;
     }
-    const unsigned slot = ohp::kFlagSlot[flag];
+    const unsigned slot = ohp::kWatchSlot[watch];
     // The handler must know the address before the first thread can trap on it.
-    const uintptr_t was = g_watchAddress[flag].exchange(address, std::memory_order_acq_rel);
-    if (was && was != address) g_watchPrevious[flag].store(was, std::memory_order_release);
-    g_watchActive[flag].store(true, std::memory_order_release);
-    g_watchObject[flag] = object;
+    const uintptr_t was = g_watchAddress[watch].exchange(address, std::memory_order_acq_rel);
+    if (was && was != address) g_watchPrevious[watch].store(was, std::memory_order_release);
+    g_watchActive[watch].store(true, std::memory_order_release);
+    g_watchObject[watch] = object;
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
     if (snap == INVALID_HANDLE_VALUE) {
-        g_watchActive[flag].store(false, std::memory_order_release);
-        say(sink, ctx, ohp::formatWatchNotOn(flag, address, "the process's threads could not be listed", line, sizeof(line)), line);
+        g_watchActive[watch].store(false, std::memory_order_release);
+        say(sink, ctx, ohp::formatWatchNotOn(watch, address, "the process's threads could not be listed", line, sizeof(line)), line);
         return 0;
     }
     uint32_t armed = 0, skipped = 0, failed = 0;
@@ -546,13 +550,13 @@ int onFootHudProbeWatchArm(int flag, uintptr_t address, uint64_t object, OnFootH
     te.dwSize = sizeof(te);
     for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
         if (te.th32OwnerProcessID != pid) continue;
-        if (g_watchTidCount[flag] >= kWatchThreads) {
+        if (g_watchTidCount[watch] >= kWatchThreads) {
             ++failed;
             continue;
         }
         const int r = setThreadWatchSafe(te.th32ThreadID, slot, address, true);
         if (r == kDrDone) {
-            g_watchTids[flag][g_watchTidCount[flag]++] = te.th32ThreadID;
+            g_watchTids[watch][g_watchTidCount[watch]++] = te.th32ThreadID;
             ++armed;
         } else if (r == kDrSkipped) {
             ++skipped;
@@ -562,61 +566,58 @@ int onFootHudProbeWatchArm(int flag, uintptr_t address, uint64_t object, OnFootH
     }
     CloseHandle(snap);
     if (!armed) {
-        g_watchActive[flag].store(false, std::memory_order_release);
+        g_watchActive[watch].store(false, std::memory_order_release);
         char why[160];
         std::snprintf(why, sizeof(why), "no thread took it (%u skipped, %u could not be set)", skipped, failed);
-        say(sink, ctx, ohp::formatWatchNotOn(flag, address, why, line, sizeof(line)), line);
+        say(sink, ctx, ohp::formatWatchNotOn(watch, address, why, line, sizeof(line)), line);
         return 0;
     }
-    say(sink, ctx, ohp::formatWatchOn(flag, address, object, armed, skipped, failed, line, sizeof(line)), line);
+    say(sink, ctx, ohp::formatWatchOn(watch, address, object, armed, skipped, failed, line, sizeof(line)), line);
     return static_cast<int>(armed);
 }
 
-bool onFootHudProbeWatchOn(int flag) { return flag >= 0 && flag < ohp::kFlagCount && g_watchTidCount[flag] != 0; }
+bool onFootHudProbeWatchOn(int watch) { return watch >= 0 && watch < ohp::kWatchCount && g_watchTidCount[watch] != 0; }
 
-uintptr_t onFootHudProbeWatchAddress(int flag) {
-    return onFootHudProbeWatchOn(flag) ? g_watchAddress[flag].load(std::memory_order_acquire) : 0;
+uintptr_t onFootHudProbeWatchAddress(int watch) {
+    return onFootHudProbeWatchOn(watch) ? g_watchAddress[watch].load(std::memory_order_acquire) : 0;
 }
 
-void onFootHudProbeWatchDrain(int flag, OnFootHudProbeSink sink, void* ctx) {
-    if (flag < 0 || flag >= ohp::kFlagCount) return;
+void onFootHudProbeWatchDrain(int watch, OnFootHudProbeSink sink, void* ctx) {
+    if (watch < 0 || watch >= ohp::kWatchCount) return;
     char line[700];
     int row = 0;
-    while (g_sites[flag].nextUnsaid(&row))
+    while (g_sites[watch].nextUnsaid(&row))
         say(sink, ctx,
-            ohp::formatWriter(flag, row, g_sites[flag].site(row), g_watchObject[flag], g_base.load(std::memory_order_relaxed),
+            ohp::formatWriter(watch, row, g_sites[watch].site(row), g_watchObject[watch], g_base.load(std::memory_order_relaxed),
                               g_imageSize.load(std::memory_order_relaxed), line, sizeof(line)),
             line);
 }
 
-void onFootHudProbeWatchDisarm(int flag, const char* why, OnFootHudProbeSink sink, void* ctx) {
-    if (!onFootHudProbeWatchOn(flag)) return;
-    const unsigned slot = ohp::kFlagSlot[flag];
-    const uintptr_t address = g_watchAddress[flag].load(std::memory_order_acquire);
-    for (size_t i = 0; i < g_watchTidCount[flag]; ++i) setThreadWatchSafe(g_watchTids[flag][i], slot, address, false);
-    g_watchTidCount[flag] = 0;
-    g_watchActive[flag].store(false, std::memory_order_release);
-    onFootHudProbeWatchDrain(flag, sink, ctx);
+void onFootHudProbeWatchDisarm(int watch, const char* why, OnFootHudProbeSink sink, void* ctx) {
+    if (!onFootHudProbeWatchOn(watch)) return;
+    const unsigned slot = ohp::kWatchSlot[watch];
+    const uintptr_t address = g_watchAddress[watch].load(std::memory_order_acquire);
+    for (size_t i = 0; i < g_watchTidCount[watch]; ++i) setThreadWatchSafe(g_watchTids[watch][i], slot, address, false);
+    g_watchTidCount[watch] = 0;
+    g_watchActive[watch].store(false, std::memory_order_release);
+    onFootHudProbeWatchDrain(watch, sink, ctx);
     char line[400];
-    say(sink, ctx, ohp::formatWatchOff(flag, address, why, g_sites[flag], line, sizeof(line)), line);
+    say(sink, ctx, ohp::formatWatchOff(watch, address, why, g_sites[watch], line, sizeof(line)), line);
 }
 
 void onFootHudProbeStopWatches(const char* why, OnFootHudProbeSink sink, void* ctx) {
-    for (int f = 0; f < ohp::kFlagCount; ++f) onFootHudProbeWatchDisarm(f, why, sink, ctx);
+    for (int f = 0; f < ohp::kWatchCount; ++f) onFootHudProbeWatchDisarm(f, why, sink, ctx);
 }
 
 namespace {
 
-// The frame thread's side of the graph: the cells' new nodes and graphs, each cell's state, the events, the watches.
+// The frame thread's side of the graph: the cells' new nodes and graphs, each cell's state, the events (the watches are .16's,
+// drainWatches below).
 void drainGraph(uint64_t nowMs, int onFoot, OnFootHudProbeSink sink, void* ctx) {
     static ohp::StateLog stateLog;
     static ohp::GraphSummary summary;
-    static ohp::Fuse fuse;
     static uint64_t saidNode[ohp::kTracked] = {}, saidGraph[ohp::kTracked] = {};
     static ohp::State current[ohp::kTracked] = {};
-    static uintptr_t refused[ohp::kFlagCount] = {};
-    static bool fused = false;
-    static int lastOnFoot = -2;
     char line[1600];
     const uintptr_t base = g_base.load(std::memory_order_relaxed);
     const uint64_t imageSize = g_imageSize.load(std::memory_order_relaxed);
@@ -671,37 +672,60 @@ void drainGraph(uint64_t nowMs, int onFoot, OnFootHudProbeSink sink, void* ctx) 
     ohp::GraphEvent e;
     while (g_events.pop(&e)) say(sink, ctx, ohp::formatGraphEvent(e, onFoot, base, imageSize, line, sizeof(line)), line);
 
-    // The watches: the first tracked hud node's flag and its graph's.
-    uint64_t want[ohp::kFlagCount] = {}, object[ohp::kFlagCount] = {};
-    for (int c = 0; c < ohp::kTracked; ++c) {
-        const uint64_t key = g_cells[c].key.load(std::memory_order_acquire);
-        if (!key || !saidNode[c] || static_cast<int>((key >> 32) - 1) != ohp::kKindHud) continue;
-        object[ohp::kFlagNode] = saidNode[c];
-        object[ohp::kFlagGraph] = saidGraph[c];
-        break;
-    }
-    for (int f = 0; f < ohp::kFlagCount; ++f) want[f] = object[f] && !fused ? object[f] + ohp::flagOffset(f) : 0;
-    const bool rearm = lastOnFoot != -2 && onFoot != lastOnFoot;
-    lastOnFoot = onFoot;
-    for (int f = 0; f < ohp::kFlagCount; ++f) {
-        if (onFootHudProbeWatchOn(f) && onFootHudProbeWatchAddress(f) != want[f])
-            onFootHudProbeWatchDisarm(f, want[f] ? "its node or graph changed" : "nothing to watch", sink, ctx);
-        if (onFootHudProbeWatchOn(f) && rearm) onFootHudProbeWatchDisarm(f, "on foot changed: re-armed for threads started since", sink, ctx);
-        if (!onFootHudProbeWatchOn(f) && want[f] && (want[f] != refused[f] || rearm)) {
-            if (!onFootHudProbeWatchArm(f, static_cast<uintptr_t>(want[f]), object[f], sink, ctx)) refused[f] = static_cast<uintptr_t>(want[f]);
-        }
-        onFootHudProbeWatchDrain(f, sink, ctx);
-    }
-    if (!fused && fuse.step(nowMs, g_sites[ohp::kFlagNode].hits() + g_sites[ohp::kFlagGraph].hits())) {
-        fused = true;
-        onFootHudProbeStopWatches("over 100000 hits in 30 s: the flag is written all the time; the watches stay off", sink, ctx);
-    }
-
     const ohp::GraphCounts total{g_walks.load(std::memory_order_relaxed), g_idleWalks.load(std::memory_order_relaxed),
                                  g_walkFaults.load(std::memory_order_relaxed), g_graphPostGui.load(std::memory_order_relaxed),
                                  g_graphOther.load(std::memory_order_relaxed), g_events.dropped(),
-                                 g_sites[ohp::kFlagNode].hits() + g_sites[ohp::kFlagGraph].hits(), stateLog.held()};
+                                 g_sites[ohp::kWatchCamera].hits() + g_sites[ohp::kWatchMask].hits(), stateLog.held()};
     say(sink, ctx, summary.step(nowMs, total, views, nViews, line, sizeof(line)), line);
+}
+
+// .16, from the camera drain: the watches follow view 0's PostGUI camera (pass0+0x50) and the draw context of the HUD node drawn with
+// it; a new target moves its watch with a line. Every frame: the place for the handler, the new writers' lines, each watch's 30-second
+// line while it is on, and the fuse. They are re-armed when the journal's on-foot changes (threads started since).
+void drainWatches(uint64_t nowMs, int onFoot, int stereo, uint64_t pass0, OnFootHudProbeSink sink, void* ctx) {
+    static ohp::Fuse fuse;
+    static ohp::WatchSummary summaries[ohp::kWatchCount];
+    static uint64_t want[ohp::kWatchCount] = {}, object[ohp::kWatchCount] = {}, refused[ohp::kWatchCount] = {};
+    static uint64_t nextCheckMs = 0;
+    static bool fused = false;
+    static int lastOnFoot = -2;
+    char line[1600];
+    g_place.store(ohp::placeOf(onFoot, stereo), std::memory_order_relaxed);
+
+    // The targets, every 2 s once view 0's pass is known (every frame until then): a target not found now keeps the watch where it is.
+    if (pass0 && nowMs >= nextCheckMs) {
+        nextCheckMs = nowMs + ohp::kWatchCheckMs;
+        uint64_t cam = 0, mask = 0, hudCtx = 0;
+        if (sehRead(nullptr, pass0 + ohp::kPassPostGuiCamera, &cam, sizeof(cam)) && cam) {
+            want[ohp::kWatchCamera] = cam + ohp::watchOffset(ohp::kWatchCamera);
+            object[ohp::kWatchCamera] = cam;
+            if (g_masks.find(cam, nowMs, &mask, &hudCtx) && hudCtx) {
+                want[ohp::kWatchMask] = hudCtx + ohp::watchOffset(ohp::kWatchMask);
+                object[ohp::kWatchMask] = hudCtx;
+            }
+        }
+    }
+
+    const bool rearm = lastOnFoot != -2 && onFoot != lastOnFoot;
+    lastOnFoot = onFoot;
+    for (int w = 0; w < ohp::kWatchCount; ++w) {
+        const uintptr_t at = onFootHudProbeWatchAddress(w);
+        if (at && at != want[w]) {
+            say(sink, ctx, ohp::formatWatchMoves(w, at, want[w], line, sizeof(line)), line);
+            onFootHudProbeWatchDisarm(w, "its target moved", sink, ctx);
+        }
+        if (onFootHudProbeWatchOn(w) && rearm) onFootHudProbeWatchDisarm(w, "on foot changed: re-armed for threads started since", sink, ctx);
+        if (!fused && !onFootHudProbeWatchOn(w) && want[w] && (want[w] != refused[w] || rearm)) {
+            if (!onFootHudProbeWatchArm(w, static_cast<uintptr_t>(want[w]), object[w], sink, ctx)) refused[w] = want[w];
+        }
+        onFootHudProbeWatchDrain(w, sink, ctx);
+        if (onFootHudProbeWatchOn(w))
+            say(sink, ctx, summaries[w].step(nowMs, w, onFootHudProbeWatchAddress(w), g_sites[w], line, sizeof(line)), line);
+    }
+    if (!fused && fuse.step(nowMs, g_sites[ohp::kWatchCamera].hits() + g_sites[ohp::kWatchMask].hits())) {
+        fused = true;
+        onFootHudProbeStopWatches("over 100000 hits in 30 s: the place is written all the time; the watches stay off", sink, ctx);
+    }
 }
 
 }  // namespace
@@ -728,7 +752,7 @@ void onFootHudProbeDrain(uint64_t nowMs, int onFoot, OnFootHudProbeSink sink, vo
     ohp::Snapshot s, write;
     while (g_ring.pop(&s)) {
         s.onFoot = onFoot;
-        if (s.first == ohp::kHudFirst) g_masks.note(s.cam, s.ctxMask, nowMs);  // every draw, before the filter: the pose lines' mask
+        if (s.first == ohp::kHudFirst) g_masks.note(s.cam, s.ctx, s.ctxMask, nowMs);  // every draw, before the filter: the pose lines' mask
         if (filter.admit(s, nowMs, &write)) say(sink, ctx, ohp::formatSnapshot(write, line, sizeof(line)), line);
     }
     while (filter.due(nowMs, &write)) say(sink, ctx, ohp::formatSnapshot(write, line, sizeof(line)), line);
@@ -857,7 +881,19 @@ void onFootHudProbeCameraDrain(uint64_t nowMs, int onFoot, int stereo, const flo
         say(sink, ctx, ohp::formatSwitchSummary(seconds, window, passes, views, n, line, sizeof(line)), line);
         window = ohp::SwitchWindow{};
     }
+
+    // .16: the watches, on view 0's pass called within the last second.
+    uint64_t pass0 = 0;
+    for (const Track& t : track) {
+        int32_t view = -1;
+        if (!t.pass || nowMs - t.calledMs > ohp::kCalledMs || !sehRead(nullptr, t.pass + ohp::kPassView, &view, sizeof(view)) || view != 0) continue;
+        pass0 = t.pass;
+        break;
+    }
+    drainWatches(nowMs, onFoot, stereo, pass0, sink, ctx);
 }
+
+void onFootHudProbeSetPlace(int place) { g_place.store(place, std::memory_order_relaxed); }
 
 void onFootHudProbeFrameBoundary() {
     static uint32_t generation = ~0u;
