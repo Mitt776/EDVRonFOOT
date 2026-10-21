@@ -101,12 +101,12 @@
 - [x] 7.1 Исследование: в раздел зонда — строки `.16` и как их читать; `## Status` — следующий шаг «прогулка
   `.16`». Строка REM в `edvr/build.bat` у стенда — про новые цели сторожей. Проверка: `## Status` не длиннее 60
   строк.
-- [ ] 7.2 Полная сборка `edvr\build_edvronfoot.bat` по абсолютному пути. Проверка:
+- [x] 7.2 Полная сборка `edvr\build_edvronfoot.bat` по абсолютному пути. Проверка:
   - «all gates passed», терпимый сбой — `weapon_motion`; при одиночном таймауте `openxr_present_test` — один
     повтор;
   - коммит, тег `v0.19.1-edvronfoot.16`;
   - `--dll-only` проходит.
-- [ ] 7.3 Установка при закрытой игре: `py -3.12 edvr\tools\install_edvr.py --target "C:\Steam\steamapps\common\Elite
+- [x] 7.3 Установка при закрытой игре: `py -3.12 edvr\tools\install_edvr.py --target "C:\Steam\steamapps\common\Elite
   Dangerous\Products\elite-dangerous-odyssey-64" --all --tag edvronfoot --dry-run`, затем без `--dry-run`. В живом
   `edvr.ini` через Edit — `on_foot_hud_probe = 1`. Проверка:
   - `edvronfoot_game.ps1 -Action Status` показывает `.16`;
