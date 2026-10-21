@@ -43,11 +43,11 @@
   - ключ `native_vr_on_foot_game_hud` — в список временных.
 
   Проверка: `## Status` не длиннее 60 строк.
-- [ ] 3.2 Полная сборка `edvr\build_edvronfoot.bat` по абсолютному пути. Проверка:
+- [x] 3.2 Полная сборка `edvr\build_edvronfoot.bat` по абсолютному пути. Проверка:
   - «all gates passed», единственный терпимый сбой — `weapon_motion`;
   - коммит, тег `v0.19.1-edvronfoot.14`;
   - `--dll-only` через обёртку проходит.
-- [ ] 3.3 Установка при закрытой игре: `py -3.12 edvr\tools\install_edvr.py --target "C:\Steam\steamapps\common\Elite
+- [x] 3.3 Установка при закрытой игре: `py -3.12 edvr\tools\install_edvr.py --target "C:\Steam\steamapps\common\Elite
   Dangerous\Products\elite-dangerous-odyssey-64" --all --tag edvronfoot --dry-run`, затем без `--dry-run`. В живом
   `edvr.ini` через Edit поставить `on_foot_hud_probe = 1`: зонд покажет, держится ли флажок узла. Новый ключ в ini
   не нужен, по умолчанию он включён. Проверка:
