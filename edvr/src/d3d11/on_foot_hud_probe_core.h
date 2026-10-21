@@ -14,7 +14,9 @@
 //     rex push rbx; push rdi; push r14; sub rsp,80h; mov rax,[rcx+108h] -- no relative operand.
 //   0x594EF0 (ctx, list): draws a list only when *(list+0x30) & *(ctx+0x270) is not 0. The list's models are a chain per camera
 //     "pocket": head *(list+0x40 + 8k), k = *(cam+0x8E8), cam = *(ctx+0x250); 64 pockets.
-//   0x27F9D00: the list-range node, vtable 0x52ED2C0; the PostGUI pass (0x28A71D0) makes two per view, lists 36-39 and 40-46.
+//   0x27F9D00: the list-range node, vtable 0x52ED2C0; the PostGUI pass (0x28A71D0) makes two per view from the table 0x5E86018
+//     ({name, 1, 0, 3}, {name, 1, 4, 10}): lists 0-3 and 4-10 OF THE POSTGUI SET -- 36-39 and 40-46 of the game's list names. The
+//     .11 probe waited for 36 and 40 there and saw no node at all (flight .11); a node is ours by its vtable and its pair.
 //   0x57D1B0: the node's base puts its render view V at node+0x110 (built by 0x6BE020): V+0x10 the PostGUIView camera, V+0x20 its
 //     name ("PostGUIView_%s", a game string: length at +0, characters from +0x14), V+0x28 the view's bit, V+0x30 the bit's number.
 //   The camera: +0x18 and +0x250 flags, +0x8D0 and +0x8E0 masks, +0x8E8 its pocket.
@@ -66,8 +68,9 @@ constexpr uintptr_t kListMask = 0x30;      // u64
 constexpr uintptr_t kListPockets = 0x40;   // 64 chain heads
 constexpr int kPockets = 64;
 
-constexpr uint32_t kHudFirst = 36;       // PostGui_FirstPerson_WeaponAR .. _HUD
-constexpr uint32_t kPostGuiFirst = 40;   // PostGui_Background .. PostGui_Mouse
+constexpr uint32_t kHudFirst = 0, kHudCount = 4;          // PostGui_FirstPerson_WeaponAR .. _HUD
+constexpr uint32_t kPostGuiFirst = 4, kPostGuiCount = 7;   // PostGui_Background .. PostGui_Mouse
+constexpr uint32_t kListNameBase = 36;  // the PostGUI set's list 0 is the game's list name 36: the lines use the names' numbers
 constexpr uint32_t kMaxLists = 7;
 constexpr size_t kNameBytes = 32;        // with the terminator
 
@@ -79,9 +82,10 @@ bool readAs(ReadFn read, void* rctx, uint64_t addr, T* out) {
     return addr >= 0x10000 && read(rctx, addr, out, sizeof(T));
 }
 
-// A node of the PostGUI pass: the list-range vtable and lists 36.. or 40...
-inline bool isOurs(uint64_t vtable, uint64_t first, uintptr_t base) {
-    return vtable == base + kNodeVtableRva && (first == kHudFirst || first == kPostGuiFirst);
+// A node of the PostGUI pass: the list-range vtable and lists 0-3 or 4-10 of the set.
+inline bool isOurs(uint64_t vtable, uint64_t first, uint32_t count, uintptr_t base) {
+    return vtable == base + kNodeVtableRva &&
+           ((first == kHudFirst && count == kHudCount) || (first == kPostGuiFirst && count == kPostGuiCount));
 }
 
 struct ListState {
@@ -228,7 +232,7 @@ inline int formatSnapshot(const Snapshot& s, char* out, size_t cap) {
                           "on-foot hud probe: node 0x%llX view \"%s\" bit %d (0x%llX) lists %u-%u on-foot=%s cam 0x%llX (%s the view's 0x%llX) "
                           "flags 18=0x%X 250=0x%X masks 8d0=0x%X 8e0=0x%llX ctx-mask=0x%llX pocket %d",
                           static_cast<unsigned long long>(s.node), s.name, s.viewBitIndex, static_cast<unsigned long long>(s.viewBit),
-                          s.first, s.first + (s.count ? s.count - 1 : 0), s.onFoot < 0 ? "?" : s.onFoot ? "yes" : "no",
+                          kListNameBase + s.first, kListNameBase + s.first + (s.count ? s.count - 1 : 0), s.onFoot < 0 ? "?" : s.onFoot ? "yes" : "no",
                           static_cast<unsigned long long>(s.cam), s.cam == s.viewCam ? "is" : "not", static_cast<unsigned long long>(s.viewCam),
                           s.camFlags18, s.camFlags250, s.cam8D0, static_cast<unsigned long long>(s.cam8E0),
                           static_cast<unsigned long long>(s.ctxMask), s.pocket < static_cast<uint32_t>(kPockets) ? static_cast<int>(s.pocket) : -1);
@@ -237,7 +241,7 @@ inline int formatSnapshot(const Snapshot& s, char* out, size_t cap) {
         const ListState& l = s.list[i];
         const bool own = s.pocket < static_cast<uint32_t>(kPockets);
         const uint64_t elsewhere = own ? l.pockets & ~(1ull << s.pocket) : l.pockets;
-        n += std::snprintf(out + n, cap - n, " | %u pass=%s here=%s elsewhere={", s.first + i, (l.mask & s.ctxMask) ? "yes" : "no",
+        n += std::snprintf(out + n, cap - n, " | %u pass=%s here=%s elsewhere={", kListNameBase + s.first + i, (l.mask & s.ctxMask) ? "yes" : "no",
                            !own ? "?" : (l.pockets >> s.pocket) & 1 ? "yes" : "no");
         int listed = 0, more = 0;
         for (int p = 0; p < kPockets && n > 0 && static_cast<size_t>(n) < cap; ++p) {
@@ -371,6 +375,80 @@ private:
     uint64_t m_since = 0;
     SummaryCounts m_base;
 };
+
+// The node census (after flight .11): while no PostGUI node has come, the hook counts every other node by its kind -- the vtable's
+// RVA (0xFFFFFFFF outside the image), its first list and its number of lists -- so a walk on which ours could not be told still
+// shows what there was. Lock-free: a key claims an empty cell by compare-and-swap; a full table counts what did not fit.
+class Census {
+public:
+    static constexpr int kCells = 32;
+    static uint64_t key(uint64_t vtable, uintptr_t base, uint64_t first, uint32_t count, uint64_t imageSize) {
+        const uint64_t rva = vtable >= base && vtable - base < imageSize ? vtable - base : 0xFFFFFFFFull;
+        return (rva << 32) | ((first & 0xFFFF) << 16) | (count & 0xFFFF);
+    }
+    void note(uint64_t k) noexcept {
+        const uint64_t stored = k + 1;  // 0 marks an empty cell
+        for (Cell& c : m_cells) {
+            uint64_t now = c.key.load(std::memory_order_acquire);
+            if (now == 0 && c.key.compare_exchange_strong(now, stored, std::memory_order_acq_rel)) now = stored;
+            if (now == stored) {
+                c.hits.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+        }
+        m_overflow.fetch_add(1, std::memory_order_relaxed);
+    }
+    struct Kind {
+        uint32_t vtableRva = 0, first = 0, count = 0;
+        uint64_t hits = 0;
+    };
+    // The kinds seen, most drawn first; returns how many.
+    int kinds(Kind* out, int cap) const {
+        int n = 0;
+        for (const Cell& c : m_cells) {
+            const uint64_t stored = c.key.load(std::memory_order_acquire);
+            if (!stored || n == cap) continue;
+            const uint64_t k = stored - 1;
+            Kind kind{static_cast<uint32_t>(k >> 32), static_cast<uint32_t>((k >> 16) & 0xFFFF), static_cast<uint32_t>(k & 0xFFFF),
+                      c.hits.load(std::memory_order_relaxed)};
+            int at = n++;
+            while (at > 0 && out[at - 1].hits < kind.hits) {
+                out[at] = out[at - 1];
+                --at;
+            }
+            out[at] = kind;
+        }
+        return n;
+    }
+    uint64_t overflow() const { return m_overflow.load(std::memory_order_relaxed); }
+
+private:
+    struct Cell {
+        std::atomic<uint64_t> key{0};
+        std::atomic<uint64_t> hits{0};
+    };
+    Cell m_cells[kCells];
+    std::atomic<uint64_t> m_overflow{0};
+};
+
+constexpr uint64_t kCensusAfterMs = 20000;
+
+inline int formatCensusHead(int kinds, uint64_t overflow, char* out, size_t cap) {
+    return std::snprintf(out, cap,
+                         "on-foot hud probe: no PostGUI node (vtable +0x%llX, lists 0+4 or 4+7) in %llu s of recording; the node kinds "
+                         "seen instead, most drawn first: %d kind(s), %llu draw(s) of kinds that did not fit",
+                         static_cast<unsigned long long>(kNodeVtableRva), static_cast<unsigned long long>(kCensusAfterMs / 1000), kinds,
+                         static_cast<unsigned long long>(overflow));
+}
+
+inline int formatCensusKind(const Census::Kind& k, char* out, size_t cap) {
+    if (k.vtableRva == 0xFFFFFFFFu)
+        return std::snprintf(out, cap, "on-foot hud probe: census: vtable outside the image, first list %u, %u list(s): %llu draw(s)",
+                             k.first, k.count, static_cast<unsigned long long>(k.hits));
+    return std::snprintf(out, cap, "on-foot hud probe: census: vtable +0x%X%s, first list %u, %u list(s): %llu draw(s)", k.vtableRva,
+                         k.vtableRva == kNodeVtableRva ? " (the list-range node's)" : "", k.first, k.count,
+                         static_cast<unsigned long long>(k.hits));
+}
 
 // ---- the other lines --------------------------------------------------------------------------------------------------------------
 

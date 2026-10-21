@@ -22,6 +22,10 @@ std::atomic<uint64_t> g_calls{0};  // of them, the PostGUI nodes'
 std::atomic<uint64_t> g_faults{0};
 std::atomic<uint64_t> g_faultNode{0};  // the first node a field of which could not be read
 ohp::Ring<64> g_ring;
+// The census (ohp::Census): on from the install until a PostGUI node comes or the census is written.
+ohp::Census g_census;
+std::atomic<bool> g_censusOn{false};
+std::atomic<uintptr_t> g_imageSize{0x10000000};  // the rig's image has no headers: anything inside 256 MB counts as in it
 
 // ---- the hook side: no lock, no allocation, no log -------------------------------------------------------------------------------
 
@@ -34,12 +38,14 @@ __declspec(noinline) bool sehRead(void*, uint64_t addr, void* out, size_t n) noe
     }
 }
 
-// Ours or not, from two fields: anything else costs nothing more.
-__declspec(noinline) bool sehIsOurs(const void* node, uintptr_t vtable) noexcept {
+// The node's kind, from three fields: ours or not costs nothing more.
+__declspec(noinline) bool sehReadKind(const void* node, uint64_t* vtable, uint64_t* first, uint32_t* count) noexcept {
     __try {
         const auto* p = static_cast<const uint8_t*>(node);
-        return ohp::isOurs(*reinterpret_cast<const uint64_t*>(p), *reinterpret_cast<const uint64_t*>(p + ohp::kNodeFirst),
-                           vtable - ohp::kNodeVtableRva);
+        *vtable = *reinterpret_cast<const uint64_t*>(p);
+        *first = *reinterpret_cast<const uint64_t*>(p + ohp::kNodeFirst);
+        *count = *reinterpret_cast<const uint32_t*>(p + ohp::kNodeCount);
+        return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
@@ -50,7 +56,15 @@ __declspec(noinline) void nodeDrawHook(void* node) {
     reinterpret_cast<Fn1>(g_original.load(std::memory_order_acquire))(node);
     if (!g_recording.load(std::memory_order_relaxed) || !node) return;
     g_draws.fetch_add(1, std::memory_order_relaxed);
-    if (!sehIsOurs(node, g_vtable.load(std::memory_order_relaxed))) return;
+    uint64_t vtable = 0, first = 0;
+    uint32_t count = 0;
+    if (!sehReadKind(node, &vtable, &first, &count)) return;
+    const uintptr_t base = g_vtable.load(std::memory_order_relaxed) - ohp::kNodeVtableRva;
+    if (!ohp::isOurs(vtable, first, count, base)) {
+        if (g_censusOn.load(std::memory_order_relaxed))
+            g_census.note(ohp::Census::key(vtable, base, first, count, g_imageSize.load(std::memory_order_relaxed)));
+        return;
+    }
     g_calls.fetch_add(1, std::memory_order_relaxed);
     ohp::Snapshot s;
     if (!ohp::capture(reinterpret_cast<uint64_t>(node), &sehRead, nullptr, &s)) {
@@ -141,6 +155,7 @@ bool onFootHudProbeInstall(uintptr_t base, uintptr_t targetOverride, bool checkI
             say(sink, ctx, ohp::formatWrongBuild(timestamp, imageSize, line, sizeof(line)), line);
             return false;
         }
+        g_imageSize.store(imageSize, std::memory_order_relaxed);
     }
     const uintptr_t target = targetOverride ? targetOverride : base + ohp::kNodeDrawRva;
     uint8_t bytes[ohp::kPrologueBytes] = {};
@@ -165,6 +180,7 @@ bool onFootHudProbeInstall(uintptr_t base, uintptr_t targetOverride, bool checkI
         return false;
     }
     g_installed = true;
+    g_censusOn.store(true, std::memory_order_relaxed);
     say(sink, ctx, ohp::formatHooked(target, g_hook.stolenBytes(), line, sizeof(line)), line);
     // Process lifetime: the relay and trampoline are never freed, so a call already inside them can finish.
     return true;
@@ -178,7 +194,21 @@ void onFootHudProbeDrain(uint64_t nowMs, int onFoot, OnFootHudProbeSink sink, vo
     static ohp::ChangeFilter filter;
     static ohp::Summary summary;
     static bool saidFault = false;
+    static uint64_t firstDrainMs = 0;
     char line[1600];
+    // The census: off as soon as a PostGUI node came; written once when none came in the first 20 s of recording.
+    if (!firstDrainMs) firstDrainMs = nowMs ? nowMs : 1;
+    if (g_censusOn.load(std::memory_order_relaxed)) {
+        if (g_calls.load(std::memory_order_relaxed) > 0) {
+            g_censusOn.store(false, std::memory_order_relaxed);
+        } else if (nowMs - firstDrainMs >= ohp::kCensusAfterMs) {
+            g_censusOn.store(false, std::memory_order_relaxed);
+            ohp::Census::Kind kinds[ohp::Census::kCells];
+            const int n = g_census.kinds(kinds, ohp::Census::kCells);
+            say(sink, ctx, ohp::formatCensusHead(n, g_census.overflow(), line, sizeof(line)), line);
+            for (int i = 0; i < n; ++i) say(sink, ctx, ohp::formatCensusKind(kinds[i], line, sizeof(line)), line);
+        }
+    }
     ohp::Snapshot s, write;
     while (g_ring.pop(&s)) {
         s.onFoot = onFoot;

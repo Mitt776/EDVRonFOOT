@@ -57,14 +57,14 @@ uint64_t addr(const void* p) { return reinterpret_cast<uint64_t>(p); }
 // The fake game: one node of lists 36-39 (or 40-46), as the PostGUI pass makes them.
 struct FakeGame {
     uint64_t vtable[4] = {};
-    alignas(16) uint8_t node[0x200] = {};
-    alignas(16) uint8_t set[0x100] = {};
-    uint64_t array[50] = {};
-    alignas(16) uint8_t lists[11][0x240] = {};
-    alignas(16) uint8_t ctx[0x300] = {};
-    alignas(16) uint8_t cam[0x900] = {};
-    alignas(16) uint8_t view[0x40] = {};
-    alignas(16) uint8_t name[0x40] = {};
+    uint8_t node[0x200] = {};
+    uint8_t set[0x100] = {};
+    uint64_t array[11] = {};  // the PostGUI set: its list 0 is the game's list name 36
+    uint8_t lists[11][0x240] = {};
+    uint8_t ctx[0x300] = {};
+    uint8_t cam[0x900] = {};
+    uint8_t view[0x40] = {};
+    uint8_t name[0x40] = {};
 
     uintptr_t base() const { return addr(vtable) - ohp::kNodeVtableRva; }
     uint8_t* list(uint32_t index) { return lists[index - 36]; }
@@ -79,14 +79,14 @@ struct FakeGame {
     }
     void build() {
         put(node, 0, addr(vtable));
-        setFirst(36, 4);
+        setFirst(0, 4);
         put(node, ohp::kNodeSet, addr(set));
         put(node, ohp::kNodeView, addr(view));
-        put<uint32_t>(set, ohp::kSetLists, 50);
+        put<uint32_t>(set, ohp::kSetLists, 11);
         put(set, ohp::kSetContext, addr(ctx));
         put(set, ohp::kSetArray, addr(array));
         for (uint32_t i = 36; i <= 46; ++i) {
-            array[i] = addr(list(i));
+            array[i - 36] = addr(list(i));
             put<uint64_t>(list(i), ohp::kListMask, 0x4);  // a list type bit
         }
         put(ctx, ohp::kCtxCamera, addr(cam));
@@ -109,8 +109,10 @@ void partA() {
     static FakeGame g;
     g.build();
     const uintptr_t base = g.base();
-    check(ohp::isOurs(addr(g.vtable), 36, base) && ohp::isOurs(addr(g.vtable), 40, base), "core: lists 36 and 40 of the vtable are ours");
-    check(!ohp::isOurs(addr(g.vtable), 0, base) && !ohp::isOurs(addr(g.vtable) + 8, 36, base), "core: another list or vtable is not");
+    check(ohp::isOurs(addr(g.vtable), 0, 4, base) && ohp::isOurs(addr(g.vtable), 4, 7, base), "core: lists 0+4 and 4+7 of the vtable are ours");
+    check(!ohp::isOurs(addr(g.vtable), 36, 4, base) && !ohp::isOurs(addr(g.vtable), 40, 7, base) && !ohp::isOurs(addr(g.vtable), 0, 3, base) &&
+              !ohp::isOurs(addr(g.vtable), 4, 4, base) && !ohp::isOurs(addr(g.vtable) + 8, 0, 4, base),
+          "core: the names' numbers (the .11 filter), another count or vtable is not");
 
     g.model(36, 3, 0x1234);  // the camera's own pocket
     g.model(37, 5, 0x1234);  // another camera's
@@ -118,7 +120,7 @@ void partA() {
     put<uint64_t>(g.list(38), ohp::kListMask, 0x8);  // a mask the camera does not pass
     ohp::Snapshot s;
     check(ohp::capture(addr(g.node), &plainRead, nullptr, &s), "core: the node is read");
-    check(s.first == 36 && s.count == 4 && s.pocket == 3 && s.cam == addr(g.cam) && s.viewCam == addr(g.cam) && s.viewBitIndex == 1 &&
+    check(s.first == 0 && s.count == 4 && s.pocket == 3 && s.cam == addr(g.cam) && s.viewCam == addr(g.cam) && s.viewBitIndex == 1 &&
               std::strcmp(s.name, "PostGUIView_Primary") == 0,
           "core: the node's lists, the camera, its pocket and the view");
     check(s.list[0].pockets == (1ull << 3) && s.list[1].pockets == ((1ull << 5) | (1ull << 9)) && s.list[2].pockets == 0 &&
@@ -158,9 +160,16 @@ void partA() {
     put(g.node, ohp::kNodeSet, uint64_t(0x10));  // a pointer no game would have
     check(!ohp::capture(addr(g.node), &plainRead, nullptr, &s), "core: an unreadable list set drops the snapshot");
     put(g.node, ohp::kNodeSet, addr(g.set));
-    put<uint32_t>(g.set, ohp::kSetLists, 38);  // fewer lists than the node names
+    put<uint32_t>(g.set, ohp::kSetLists, 2);  // fewer lists than the node names
     check(ohp::capture(addr(g.node), &plainRead, nullptr, &s) && s.count == 2, "core: only the lists the set has");
-    put<uint32_t>(g.set, ohp::kSetLists, 50);
+    put<uint32_t>(g.set, ohp::kSetLists, 11);
+    g.setFirst(4, 7);
+    check(ohp::capture(addr(g.node), &plainRead, nullptr, &s) && s.first == 4 && s.count == 7 && s.list[0].mask == 0x4,
+          "core: the second node reads lists 4-10 of the set");
+    ohp::formatSnapshot(s, line, sizeof(line));
+    check(std::strstr(line, "lists 40-46") && std::strstr(line, "| 40 pass=") && std::strstr(line, "| 46 pass="),
+          "core text: the second node's lists by the names' numbers");
+    g.setFirst(0, 4);
 
     // The change filter.
     ohp::ChangeFilter filter;
@@ -215,6 +224,29 @@ void partA() {
     bool ordered = true;
     while (ring.pop(&out)) ordered = ordered && out.node == static_cast<uint64_t>(popped++);
     check(popped == 64 && ordered && ring.dropped() == 6, "ring: in order, a full ring drops and counts");
+
+    // The census.
+    static ohp::Census census;
+    const uint64_t a = ohp::Census::key(base + 0x100, base, 0, 12, 0x640C000);
+    const uint64_t b = ohp::Census::key(base + ohp::kNodeVtableRva, base, 36, 4, 0x640C000);
+    const uint64_t outside = ohp::Census::key(0x1234, base, 2, 1, 0x640C000);
+    for (int i = 0; i < 3; ++i) census.note(a);
+    for (int i = 0; i < 5; ++i) census.note(b);
+    census.note(outside);
+    ohp::Census::Kind kinds[ohp::Census::kCells];
+    int n = census.kinds(kinds, ohp::Census::kCells);
+    check(n == 3 && kinds[0].hits == 5 && kinds[0].vtableRva == ohp::kNodeVtableRva && kinds[0].first == 36 && kinds[0].count == 4 &&
+              kinds[1].hits == 3 && kinds[1].vtableRva == 0x100 && kinds[2].vtableRva == 0xFFFFFFFFu,
+          "census: one cell a kind, most drawn first, a vtable outside the image");
+    for (uint32_t i = 0; i < 40; ++i) census.note(ohp::Census::key(base + 0x200, base, i, 1, 0x640C000));
+    n = census.kinds(kinds, ohp::Census::kCells);
+    check(n == ohp::Census::kCells && census.overflow() == 40 - (ohp::Census::kCells - 3), "census: a full table counts what did not fit");
+    check(ohp::formatCensusKind(kinds[0], line, sizeof(line)) > 0 &&
+              std::strcmp(line, "on-foot hud probe: census: vtable +0x52ED2C0 (the list-range node's), first list 36, 4 list(s): 5 draw(s)") == 0,
+          "census text: a kind");
+    check(ohp::formatCensusHead(32, 11, line, sizeof(line)) > 0 && std::strstr(line, "no PostGUI node (vtable +0x52ED2C0, lists 0+4 or 4+7) in 20 s") &&
+              std::strstr(line, "32 kind(s), 11 draw(s) of kinds that did not fit"),
+          "census text: the head");
 
     // The other lines.
     check(ohp::formatKey(false, false, line, sizeof(line)) > 0 &&
@@ -295,6 +327,29 @@ void partB() {
     g_lines.clear();
     check(onFootHudProbeInstall(base, addr(page), false, &sink, nullptr) && g_lines.empty(), "glue: a second install says nothing");
 
+    // Recording, but only nodes of other kinds so far: the census collects them and is written once 20 s after the first drain.
+    onFootHudProbeSetRecording(true);
+    put(g_game.node, 0, addr(g_game.vtable) + 8);
+    draw(g_game.node);
+    draw(g_game.node);
+    put(g_game.node, 0, addr(g_game.vtable));
+    g_game.setFirst(0, 3);
+    draw(g_game.node);
+    g_game.setFirst(0, 4);
+    g_lines.clear();
+    onFootHudProbeDrain(50000, 0, &sink, nullptr);
+    check(g_lines.empty() && g_originalCalls == 3 && onFootHudProbeCalls() == 0, "glue census: other kinds forwarded, nothing said yet");
+    onFootHudProbeDrain(69999, 0, &sink, nullptr);
+    check(g_lines.empty(), "glue census: not before 20 s");
+    onFootHudProbeDrain(70000, 0, &sink, nullptr);
+    check(countLines("no PostGUI node") == 1 && anyLine("2 kind(s)") && anyLine("census: vtable +0x52ED2C8, first list 0, 4 list(s): 2 draw(s)") &&
+              anyLine("census: vtable +0x52ED2C0 (the list-range node's), first list 0, 3 list(s): 1 draw(s)"),
+          "glue census: written once, the kinds seen");
+    g_lines.clear();
+    onFootHudProbeDrain(95000, 0, &sink, nullptr);
+    check(countLines("census") == 0, "glue census: only once");
+    g_originalCalls = 0;
+
     // Off: forward only.
     onFootHudProbeSetRecording(false);
     draw(g_game.node);
@@ -338,8 +393,8 @@ void partB() {
     // The summary, 30 s on.
     draw(g_game.node);
     g_lines.clear();
-    onFootHudProbeDrain(130300, 0, &sink, nullptr);
-    check(anyLine("on-foot hud probe: 30 s: 5 node draw(s) in all; PostGUI: 1 node(s), 4 call(s)") && anyLine("2 unreadable"),
+    onFootHudProbeDrain(125000, 0, &sink, nullptr);  // 30 s after the summary the 95000 drain wrote
+    check(anyLine("on-foot hud probe: 30 s: 6 node draw(s) in all; PostGUI: 1 node(s), 5 call(s)") && anyLine("2 unreadable"),
           "glue: the summary");
 }
 }  // namespace

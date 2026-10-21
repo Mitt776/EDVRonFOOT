@@ -12,6 +12,10 @@
 // reads under SEH and pushes one fixed-size snapshot into a lock-free ring. The frame thread writes the ring into the log
 // (onFootHudProbeFrameBoundary): a node's line only when it changed, at most one a second per node, and a summary every 30 s.
 //
+// If no PostGUI node comes in the first 20 s of recording, the hook has meanwhile counted every other node by its kind (vtable,
+// first list, number of lists), and the frame thread writes that census once: a walk on which ours could not be told still shows
+// what there was (flight .11 lost a walk to a wrong filter).
+//
 // The hook goes in the first time the key is on and stays until the game exits; with the key off it only forwards. On another build,
 // or when the function does not begin with build 334473's bytes, nothing is patched and one line says why.
 #include <cstddef>
