@@ -1568,8 +1568,8 @@ void presentFrameBoundary() {
     tkNativeVrProbe.run([] { nativeVrProbeFrameBoundary(); });
     // EDVRonFOOT: the on-foot HUD probe (on_foot_hud_probe.h): its key, its hook, the PostGUI nodes' lines and summary.
     tkOnFootHudProbe.run([] { onFootHudProbeFrameBoundary(); });
-    // EDVRonFOOT: the on-foot markers (on_foot_markers.h): its keys, the journal, the mode the writer hooks act on, the install, the
-    // on and off lines, the end-of-frame check and the summary.
+    // EDVRonFOOT: the on-foot markers (on_foot_markers.h): native_vr_on_foot, the journal, the search for the points, whether the
+    // writer hooks correct, the install, the on and off lines, the end-of-frame check and the summary.
     tkOnFootMarkers.run([] { onFootMarkersFrameBoundary(); });
     // EDVRonFOOT: the on-foot HUD (on_foot_hud.h): its keys, the journal, the draw flag, the frame's panels, the panel key and the summary;
     // before vScreenFrameBoundary below, which samples the draw gate the flag feeds.

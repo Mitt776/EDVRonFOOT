@@ -6,8 +6,8 @@
 #include "../common/log.h"
 #include <windows.h>
 #include <atomic>
+#include <chrono>
 #include <cstring>
-#include <string>
 
 namespace edvr {
 namespace {
@@ -25,9 +25,12 @@ struct Point {
 Point g_points[ofm::kPointCommit];  // the two writers; the commit is only called
 
 std::atomic<uintptr_t> g_commit{0};
-std::atomic<int> g_mode{ofm::kModeNone};
+std::atomic<bool> g_on{false};
 std::atomic<bool> g_disabled{false};
 bool g_installed = false;
+// The search's result (frame thread) and the image it was made in.
+ofm::Found g_found;
+uintptr_t g_base = 0;
 
 // The hooks' counters (ofm::Counts, cumulative).
 std::atomic<uint64_t> g_poseCalls{0}, g_eyesOne{0}, g_eyesOther{0}, g_steps{0}, g_corrected{0}, g_commitFaults{0};
@@ -72,8 +75,7 @@ __declspec(noinline) bool sehCommit(uintptr_t commit, uint64_t cam, uint64_t siz
 
 // After an outer writer call: the correction, while the frame thread says so.
 void afterWriter(uint64_t mgr) {
-    const int mode = g_mode.load(std::memory_order_relaxed);
-    if (mode == ofm::kModeNone || g_disabled.load(std::memory_order_relaxed)) return;
+    if (!g_on.load(std::memory_order_relaxed) || g_disabled.load(std::memory_order_relaxed)) return;
     g_steps.fetch_add(1, std::memory_order_relaxed);
     ofm::Pair p;
     const int skip = ofm::locate(mgr, &sehRead, nullptr, &p);
@@ -82,7 +84,7 @@ void afterWriter(uint64_t mgr) {
         return;
     }
     float out[ofm::kViews][ofm::kPoseFloats];
-    ofm::correct(p.m, mode, out);
+    ofm::correct(p.m, out);
     if (g_sample.wanted()) g_sample.put(p.m, out);
     for (int i = 0; i < ofm::kViews; ++i) {
         if (!sehWritePose(p.cam[i], out[i])) {
@@ -109,7 +111,7 @@ uint64_t forward(int point, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) 
     return r;
 }
 
-// 0x287D660 (mgr, a2): every argument register forwarded, the original's result returned.
+// The pose writer (mgr, a2), 0x287D660 in 334473: every argument register forwarded, the original's result returned.
 __declspec(noinline) uint64_t poseHook(uint64_t mgr, uint64_t a2, uint64_t a3, uint64_t a4) {
     g_poseCalls.fetch_add(1, std::memory_order_relaxed);
     const uint64_t r = forward(ofm::kPointPose, mgr, a2, a3, a4);
@@ -117,7 +119,7 @@ __declspec(noinline) uint64_t poseHook(uint64_t mgr, uint64_t a2, uint64_t a3, u
     return r;
 }
 
-// 0x28457F0 (mgr, n, a3): n = 1 from inside 0x287D660, 2 from the pipeline frame 0x286B250.
+// The eye pose writer (mgr, n, a3), 0x28457F0 in 334473: n = 1 from inside the pose writer, 2 from the pipeline frame.
 __declspec(noinline) uint64_t eyesHook(uint64_t mgr, uint64_t n, uint64_t a3, uint64_t a4) {
     (static_cast<int32_t>(n) == 1 ? g_eyesOne : g_eyesOther).fetch_add(1, std::memory_order_relaxed);
     const uint64_t r = forward(ofm::kPointEyes, mgr, n, a3, a4);
@@ -172,16 +174,20 @@ bool prepare(void* trampoline, void* context) noexcept {
            FlushInstructionCache(GetCurrentProcess(), point.relay, kRelayBytes);
 }
 
-__declspec(noinline) bool sehIdentity(uintptr_t base, uint32_t* timestamp, uint32_t* imageSize) noexcept {
+// The image's sections from its own headers (or the caller's), then the three points in its executable sections. A fault reading the
+// headers or scanning is kFindNoHeaders.
+__declspec(noinline) ofm::Found sehFind(uintptr_t base, const ofm::Section* given, int count) noexcept {
     __try {
-        uint32_t peOff = 0;
-        std::memcpy(&peOff, reinterpret_cast<const void*>(base + 0x3C), 4);
-        if (peOff > 0x1000) return false;
-        std::memcpy(timestamp, reinterpret_cast<const void*>(base + peOff + 8), 4);
-        std::memcpy(imageSize, reinterpret_cast<const void*>(base + peOff + 0x50), 4);
-        return true;
+        const auto* image = reinterpret_cast<const uint8_t*>(base);
+        ofm::Section sections[ofm::kMaxSections];
+        if (!given) {
+            count = ofm::readSections(image, sections, ofm::kMaxSections);
+            if (count < 0) return ofm::Found{};
+            given = sections;
+        }
+        return ofm::findPoints(image, given, count);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
+        return ofm::Found{};
     }
 }
 
@@ -216,26 +222,23 @@ void logSink(void*, const char* line) { Log::get().note("%s", line); }
 
 }  // namespace
 
-bool onFootMarkersInstall(uintptr_t base, const uintptr_t* targets, bool checkIdentity, OnFootMarkersSink sink, void* ctx) {
+bool onFootMarkersFind(uintptr_t base, const ofm::Section* sections, int count, OnFootMarkersSink sink, void* ctx) {
     if (g_installed) return true;
     char line[600];
-    if (checkIdentity) {
-        uint32_t timestamp = 0, imageSize = 0;
-        if (!sehIdentity(base, &timestamp, &imageSize) || timestamp != ofm::kExpectedTimestamp || imageSize != ofm::kExpectedImageSize) {
-            say(sink, ctx, ofm::formatWrongBuild(timestamp, imageSize, line, sizeof(line)), line);
-            return false;
-        }
-    }
-    // Every point's bytes before anything is patched: half a correction (one writer) would be worse than none.
+    const auto t0 = std::chrono::steady_clock::now();
+    g_found = sehFind(base, sections, count);
+    g_base = base;
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    say(sink, ctx, ofm::formatFound(g_found, static_cast<uint64_t>(ms), line, sizeof(line)), line);
+    return g_found.result == ofm::kFound;
+}
+
+bool onFootMarkersInstall(OnFootMarkersSink sink, void* ctx) {
+    if (g_installed) return true;
+    if (g_found.result != ofm::kFound) return false;  // the search's line said why
+    char line[600];
     uintptr_t at[ofm::kPointCount];
-    for (int p = 0; p < ofm::kPointCount; ++p) {
-        at[p] = targets ? targets[p] : base + ofm::kPointRva[p];
-        uint8_t bytes[ofm::kPrologueBytes] = {};
-        if (!sehRead(nullptr, at[p], bytes, sizeof(bytes)) || std::memcmp(bytes, ofm::kPointPrologue[p], sizeof(bytes)) != 0) {
-            say(sink, ctx, ofm::formatWrongBytes(p, line, sizeof(line)), line);
-            return false;
-        }
-    }
+    for (int p = 0; p < ofm::kPointCount; ++p) at[p] = g_base + g_found.rva[p];
     for (int p = 0; p < ofm::kPointCommit; ++p) {
         if (!g_points[p].relay) g_points[p].relay = allocateRelay(at[p]);
         if (!g_points[p].relay) {
@@ -253,14 +256,14 @@ bool onFootMarkersInstall(uintptr_t base, const uintptr_t* targets, bool checkId
     }
     g_installed = true;
     say(sink, ctx,
-        ofm::formatHooked(at[ofm::kPointPose], g_points[ofm::kPointPose].hook.stolenBytes(), at[ofm::kPointEyes],
+        ofm::formatHooked(g_found.rva[ofm::kPointPose], g_points[ofm::kPointPose].hook.stolenBytes(), g_found.rva[ofm::kPointEyes],
                           g_points[ofm::kPointEyes].hook.stolenBytes(), line, sizeof(line)),
         line);
     return true;
 }
 
 bool onFootMarkersInstalled() { return g_installed; }
-void onFootMarkersSetMode(int mode) { g_mode.store(mode, std::memory_order_relaxed); }
+void onFootMarkersSetOn(bool on) { g_on.store(on, std::memory_order_relaxed); }
 bool onFootMarkersDisabled() { return g_disabled.load(std::memory_order_relaxed); }
 
 ofm::Counts onFootMarkersCounts() {
@@ -275,50 +278,45 @@ ofm::Counts onFootMarkersCounts() {
     return c;
 }
 
-void onFootMarkersFrameStep(uint64_t nowMs, bool native, const char* keyText, int onFoot, uintptr_t base, const uintptr_t* targets,
-                            bool checkIdentity, OnFootMarkersSink sink, void* ctx) {
-    static bool said = false, lastNative = true, tried = false, saidDisabled = false;
-    static char lastText[64] = {};
-    static ofm::Key key;
+void onFootMarkersFrameStep(uint64_t nowMs, bool native, int onFoot, uintptr_t base, const ofm::Section* sections, int count,
+                            OnFootMarkersSink sink, void* ctx) {
+    static bool searched = false, tried = false, saidDisabled = false;
     static ofm::Toggle toggle;
     static ofm::Window window;
     char line[900];
-    const char* text = keyText ? keyText : "";
 
-    // The key: its line at the first frame and on every change of its text or of native_vr_on_foot.
-    if (!said || native != lastNative || std::strncmp(text, lastText, sizeof(lastText) - 1) != 0) {
-        said = true;
-        lastNative = native;
-        std::strncpy(lastText, text, sizeof(lastText) - 1);
-        key = ofm::parseKey(text);
-        say(sink, ctx, ofm::formatKey(text, key, native, line, sizeof(line)), line);
+    // The search once, the first frame native VR on foot is on: a pass over the game's code at launch, not a hitch at the disembark.
+    if (native && !searched) {
+        searched = true;
+        onFootMarkersFind(base, sections, count, sink, ctx);
     }
 
     // The decision; the one install attempt the first time it is on (a refusal is said once, not every frame).
-    ofm::Decision d = ofm::decide(native, key.mode, onFoot);
-    if (d.mode != ofm::kModeNone && !tried) {
+    ofm::Decision d = ofm::decide(native, onFoot);
+    if (d.on && !tried) {
         tried = true;
-        onFootMarkersInstall(base, targets, checkIdentity, sink, ctx);
+        onFootMarkersInstall(sink, ctx);
     }
-    if (d.mode != ofm::kModeNone && !g_installed) d = ofm::Decision{ofm::kModeNone, ofm::kWhyNotInstalled};
+    if (d.on && !g_installed) d = ofm::Decision{false, ofm::kWhyNotInstalled};
     if (g_disabled.load(std::memory_order_relaxed)) {
         if (!saidDisabled) {
             saidDisabled = true;
             say(sink, ctx, ofm::formatDisabled(g_commitFaults.load(std::memory_order_relaxed), line, sizeof(line)), line);
         }
-        if (d.mode != ofm::kModeNone) d = ofm::Decision{ofm::kModeNone, ofm::kWhyDisabled};
+        if (d.on) d = ofm::Decision{false, ofm::kWhyDisabled};
     }
-    g_mode.store(d.mode, std::memory_order_relaxed);
+    g_on.store(d.on, std::memory_order_relaxed);
     if (toggle.step(d)) {
         say(sink, ctx, ofm::formatToggle(d, line, sizeof(line)), line);
-        if (d.mode != ofm::kModeNone) {
+        if (d.on) {
             window.start(nowMs, onFootMarkersCounts());
+            g_sample.reset();  // not a sample left from the last time on foot
             g_sample.want();
         } else {
             window.stop();
         }
     }
-    if (d.mode == ofm::kModeNone) return;
+    if (!d.on) return;
 
     // The end-of-frame check: both cameras the last step corrected, still the correction's rotation or someone else's.
     const uint64_t cam0 = g_cam[0].load(std::memory_order_relaxed), cam1 = g_cam[1].load(std::memory_order_relaxed);
@@ -334,7 +332,7 @@ void onFootMarkersFrameStep(uint64_t nowMs, bool native, const char* keyText, in
     if (window.due(nowMs, onFootMarkersCounts(), &delta, &check, &seconds)) {
         ofm::Sample s;
         const bool sampled = g_sample.take(&s);
-        say(sink, ctx, ofm::formatSummary(seconds, d.mode, delta, check, sampled ? &s : nullptr, line, sizeof(line)), line);
+        say(sink, ctx, ofm::formatSummary(seconds, delta, check, sampled ? &s : nullptr, line, sizeof(line)), line);
         g_sample.want();
     }
 }
@@ -342,17 +340,15 @@ void onFootMarkersFrameStep(uint64_t nowMs, bool native, const char* keyText, in
 void onFootMarkersFrameBoundary() {
     static uint32_t generation = ~0u;
     static bool native = true;
-    static std::string text = "stereo";
     const Config& cfg = Config::get();
     const uint32_t now = cfg.generation();
     if (now != generation) {
         generation = now;
         native = cfg.getBool("experimental.native_vr_on_foot", true);
-        text = cfg.getString("experimental.native_vr_on_foot_markers", "stereo");
     }
     const int onFoot = journalOnFootKnown() ? (journalOnFoot() ? 1 : 0) : -1;
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
-    onFootMarkersFrameStep(GetTickCount64(), native, text.c_str(), onFoot, base, nullptr, true, &logSink, nullptr);
+    onFootMarkersFrameStep(GetTickCount64(), native, onFoot, base, nullptr, 0, &logSink, nullptr);
 }
 
 }  // namespace edvr

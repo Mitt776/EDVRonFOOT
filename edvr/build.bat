@@ -3073,14 +3073,16 @@ exit /b 0
 
 :rig_on_foot_markers_test
 echo [edvr] === on_foot_markers_test.exe ===
-REM EDVRonFOOT: build gate for the on-foot markers (src\d3d11\on_foot_markers.h, experimental.native_vr_on_foot_markers). Part A drives
-REM on_foot_markers_core.h: the key (no line, stereo, flat, off, garbage), the decision over native_vr_on_foot, the key and the journal,
-REM the corrected pose (stereo keeps the eyes' distance and stands still through a +/-60 degree turn and a 20 degree tilt, flat at 0,
-REM both a fixed point), the chain to both PostGUI cameras with each refusal, the toggle, the 30-second window and every line's text,
-REM "0 writer calls" among them. Part B compiles the REAL glue with the real CodeHook on synthetic writers with the game's 16 bytes:
-REM another build and a wrong byte at any point refused with one line and nothing patched, forward only while off, both eyes the
-REM identity with flags |= 0xF and the commit called with (cam, size, cam+0x20), a nested writer one step, a mismatched camera and a
-REM wrong view id skipped, the frame step's key, on and off lines, end-of-frame check and summary, three commit faults turning it off.
+REM EDVRonFOOT: build gate for the on-foot markers (src\d3d11\on_foot_markers.h; no key: on with native_vr_on_foot on foot). Part A
+REM drives on_foot_markers_core.h: the decision over native_vr_on_foot and the journal, the corrected pose (each eye's offset kept
+REM through a +/-60 degree turn and a 20 degree tilt, a fixed point), the search for the three points by their code on a synthetic
+REM image (found, an entry missing or twice, no chain, a call missing or past its window, masked bytes free, a data-section copy
+REM ignored, the sections from PE headers), the chain to both PostGUI cameras with each refusal, the toggle, the sample box's reset,
+REM the 30-second window and every line's text, "0 writer calls" among them. Part B compiles the REAL glue with the real CodeHook on
+REM an executable synthetic image whose writers run the game's prologue shapes: an entry not found and a call missing refused with one
+REM line and nothing patched, found and hooked, forward only while off, both eyes the identity with flags |= 0xF and the commit called
+REM with (cam, size, cam+0x20), a nested writer one step, a mismatched camera and a wrong view id skipped, the frame step's on and off
+REM lines, end-of-frame check and summary, a fresh sample every time on foot, three commit faults turning it off.
 if not exist "%OBJ%\onfootmarkers" mkdir "%OBJ%\onfootmarkers"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^
