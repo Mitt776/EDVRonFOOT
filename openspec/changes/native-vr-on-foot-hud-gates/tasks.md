@@ -72,7 +72,7 @@
   - «all gates passed», квитанция `full-pass`;
   - коммит через `git commit -F`, тег `v0.19.1-edvronfoot.20`;
   - `build.bat --dll-only` проходит.
-- [ ] 3.2 Установка при закрытой игре: `py -3.12 edvr\tools\install_edvr.py --target "C:\Steam\steamapps\common\Elite
+- [x] 3.2 Установка при закрытой игре: `py -3.12 edvr\tools\install_edvr.py --target "C:\Steam\steamapps\common\Elite
   Dangerous\Products\elite-dangerous-odyssey-64" --all --tag edvronfoot --dry-run`, затем без `--dry-run`. В живом
   `edvr.ini` через Edit — `on_foot_hud_probe = 1` (строка 1717). Проверка:
   - `edvronfoot_game.ps1 -Action Status` показывает `.20`;
@@ -81,7 +81,7 @@
 
 ## 4. Прогулка и итог
 
-- [ ] 4.1 Прогулка Димы:
+- [x] 4.1 Прогулка Димы:
   1. В корабле 10 с, затем в F8 «Native VR on foot» = off.
   2. На ноги (кинотеатр) 30 с, пока основной HUD виден.
   3. В корабль, «Native VR on foot» = on.
@@ -91,7 +91,7 @@
   7. В корабль, выход через меню.
 
   Проверка: Дима подтвердил шаги и сказал, были ли тормоза и стоят ли метки на предметах.
-- [ ] 4.2 Разбор лога. Сначала `edvr_log.py --expect-build v0.19.1-edvronfoot.20` не 2. Дальше:
+- [x] 4.2 Разбор лога. Сначала `edvr_log.py --expect-build v0.19.1-edvronfoot.20` не 2. Дальше:
   - доля сошедшихся обходов и пометки «не весь»;
   - заголовки записи в кинотеатре и стерео: слот, вид, маска привязки;
   - пути `_HUD` и их первые закрытые ворота в обоих местах;
