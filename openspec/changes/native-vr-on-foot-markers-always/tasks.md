@@ -73,7 +73,7 @@
   - датированный раздел «Stereo как поведение `.18`» с таблицей узоров.
 
   Проверка: Status ≤ 60 строк.
-- [ ] 4.2 Коммит кода (сообщение через файл, `git commit -F`). Затем `build.bat --dll-only` по абсолютному пути,
+- [x] 4.2 Коммит кода (сообщение через файл, `git commit -F`). Затем `build.bat --dll-only` по абсолютному пути,
   установка `py -3.12 tools\install_edvr.py --target "C:\Steam\steamapps\common\Elite Dangerous\Products\elite-dangerous-odyssey-64" --all --tag edvronfoot`,
   `--verify-only`. Проверка: `vr payload and profile verified`, `edvronfoot_game.ps1 -Action Status` показывает
   новую версию.
