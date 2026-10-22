@@ -77,7 +77,7 @@
   установка `py -3.12 tools\install_edvr.py --target "C:\Steam\steamapps\common\Elite Dangerous\Products\elite-dangerous-odyssey-64" --all --tag edvronfoot`,
   `--verify-only`. Проверка: `vr payload and profile verified`, `edvronfoot_game.ps1 -Action Status` показывает
   новую версию.
-- [ ] 4.3 Прогулка Димы по «Как проверить руками» из proposal. Разбор лога через `py -3.12 tools\edvr_log.py --target steam --expect-build HEAD`.
+- [x] 4.3 Прогулка Димы по «Как проверить руками» из proposal. Разбор лога через `py -3.12 tools\edvr_log.py --target steam --expect-build HEAD`.
   Проверка:
   - строка `on-foot markers: found` с тремя адресами и мс;
   - строки ключа нет;
