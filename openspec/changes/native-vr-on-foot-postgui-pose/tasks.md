@@ -92,12 +92,12 @@
 
 ## 4. Сборка и установка
 
-- [ ] 4.1 Полная сборка `D:\Project VSC\EDVRonFOOT\edvr\build_edvronfoot.bat` по абсолютному пути. Проверка:
+- [x] 4.1 Полная сборка `D:\Project VSC\EDVRonFOOT\edvr\build_edvronfoot.bat` по абсолютному пути. Проверка:
   - «all gates passed»; терпимый сбой — `weapon_motion`; при одиночном таймауте `openxr_present_test` — один
     повтор;
   - коммит, тег `v0.19.1-edvronfoot.17`;
   - `--dll-only` проходит.
-- [ ] 4.2 Установка при закрытой игре: `py -3.12 edvr\tools\install_edvr.py --target "C:\Steam\steamapps\common\Elite
+- [x] 4.2 Установка при закрытой игре: `py -3.12 edvr\tools\install_edvr.py --target "C:\Steam\steamapps\common\Elite
   Dangerous\Products\elite-dangerous-odyssey-64" --all --tag edvronfoot --dry-run`, затем без `--dry-run`. Проверка:
   - `edvronfoot_game.ps1 -Action Status` показывает `.17`;
   - `--verify-only` ok;
