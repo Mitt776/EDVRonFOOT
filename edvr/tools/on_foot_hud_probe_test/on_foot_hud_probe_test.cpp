@@ -12,17 +12,27 @@
 // slopes 1, 0 and -1, too little turn, a jump left out, the pass table, every line's text with "none" for what could not be read);
 // Part B15 hooks a synthetic function that begins with the PostGUI pass switch's bytes and drives the camera drain over two
 // 30-second windows on passes and cameras in the rig's memory.
-// .19: Part A16 drives the subscription watch's half of the core (the place, the sites by place with the camera bit, the ninth site
-// counted, every line's text, the 30-second line and a quiet one, the fuse, the draw context by camera); Part A19 drives the provider
-// list on fake providers (a list of three, one giving _HUD, the unsubscribed one answering 0, the context of another node and an OR
-// that is not the mask dropped with their own reasons and the first pair kept once, the 65th provider only a number, more providers
-// than rows, a third view, an unreadable address skipping the snapshot, a changed answer not changing the shape and a changed
-// subscription or place changing it, the ring's overflow, every line's text, the summary's window); Part C arms the watch for real on
-// this rig's threads (the taken slot skipped, one line per writer with its value, camera bit and place, the repeats only counted, off
-// with the totals, an unaligned address refused); Part B15 sees the camera drain write the HUD node's lists and the 30-second summary
-// (no provider gives 0x8 in stereo: no watch, said in one line), arm the watch on the first provider that gives it (view 0's) in
-// cinema, write its 30-second line, move it to another provider when its own leaves the list for 2 s, take it off when none is left,
-// arm it again, take it off with the key and trip the fuse with 100 001 real writes.
+// .19: Part A19 drives the provider list on fake providers (a list of three, one giving _HUD, the unsubscribed one answering 0, the
+// context of another node and an OR that is not the mask dropped with their own reasons and the first pair kept once, the 65th provider
+// only a number, more providers than rows, a third view, an unreadable address skipping the snapshot, a changed answer not changing the
+// shape and a changed subscription or place changing it, the ring's overflow, every line's text, the summary's window); Part B15 sees
+// the camera drain write the HUD node's lists and the 30-second summary (no provider gives 0x8 in stereo: no watch).
+// .20: Part A16 drives the gate watch's half of the core (the place, Dr7's length field, the sites by place with whether a write opens
+// the gate, the ninth site counted, every line's text, the 30-second line and a quiet one, the fuse, the draw context by camera); Part
+// A20 builds the _HUD provider's record on fake memory (B, a record for the node's camera and another, a binding, 2 groups, 3 items, 4
+// parts, 4 meshes with sections, instances and materials) and walks it: all gates open and the lists recomputed equal to the record's,
+// each of G1-G7 closed alone at its path with its value and the watch target of its word, flags under slot 1 against a binding of slot
+// 0, a pass for view 0 against a walk for view 1 with the remembered pass shown, a bit of the record no mesh gives named as the
+// collectors', a bit the paths give and the record has not, a record answer that is not the provider's, no record, an unreadable
+// element, 65 sections, the budgets of instances and pass entries (cut short), the 65th _HUD path only counted, slot 64 and view 16 not
+// believed, the set of _HUD materials (64 cells, the first view kept), the counts by place, the 30-second window, the collectors read
+// from a table and said once, the words not aligned to their length, every line's text; Part C arms the watch for real on this rig's
+// threads (a flag of 4 bytes, a mask of 8 and a byte of 1; the taken slot skipped, one line per writer with its value, whether it opens
+// the gate and the place, the repeats only counted, off with the totals, an address not aligned to its length refused); Part B20 hooks
+// the node draw with B in the HUD node's list and sees the real glue: the second walk inside a second not made, the census with its
+// 16 paths of 23 and the collectors once, a changed census waiting for its 5 seconds, the cinema and stereo censuses, the camera drain
+// arming the watch on the mask that changed in the first stereo walk, its writers, the path leaving the walks (2 s: off with a line),
+// armed again, moved to the next closed path, the 30-second walks by place, off with the key, the fuse with 100 001 real writes.
 #include "../../src/d3d11/on_foot_hud_probe.h"
 #include "../../src/d3d11/on_foot_hud_probe_core.h"
 #include "../../src/d3d11/debug_register_core.h"
@@ -97,6 +107,13 @@ struct FakeGame {
     void setList(std::initializer_list<int> which) {
         uint32_t n = 0;
         for (int i : which) provArray[n++] = i < 0 ? 0 : addr(providers[i]);
+        put(provList, 0, addr(provArray));
+        put<uint32_t>(provList, ohp::kListNumber, n);
+    }
+    // .20: the list holds these addresses, in this order: providers the rig built itself (the scene's B).
+    void setListAddr(std::initializer_list<uint64_t> which) {
+        uint32_t n = 0;
+        for (uint64_t a : which) provArray[n++] = a;
         put(provList, 0, addr(provArray));
         put<uint32_t>(provList, ohp::kListNumber, n);
     }
@@ -657,7 +674,7 @@ void partA15() {
           "text: the switch hooked");
 }
 
-// ---- Part A, .19: the subscription watch's sites, places and lines ------------------------------------------------------------------
+// ---- Part A, .20: the gate watch's sites, places and lines --------------------------------------------------------------------------
 
 void partA16() {
     const uint64_t base = 0x140000000ull, size = 0x640C000ull;
@@ -668,11 +685,19 @@ void partA16() {
     check(ohp::placeOf(1, 1) == ohp::kPlaceStereo && ohp::placeOf(1, 0) == ohp::kPlaceCinema && ohp::placeOf(0, 1) == ohp::kPlaceShip &&
               ohp::placeOf(-1, 0) == ohp::kPlaceShip,
           "place: stereo, cinema, the ship, unknown counts as the ship");
-    check(ohp::kHudBit == 0x8 && ohp::kWatchCount == 1 && ohp::kWatchSlot[ohp::kWatchSubscription] == 2 &&
-              ohp::watchOffset(ohp::kWatchSubscription) == 0x28 && std::strcmp(ohp::watchName(ohp::kWatchSubscription), "hud provider subscription") == 0,
-          "watch: list 39's bit, one watch on slot 2 at the subscription, slot 3 not used");
+    check(ohp::kHudBit == 0x8 && ohp::kWatchCount == 1 && ohp::kWatchSlot[ohp::kWatchGate] == 2 &&
+              std::strcmp(ohp::watchName(ohp::kGateGroup), "hud gate group") == 0 && std::strcmp(ohp::watchName(ohp::kGateMeshMask), "hud gate mesh mask") == 0 &&
+              std::strcmp(ohp::watchName(ohp::kGatePassOff), "hud gate pass off") == 0,
+          "watch: list 39's bit, one watch on slot 2, named `hud gate <gate>`, slot 3 not used");
+    check(ohp::drLengthCode(1) == 0 && ohp::drLengthCode(2) == 1 && ohp::drLengthCode(4) == 3 && ohp::drLengthCode(8) == 2 &&
+              dr7::armSlotDr7(0, 2, dr7::kDr7RwWrite, ohp::drLengthCode(8)) == ((1u << 4) | (1u << 24) | (2u << 26)) &&
+              dr7::armSlotDr7(0, 2, dr7::kDr7RwWrite, ohp::drLengthCode(1)) == ((1u << 4) | (1u << 24)),
+          "watch: Dr7's length field for 1, 2, 4 and 8 bytes (00, 01, 11, 10)");
+    check(ohp::gateOpens(false, 0x0, 0x4) == false && ohp::gateOpens(false, 0x10, 0x4) && ohp::gateOpens(true, 0x6, 0x4) && !ohp::gateOpens(true, 0x1, 0x4) &&
+              !ohp::gateOpens(true, 0x6, 0x0),
+          "watch: a flag opens the gate when not 0, a mask when it meets the other mask");
 
-    // The subscription's sites: by place, with the camera bit as the handler tells it, the last value kept, the first one published.
+    // The gate's sites: by place, with `opens` as the handler tells it, the last value kept, the first one published.
     static ohp::SiteTable subs;
     bool fresh = false;
     const int row = subs.record(base + 0x59F313, ohp::kPlaceStereo, 0x4, true, &fresh);
@@ -680,45 +705,44 @@ void partA16() {
     subs.publish(row, 9, ohp::kPlaceStereo, 0x4, true, stack, 2);
     check(subs.record(base + 0x59F313, ohp::kPlaceCinema, 0x0, false, &fresh) == 0 && !fresh && subs.site(0).hits.load() == 2 &&
               subs.site(0).at[ohp::kPlaceStereo].load() == 1 && subs.site(0).at[ohp::kPlaceCinema].load() == 1 &&
-              subs.site(0).at[ohp::kPlaceShip].load() == 0 && subs.site(0).camBit[ohp::kPlaceStereo].load() == 1 &&
-              subs.site(0).camBit[ohp::kPlaceCinema].load() == 0 && subs.site(0).last.load() == 0,
-          "sites: a repeat only counted, by place and camera bit, its value the last");
+              subs.site(0).at[ohp::kPlaceShip].load() == 0 && subs.site(0).opens[ohp::kPlaceStereo].load() == 1 &&
+              subs.site(0).opens[ohp::kPlaceCinema].load() == 0 && subs.site(0).last.load() == 0,
+          "sites: a repeat only counted, by place and whether it opened the gate, its value the last");
     int r = -1;
     check(subs.nextUnsaid(&r) && r == 0 && !subs.nextUnsaid(&r), "sites: said once");
-    check(ohp::formatWriter(ohp::kWatchSubscription, 0, subs.site(0), 0xCA0, base, size, line, sizeof(line)) > 0 &&
-              std::strcmp(line, "on-foot hud probe: writer #1 of the hud provider subscription of 0xCA0: at EliteDangerous64.exe+0x59F313 (after "
-                                "the write), value 0x4 (with the HUD camera bit), on foot in stereo, thread 9, from EliteDangerous64.exe+0x28ADA4D "
-                                "< +0x28575C0") == 0,
-          "text: a writer, its value and place, the camera bit on");
+    check(ohp::formatWriter(ohp::watchName(ohp::kGateGroup), 0, subs.site(0), 0xCA0, base, size, line, sizeof(line)) > 0 &&
+              std::strcmp(line, "on-foot hud probe: writer #1 of the hud gate group of 0xCA0: at EliteDangerous64.exe+0x59F313 (after the write), value "
+                                "0x4 (opens the gate), on foot in stereo, thread 9, from EliteDangerous64.exe+0x28ADA4D < +0x28575C0") == 0,
+          "text: a writer, its value and place, the gate opened");
 
-    // A second site whose first value has no camera bit, and no callers.
+    // A second site whose first value keeps the gate closed, and no callers.
     static ohp::SiteTable masks;
     masks.record(base + 0x588A75, ohp::kPlaceCinema, 0x800000, true, &fresh);
     masks.publish(0, 9, ohp::kPlaceCinema, 0x800000, true, stack, 2);
     masks.record(base + 0x588A75, ohp::kPlaceStereo, 0x0, false, &fresh);
-    check(masks.site(0).camBit[ohp::kPlaceCinema].load() == 1 && masks.site(0).camBit[ohp::kPlaceStereo].load() == 0 &&
+    check(masks.site(0).opens[ohp::kPlaceCinema].load() == 1 && masks.site(0).opens[ohp::kPlaceStereo].load() == 0 &&
               masks.site(0).at[ohp::kPlaceStereo].load() == 1,
-          "sites: the camera bit by place");
+          "sites: the opening writes by place");
     masks.publish(0, 9, ohp::kPlaceShip, 0x0, false, stack, 0);
-    check(ohp::formatWriter(ohp::kWatchSubscription, 0, masks.site(0), 0xC00, base, size, line, sizeof(line)) > 0 &&
-              std::strstr(line, "value 0x0 (without the HUD camera bit), in the ship, thread 9, from ?"),
-          "text: a writer, the camera bit off, no callers");
+    check(ohp::formatWriter(ohp::watchName(ohp::kGateMeshMask), 0, masks.site(0), 0xC00, base, size, line, sizeof(line)) > 0 &&
+              std::strstr(line, "writer #1 of the hud gate mesh mask of 0xC00: at EliteDangerous64.exe+0x588A75 (after the write), value 0x0 (keeps it "
+                                "closed), in the ship, thread 9, from ?"),
+          "text: a writer, the gate kept closed, no callers");
 
     // The 30-second line: the window's writes per site and place; a quiet watch says so.
     ohp::WatchSummary ws;
-    check(ws.step(0, ohp::kWatchSubscription, 0xE70, masks, line, sizeof(line)) == 0, "watch summary: the first call starts the window");
+    const char* name = ohp::watchName(ohp::kGateGroup);
+    check(ws.step(0, name, 0xE70, masks, line, sizeof(line)) == 0, "watch summary: the first call starts the window");
     for (int i = 0; i < 3; ++i) masks.record(base + 0x588A75, ohp::kPlaceCinema, 0x4, true, &fresh);
     masks.record(base + 0x588A75, ohp::kPlaceStereo, 0x0, false, &fresh);
     masks.record(base + 0x588B00, ohp::kPlaceStereo, 0x0, false, &fresh);
-    check(ws.step(29999, ohp::kWatchSubscription, 0xE70, masks, line, sizeof(line)) == 0, "watch summary: not before 30 s");
-    check(ws.step(30000, ohp::kWatchSubscription, 0xE70, masks, line, sizeof(line)) > 0 &&
-              std::strcmp(line, "on-foot hud probe: 30 s watch hud provider subscription 0xE70: 5 write(s); #1 ship 0, stereo 1, cinema 3 (with the "
-                                "camera bit 0, 0, 3), last 0x0; #2 ship 0, stereo 1, cinema 0 (with the camera bit 0, 0, 0), last 0x0; 0 from sites "
-                                "that did not fit") == 0,
-          "watch summary: the window by site and place, with the camera bit");
-    check(ws.step(60000, ohp::kWatchSubscription, 0xE70, masks, line, sizeof(line)) > 0 &&
-              std::strcmp(line, "on-foot hud probe: 30 s watch hud provider subscription 0xE70: 0 write(s): it is on and stood quiet; 0 from sites "
-                                "that did not fit") == 0,
+    check(ws.step(29999, name, 0xE70, masks, line, sizeof(line)) == 0, "watch summary: not before 30 s");
+    check(ws.step(30000, name, 0xE70, masks, line, sizeof(line)) > 0 &&
+              std::strcmp(line, "on-foot hud probe: 30 s watch hud gate group 0xE70: 5 write(s); #1 ship 0, stereo 1, cinema 3 (opening the gate 0, 0, 3), "
+                                "last 0x0; #2 ship 0, stereo 1, cinema 0 (opening the gate 0, 0, 0), last 0x0; 0 from sites that did not fit") == 0,
+          "watch summary: the window by site and place, with the writes that opened the gate");
+    check(ws.step(60000, name, 0xE70, masks, line, sizeof(line)) > 0 &&
+              std::strcmp(line, "on-foot hud probe: 30 s watch hud gate group 0xE70: 0 write(s): it is on and stood quiet; 0 from sites that did not fit") == 0,
           "watch summary: a quiet watch says so");
 
     // The ninth site is only counted, in the table and in the line.
@@ -727,39 +751,38 @@ void partA16() {
     for (uint64_t i = 1; i < 10; ++i) many.record(base + 0x2000 + i, ohp::kPlaceShip, 0, false, &fresh);
     check(many.sites() == ohp::kSites && many.overflow() == 2 && many.hits() == 10, "sites: the ninth site is overflow");
     ohp::WatchSummary wc;
-    wc.step(0, ohp::kWatchSubscription, 0xCC0, many, line, sizeof(line));
+    wc.step(0, name, 0xCC0, many, line, sizeof(line));
     many.record(base + 0x59F313, ohp::kPlaceStereo, 0x4, true, &fresh);
     many.record(base + 0x59F313, ohp::kPlaceStereo, 0x4, true, &fresh);
     many.record(base + 0x3000, ohp::kPlaceStereo, 0, false, &fresh);
-    check(wc.step(30000, ohp::kWatchSubscription, 0xCC0, many, line, sizeof(line)) > 0 &&
-              std::strcmp(line, "on-foot hud probe: 30 s watch hud provider subscription 0xCC0: 3 write(s); #1 ship 0, stereo 2, cinema 0 (with the "
-                                "camera bit 0, 2, 0), last 0x4; 1 from sites that did not fit") == 0,
+    check(wc.step(30000, name, 0xCC0, many, line, sizeof(line)) > 0 &&
+              std::strcmp(line, "on-foot hud probe: 30 s watch hud gate group 0xCC0: 3 write(s); #1 ship 0, stereo 2, cinema 0 (opening the gate 0, 2, 0), "
+                                "last 0x4; 1 from sites that did not fit") == 0,
           "watch summary: the window, the site that did not fit counted");
 
     // The watch lines.
-    check(ohp::formatWatchOff(ohp::kWatchSubscription, 0xCC0, "the key is off", many, line, sizeof(line)) > 0 &&
-              std::strstr(line, "watch off: hud provider subscription 0xCC0: the key is off; 8 site(s), 13 hit(s), 3 from sites that did not fit"),
+    check(ohp::formatWatchOff(name, 0xCC0, "the key is off", many, line, sizeof(line)) > 0 &&
+              std::strstr(line, "watch off: hud gate group 0xCC0: the key is off; 8 site(s), 13 hit(s), 3 from sites that did not fit"),
           "text: watch off");
-    check(ohp::formatWatchOn(ohp::kWatchSubscription, 0xE70, 0xE48, 40, 1, 2, nullptr, line, sizeof(line)) > 0 &&
-              std::strcmp(line, "on-foot hud probe: watch on: hud provider subscription 0xE70 (0xE48+0x28) on debug slot 2, write, 4 bytes: 40 "
-                                "thread(s), 1 skipped (slot taken), 2 could not be set") == 0,
+    check(ohp::formatWatchOn(name, 0xE70, 0xE48, 4, 2, 40, 1, 2, nullptr, line, sizeof(line)) > 0 &&
+              std::strcmp(line, "on-foot hud probe: watch on: hud gate group 0xE70 (0xE48+0x28) on debug slot 2, write, 4 bytes: 40 thread(s), 1 skipped "
+                                "(slot taken), 2 could not be set") == 0,
           "text: watch on");
-    char note[200];
-    ohp::formatWatchTarget(1, 1, note, sizeof(note));
-    check(ohp::formatWatchOn(ohp::kWatchSubscription, 0xE70, 0xE48, 40, 1, 2, note, line, sizeof(line)) > 0 &&
-              std::strstr(line, "2 could not be set; the first provider with 0x8, of view bit 1, the pass's view 0"),
-          "text: watch on, the target's note: view 0");
-    ohp::formatWatchTarget(2, 0, note, sizeof(note));
-    check(std::strcmp(note, "the first provider with 0x8, of view bit 2 (view 0 has none with 0x8)") == 0, "text: the note, another view");
-    ohp::formatWatchTarget(2, -1, note, sizeof(note));
-    check(std::strcmp(note, "the first provider with 0x8, of view bit 2 (the pass's view 0 is not known yet)") == 0, "text: the note, no pass yet");
-    check(ohp::formatWatchNotOn(ohp::kWatchSubscription, 0xCC0, "no thread took it", line, sizeof(line)) > 0 &&
-              std::strstr(line, "watch NOT on: hud provider subscription 0xCC0: no thread took it; the provider, pose, state and graph lines go on"),
+    check(ohp::formatWatchOn(ohp::watchName(ohp::kGatePassOff), 0xE70, 0xE10, 1, 2, 40, 1, 2, "the pass's on byte", line, sizeof(line)) > 0 &&
+              std::strcmp(line, "on-foot hud probe: watch on: hud gate pass off 0xE70 (0xE10+0x60) on debug slot 2, write, 1 bytes: 40 thread(s), 1 skipped "
+                                "(slot taken), 2 could not be set; the pass's on byte") == 0,
+          "text: watch on, a byte, the target's note");
+    check(ohp::formatWatchNotOn(name, 0xCC0, "no thread took it", line, sizeof(line)) > 0 &&
+              std::strstr(line, "watch NOT on: hud gate group 0xCC0: no thread took it; the walk, provider, pose, state and graph lines go on"),
           "text: watch not on");
-    check(ohp::formatWatchMoves(ohp::kWatchSubscription, 0xE70, 0xF70, line, sizeof(line)) > 0 &&
-              std::strcmp(line, "on-foot hud probe: watch moves: hud provider subscription 0xE70 -> 0xF70 (the watched provider left its view's list "
-                                "for 2 s; this one answered with 0x8)") == 0,
+    check(ohp::formatWatchMoves(name, 0xE70, 0xF70, line, sizeof(line)) > 0 &&
+              std::strcmp(line, "on-foot hud probe: watch moves: hud gate group 0xE70 -> 0xF70 (the watched path left its view's walks for 2 s; this one is "
+                                "open in cinema and closed in stereo)") == 0,
           "text: a watch moves");
+    check(ohp::formatNoGateDifference(line, sizeof(line)) > 0 &&
+              std::strcmp(line, "on-foot hud probe: no _HUD path has been open in cinema and closed in a matched stereo walk yet: the gate watch is not "
+                                "armed") == 0,
+          "text: no path differs");
 
     // The fuse.
     ohp::Fuse fuse;
@@ -947,8 +970,7 @@ void partA19() {
                                 "read): the providers are not silent, they were not asked; since recording began 5 matched"),
           "text: no snapshots is said, and is not 'providers silent'");
     check(ohp::formatNoHudProvider(line, sizeof(line)) > 0 &&
-              std::strcmp(line, "on-foot hud probe: no provider of the HUD node has answered with the _HUD bit 0x8 in a matched snapshot yet: the "
-                                "subscription watch is not armed") == 0,
+              std::strcmp(line, "on-foot hud probe: no provider of the HUD node has answered with the _HUD bit 0x8 in a matched snapshot yet") == 0,
           "text: no provider ever gave 0x8");
 
     // The summary's window: due 30 s after its first call; with snapshots or without.
@@ -1024,6 +1046,531 @@ void partA19() {
     bool inOrder = true;
     while (ring.pop(&got)) inOrder = inOrder && got.number == static_cast<uint32_t>(popped++) && got.p[0].addr == s.p[0].addr;
     check(popped == 4 && inOrder && ring.dropped() == 1, "ring: four records in order, the overflow counted");
+}
+
+// ---- Part A, .20: the _HUD provider's record, its gates, the walk -----------------------------------------------------------------------
+
+// The _HUD provider B with one record for the node's camera and set (and one for another camera), in the rig's memory, the shape the core's
+// header comment gives:
+//   group 0: item 0 {part 0 [mesh A], part 1 [mesh B]}, item 1 {part 2 [mesh C]};  group 1: item 2 {part 3 [mesh D]}.
+//   mesh A: resource 0 (2 sections: 0 has one pass entry, 1 two), materials 0-2, 4 instances (sections 0, 1, 1, 0); B, C and D: resource
+//   1 or 2 (one section, one entry), materials 3-5, 2 instances. Every mesh's mask is 0x6, the binding's 0x4, every instance's mask 0x4.
+//   Passes of view 0: material 0 lists 0x9, 1 lists 0x4, 2 lists 0x2, 3-5 list 0x8, all on; of view 1: materials 1 and 2 only. The paths
+//   of materials 0, 3, 4, 5 are _HUD paths (0x8) and all open: the lists add up to 0xF. Part 0 has a non-empty list of collector 0 (5),
+//   part 1 of collector 0 (1), part 2 of collector 6 (2).
+struct FakeScene {
+    uint8_t mesh[4][2][0x48] = {};  // first: the mesh's mask (+0x30) is watched, eight bytes, so 8-aligned (0x48 * 2 is)
+    uint8_t b[0x100] = {};
+    uint64_t records[3] = {};
+    uint8_t rec[3][0x110] = {};
+    uint8_t bnd[3][0x40] = {};
+    uint8_t setOwn[0x80] = {};
+    uint8_t cam[16] = {}, cam2[16] = {};
+    uint8_t box[0x20] = {};
+    uint64_t groupArray[2] = {};
+    uint8_t group[2][0x1A8] = {};
+    uint64_t itemArray[2][2] = {};
+    uint8_t item[3][0x150] = {};
+    uint64_t partArray[3][2] = {};
+    uint8_t part[4][0x200] = {};
+    uint8_t res[3][0x90] = {};
+    uint8_t mset[4][0x30] = {};
+    uint8_t mat[6][0x140] = {};
+    uint8_t pass[6][2][0x70] = {};
+    uint8_t feature[6][2][0x40] = {};
+    std::vector<uint32_t> table[3], data[4];
+    std::vector<uint64_t> entries[3], masks[4];
+
+    uint64_t meshAt(int p) { return addr(mesh[p][0]); }
+    void setResource(int r, const std::vector<std::pair<uint32_t, uint32_t>>& sections, const std::vector<uint32_t>& numbers) {
+        table[r].assign(sections.size() * 4 + 4, 0);
+        for (size_t i = 0; i < sections.size(); ++i) {
+            table[r][i * 4] = sections[i].first;
+            table[r][i * 4 + 1] = sections[i].second;
+        }
+        entries[r].assign(numbers.size() + 1, 0);
+        for (size_t i = 0; i < numbers.size(); ++i) entries[r][i] = numbers[i];
+        put<uint32_t>(res[r], ohp::kResSections, static_cast<uint32_t>(sections.size()));
+        put(res[r], ohp::kResSectionTable, addr(table[r].data()));
+        put(res[r], ohp::kResPassEntries, addr(entries[r].data()));
+    }
+    // Mesh m's instances: each one's section, the mask all of them carry, the step of the data in bytes.
+    void setInstances(int m, const std::vector<uint32_t>& sections, uint64_t mask, uint32_t stepBytes) {
+        const uint32_t step = stepBytes / 4;
+        data[m].assign(sections.size() * step + 1, 0);
+        masks[m].assign(sections.size() + 1, mask);
+        for (size_t i = 0; i < sections.size(); ++i) data[m][i * step] = sections[i] << 18;
+        uint8_t* mm = mesh[m][0];
+        put(mm, ohp::kMeshData, addr(data[m].data()));
+        put(mm, ohp::kMeshMasks, addr(masks[m].data()));
+        put<uint32_t>(mm, ohp::kMeshInstances, static_cast<uint32_t>(sections.size()));
+        put<uint16_t>(mm, ohp::kMeshDataStep, static_cast<uint16_t>(stepBytes));
+    }
+    void setPass(int m, int view, uint64_t bits, uint8_t on) {
+        put(feature[m][view], ohp::kFeatureBits, bits);
+        put(pass[m][view], ohp::kPassFeature, addr(feature[m][view]));
+        put<uint8_t>(pass[m][view], ohp::kPassOn, on);
+        put(mat[m], ohp::kMaterialPasses + 8 * static_cast<uintptr_t>(view), addr(pass[m][view]));
+    }
+    void clearPass(int m, int view) { put<uint64_t>(mat[m], ohp::kMaterialPasses + 8 * static_cast<uintptr_t>(view), 0); }
+    void setFlags(uint32_t slot, int32_t v) {
+        for (auto& g : group) put<int32_t>(g, 4 * slot, v);
+        for (auto& i : item) put<int32_t>(i, ohp::kItemFlags + 4 * slot, v);
+        for (auto& p : part) put<int32_t>(p, ohp::kPartFlags + 4 * slot, v);
+    }
+    void setAnswer(uint64_t answer) { put<uint64_t>(rec[0], ohp::kRecAnswer, answer); }
+    void setSlot(uint32_t slot) { put<uint32_t>(bnd[0], ohp::kBindSlot, slot); }
+    void build(uint64_t camera, uint8_t* set, uint32_t view, uint32_t slot, uint64_t answer) {
+        put<uint64_t>(b, ohp::kProvRecordCount, 2);
+        put(b, ohp::kProvRecords, addr(records));
+        records[0] = addr(rec[0]);
+        records[1] = addr(rec[1]);
+        for (int k = 0; k < 2; ++k) {
+            put(rec[k], ohp::kRecBinding, addr(bnd[k]));
+            put<uint64_t>(bnd[k], ohp::kBindMask, 0x4);
+            put(bnd[k], ohp::kBindSet, addr(set));
+        }
+        put(bnd[0], ohp::kBindCamera, camera);
+        put(bnd[1], ohp::kBindCamera, addr(cam2));
+        put(rec[0], ohp::kRecGroups, addr(box));
+        setAnswer(answer);
+        setSlot(slot);
+        put<uint32_t>(set, ohp::kSetViewNumber, view);
+        put<uint64_t>(box, ohp::kGroupsCount, 2);
+        put(box, ohp::kGroupsArray, addr(groupArray));
+        groupArray[0] = addr(group[0]);
+        groupArray[1] = addr(group[1]);
+        put<uint64_t>(group[0], ohp::kGroupItemCount, 2);
+        put(group[0], ohp::kGroupItems, addr(itemArray[0]));
+        itemArray[0][0] = addr(item[0]);
+        itemArray[0][1] = addr(item[1]);
+        put<uint64_t>(group[1], ohp::kGroupItemCount, 1);
+        put(group[1], ohp::kGroupItems, addr(itemArray[1]));
+        itemArray[1][0] = addr(item[2]);
+        put<uint64_t>(item[0], ohp::kItemPartCount, 2);
+        put(item[0], ohp::kItemParts, addr(partArray[0]));
+        partArray[0][0] = addr(part[0]);
+        partArray[0][1] = addr(part[1]);
+        put<uint64_t>(item[1], ohp::kItemPartCount, 1);
+        put(item[1], ohp::kItemParts, addr(partArray[1]));
+        partArray[1][0] = addr(part[2]);
+        put<uint64_t>(item[2], ohp::kItemPartCount, 1);
+        put(item[2], ohp::kItemParts, addr(partArray[2]));
+        partArray[2][0] = addr(part[3]);
+        for (int p = 0; p < 4; ++p) {
+            put<uint64_t>(part[p], ohp::kPartMeshCount, 1);
+            put(part[p], ohp::kPartMeshes, addr(mesh[p]));
+            uint8_t* mm = mesh[p][0];
+            put<uint64_t>(mm, ohp::kMeshMask, 0x6);
+            put(mm, ohp::kMeshResource, addr(res[p == 0 ? 0 : p == 3 ? 2 : 1]));
+            put(mm, ohp::kMeshMaterials, addr(mset[p]));
+        }
+        put<uint64_t>(part[0], ohp::kPartCollectors + ohp::kPartCollectorStride * 0, 5);
+        put<uint64_t>(part[1], ohp::kPartCollectors + ohp::kPartCollectorStride * 0, 1);
+        put<uint64_t>(part[2], ohp::kPartCollectors + ohp::kPartCollectorStride * 6, 2);
+        setResource(0, {{0, 1}, {1, 3}}, {0, 1, 2});
+        setResource(1, {{0, 1}}, {0});
+        setResource(2, {{0, 1}}, {0});
+        setInstances(0, {0, 1, 1, 0}, 0x4, 8);
+        for (int m = 1; m < 4; ++m) setInstances(m, {0, 0}, 0x4, 4);
+        put(mset[0], ohp::kMaterialSetArray, addr(mat[0]));
+        put(mset[0], ohp::kMaterialSetArray + 8, addr(mat[1]));
+        put(mset[0], ohp::kMaterialSetArray + 16, addr(mat[2]));
+        for (int p = 1; p < 4; ++p) put(mset[p], ohp::kMaterialSetArray, addr(mat[p + 2]));
+        const uint64_t bits[6] = {0x9, 0x4, 0x2, 0x8, 0x8, 0x8};
+        for (int m = 0; m < 6; ++m) {
+            clearPass(m, 0);
+            clearPass(m, 1);
+            setPass(m, 0, bits[m], 1);
+        }
+        setPass(1, 1, 0x4, 1);
+        setPass(2, 1, 0x2, 1);
+        setFlags(slot, 1);
+    }
+    // The _HUD path of the mesh of part p (section s), or null.
+    const ohp::HudPath* pathOf(const ohp::GateWalk& w, int p, uint32_t s = 0) {
+        for (uint32_t i = 0; i < w.stored; ++i)
+            if (w.path[i].mesh == meshAt(p) && w.path[i].section == s) return &w.path[i];
+        return nullptr;
+    }
+};
+
+void partA20() {
+    static FakeScene sc;
+    static ohp::GateWalk w, w2;
+    char line[1600], want[1600];
+    const uint64_t camera = addr(sc.cam), set = addr(sc.setOwn), node = 0x1234000;
+    sc.build(camera, sc.setOwn, 0, 1, 0xF);
+    auto walk = [&](ohp::GateWalk* out, ohp::HudMaterials* mats, uint64_t cam, uint64_t provider, void* rctx = nullptr,
+                    ohp::ReadFn read = &plainRead) {
+        return ohp::walkHudProvider(addr(sc.b), node, cam, set, provider, 1, 0, ohp::kPlaceCinema, read, rctx, mats, out);
+    };
+
+    // All gates open, every pass on: the _HUD paths are the four of materials 0, 3, 4, 5, all open, and the lists add up to the record's.
+    {
+        ohp::HudMaterials mats;
+        check(walk(&w, &mats, camera, 0xF) == ohp::kWalkMatched && w.result == ohp::kWalkMatched && w.recomputed == 0xF && w.recordAnswer == 0xF &&
+                  w.providerAnswer == 0xF && w.hudPaths == 4 && w.stored == 4 && w.byGate[ohp::kGateOpen] == 4 && mats.count() == 4,
+              "walk: all gates open, four _HUD paths open, the recomputed lists are the record's, the materials in the set");
+        check(w.groups == 2 && w.items == 3 && w.parts == 4 && w.meshes == 4 && w.passEntries == 6 && w.instances == 10 && w.cutShort == 0 && w.records == 2 &&
+                  w.slot == 1 && w.view == 0 && w.bindingMask == 0x4 && w.record == addr(sc.rec[0]) && w.binding == addr(sc.bnd[0]) && w.camera == camera &&
+                  w.set == set && w.node == node && w.provider == addr(sc.b) && w.viewBit == 1,
+              "walk: counts of groups, items, parts, meshes, pass entries and instances; the record, binding, slot, view and masks");
+        check(w.collectors[0] == 2 && w.collectors[6] == 1 && w.collectors[1] == 0 && w.collectors[3] == 0 && w.collectors[5] == 0,
+              "walk: the parts with a non-empty list of each collector");
+        const ohp::HudPath* a = sc.pathOf(w, 0);
+        const ohp::HudPath* d = sc.pathOf(w, 3);
+        uint32_t seen = 99;
+        check(a && d && w.path[0].mesh == sc.meshAt(0) && w.path[3].mesh == sc.meshAt(3) && a->closed == ohp::kGateOpen && a->instancesPass == 2 &&
+                  a->instancesAll == 2 && a->firstMask == addr(sc.masks[0].data()) && a->pass != 0 && a->on == 1 && a->bits == 0x9 && a->rememberedView == 0 &&
+                  a->rememberedPass == a->pass && a->flagGroup == 1 && a->flagItem == 1 && a->flagPart == 1 && a->meshMask == 0x6 &&
+                  a->group == addr(sc.group[0]) && a->item == addr(sc.item[0]) && a->part == addr(sc.part[0]) && a->material == addr(sc.mat[0]) &&
+                  d->group == addr(sc.group[1]) && d->item == addr(sc.item[2]) && d->part == addr(sc.part[3]) && d->instancesPass == 2 &&
+                  mats.find(addr(sc.mat[5]), &seen) && seen == 0 && !mats.find(addr(sc.mat[1]), &seen),
+              "walk: a _HUD path's place, flags, masks, instances of its section, pass, lists, the view it was seen at");
+        check(sc.pathOf(w, 0, 1) == nullptr, "walk: the paths of materials without 0x8 are not _HUD paths");
+        // The text of a path and of the head.
+        std::snprintf(want, sizeof(want),
+                      "on-foot hud probe:   _HUD path #3: mesh 0x%llX section 0 material 0x%llX (group 0x%llX item 0x%llX part 0x%llX): open; flags group "
+                      "1/item 1/part 1; mesh mask 0x6 vs binding 0x4; instances 2/2; pass for view 0 0x%llX on=1 lists 0x8; pass for view 0 (seen with 0x8) "
+                      "0x%llX lists 0x8",
+                      static_cast<unsigned long long>(sc.meshAt(3)), static_cast<unsigned long long>(addr(sc.mat[5])), static_cast<unsigned long long>(addr(sc.group[1])),
+                      static_cast<unsigned long long>(addr(sc.item[2])), static_cast<unsigned long long>(addr(sc.part[3])),
+                      static_cast<unsigned long long>(addr(sc.pass[5][0])), static_cast<unsigned long long>(addr(sc.pass[5][0])));
+        check(ohp::formatGatePath(w, 3, line, sizeof(line)) > 0 && std::strcmp(line, want) == 0, "text: a _HUD path, open");
+        w.place = ohp::kPlaceCinema;
+        std::snprintf(want, sizeof(want),
+                      "on-foot hud probe: _HUD provider gates: view bit 1, on foot in cinema, node 0x%llX provider 0x%llX record 0x%llX binding 0x%llX camera "
+                      "0x%llX set 0x%llX; binding mask (bnd+0x28) 0x4, slot 1, set view 0; record answer (rec+0x100) 0xF, equals the provider's (+0x30) 0xF; "
+                      "walked 2 group(s), 3 item(s), 4 part(s), 4 mesh(es), 6 pass entries, 10 instance(s), whole; recomputed 0xF: matches; 4 _HUD path(s) by "
+                      "first closed gate: open 4, group 0, item 0, part 0, mesh mask 0, instances 0, view pass 0, pass off 0; parts with a list of collector "
+                      "0-6: 2 0 0 0 0 0 1",
+                      static_cast<unsigned long long>(node), static_cast<unsigned long long>(addr(sc.b)), static_cast<unsigned long long>(addr(sc.rec[0])),
+                      static_cast<unsigned long long>(addr(sc.bnd[0])), static_cast<unsigned long long>(camera), static_cast<unsigned long long>(set));
+        check(ohp::formatGateHead(w, line, sizeof(line)) > 0 && std::strcmp(line, want) == 0, "text: the census head, whole, the lists match");
+        // The picture: the same walk is the same, a gate closing is another.
+        const uint64_t picture = ohp::gatePicture(w);
+        w2 = w;
+        check(ohp::gatePicture(w2) == picture, "picture: the same walk is the same picture");
+        w2.path[1].closed = ohp::kGateItem;
+        check(ohp::gatePicture(w2) != picture, "picture: a path's first closed gate changes it");
+        w2 = w;
+        w2.bindingMask = 0x8;
+        check(ohp::gatePicture(w2) != picture, "picture: the binding's mask changes it");
+    }
+
+    // One gate closed at a time, on the path of mesh D (group 1, item 2, part 3): the first closed gate is that gate, with its value. The
+    // material must be known as _HUD first, so each case walks once open and then again closed. The walk's result stays matched (the other
+    // paths still give 0x8 and the lists add up to what the record has), and the watch's target is the word of that gate.
+    {
+        struct Case {
+            const char* name;
+            int gate;
+        };
+        const Case cases[] = {{"G1 group flag", ohp::kGateGroup},   {"G2 item flag", ohp::kGateItem},     {"G3 part flag", ohp::kGatePart},
+                              {"G4 mesh mask", ohp::kGateMeshMask}, {"G5 instances", ohp::kGateInstances}, {"G6 view pass", ohp::kGateViewPass},
+                              {"G7 pass off", ohp::kGatePassOff}};
+        for (const Case& c : cases) {
+            sc.build(camera, sc.setOwn, 0, 1, 0xF);
+            ohp::HudMaterials mats;
+            walk(&w, &mats, camera, 0xF);
+            switch (c.gate) {
+                case ohp::kGateGroup: put<int32_t>(sc.group[1], 4, 0); break;
+                case ohp::kGateItem: put<int32_t>(sc.item[2], ohp::kItemFlags + 4, 0); break;
+                case ohp::kGatePart: put<int32_t>(sc.part[3], ohp::kPartFlags + 4, 0); break;
+                case ohp::kGateMeshMask: put<uint64_t>(sc.mesh[3][0], ohp::kMeshMask, 0x1); break;
+                case ohp::kGateInstances: sc.setInstances(3, {0, 0}, 0x1, 4); break;
+                case ohp::kGateViewPass: sc.clearPass(5, 0); break;
+                default: put<uint8_t>(sc.pass[5][0], ohp::kPassOn, 0); break;
+            }
+            const int r = walk(&w, &mats, camera, 0xF);
+            const ohp::HudPath* d = sc.pathOf(w, 3);
+            char what[100];
+            std::snprintf(what, sizeof(what), "walk: only %s closed: its path's first closed gate, the others' paths open", c.name);
+            check(r == ohp::kWalkMatched && d && d->closed == c.gate && w.hudPaths == 4 && w.byGate[c.gate] == 1 && w.byGate[ohp::kGateOpen] == 3, what);
+            if (!d) continue;
+            bool value = false;
+            switch (c.gate) {
+                case ohp::kGateGroup: value = d->flagGroup == 0 && d->flagItem == 1 && d->flagPart == 1; break;
+                case ohp::kGateItem: value = d->flagGroup == 1 && d->flagItem == 0 && d->flagPart == 1; break;
+                case ohp::kGatePart: value = d->flagGroup == 1 && d->flagItem == 1 && d->flagPart == 0; break;
+                case ohp::kGateMeshMask: value = d->meshMask == 0x1 && d->instancesPass == 2; break;
+                case ohp::kGateInstances: value = d->meshMask == 0x6 && d->instancesPass == 0 && d->instancesAll == 2; break;
+                case ohp::kGateViewPass: value = d->pass == 0 && d->on == 0 && d->rememberedView == 0; break;
+                default: value = d->pass == addr(sc.pass[5][0]) && d->on == 0 && d->bits == 0x8; break;
+            }
+            std::snprintf(what, sizeof(what), "walk: %s: the value of the closed gate", c.name);
+            check(value, what);
+            // The target of the watch for that path, closed in stereo, open before.
+            ohp::GateTarget t;
+            const int tr = ohp::gateWatchTarget(w, *d, 0x6, &t);
+            bool target = tr == 0 && t.gate == c.gate;
+            switch (c.gate) {
+                case ohp::kGateGroup: target = target && t.address == addr(sc.group[1]) + 4 && t.length == 4 && !t.mask && t.object == addr(sc.group[1]); break;
+                case ohp::kGateItem: target = target && t.address == addr(sc.item[2]) + ohp::kItemFlags + 4 && t.length == 4 && !t.mask; break;
+                case ohp::kGatePart: target = target && t.address == addr(sc.part[3]) + ohp::kPartFlags + 4 && t.length == 4 && !t.mask; break;
+                case ohp::kGateMeshMask:
+                    target = target && t.address == sc.meshAt(3) + ohp::kMeshMask && t.length == 8 && t.mask && t.other == 0x4 &&
+                             std::strstr(t.note, "the mesh's mask, changed against cinema (0x6 -> 0x1)");
+                    break;
+                case ohp::kGateInstances: target = target && t.address == addr(sc.masks[3].data()) && t.length == 8 && t.mask && t.other == 0x4; break;
+                case ohp::kGateViewPass: target = target && t.address == addr(sc.mat[5]) + ohp::kMaterialPasses && t.length == 8 && !t.mask; break;
+                default: target = target && t.address == addr(sc.pass[5][0]) + ohp::kPassOn && t.length == 1 && !t.mask; break;
+            }
+            std::snprintf(what, sizeof(what), "watch target: %s: the word of that gate, its length, and whether it is a mask", c.name);
+            check(target, what);
+            if (c.gate == ohp::kGateMeshMask) {
+                // The mesh's mask did not change against cinema (0x1 then too): the binding's mask is watched, against the mesh's.
+                check(ohp::gateWatchTarget(w, *d, 0x1, &t) == 0 && t.address == addr(sc.bnd[0]) + ohp::kBindMask && t.length == 8 && t.mask && t.other == 0x1 &&
+                          t.object == addr(sc.bnd[0]) && std::strstr(t.note, "the binding's mask, the mesh's mask did not change against cinema (0x1)"),
+                      "watch target: G4, the mesh's mask unchanged: the binding's mask, against the mesh's");
+            }
+            if (c.gate == ohp::kGateInstances) {
+                sc.setInstances(3, {}, 0x4, 4);  // no instance at all: nothing to watch
+                ohp::HudMaterials mats2;
+                sc.build(camera, sc.setOwn, 0, 1, 0xF);
+                walk(&w, &mats2, camera, 0xF);
+                sc.setInstances(3, {}, 0x4, 4);
+                walk(&w, &mats2, camera, 0xF);
+                const ohp::HudPath* e = sc.pathOf(w, 3);
+                check(e && e->closed == ohp::kGateInstances && e->firstMask == 0 && e->instancesAll == 0 && ohp::gateWatchTarget(w, *e, 0x6, &t) == 2,
+                      "watch target: G5 with no instance in the section: nothing to watch");
+            }
+        }
+        // An open path has no target.
+        sc.build(camera, sc.setOwn, 0, 1, 0xF);
+        ohp::HudMaterials mats;
+        walk(&w, &mats, camera, 0xF);
+        ohp::GateTarget t;
+        check(ohp::gateWatchTarget(w, w.path[0], 0x6, &t) == 1, "watch target: an open path has none");
+    }
+
+    // The flags stand under slot 1, the binding says slot 0: every path closes at the group's flag, at its value 0.
+    {
+        sc.build(camera, sc.setOwn, 0, 1, 0xF);
+        ohp::HudMaterials mats;
+        walk(&w, &mats, camera, 0xF);
+        sc.setSlot(0);
+        const int r = walk(&w, &mats, camera, 0xF);
+        check(r == ohp::kWalkMatched && w.slot == 0 && w.hudPaths == 4 && w.byGate[ohp::kGateGroup] == 4 && w.path[0].closed == ohp::kGateGroup &&
+                  w.path[0].flagGroup == 0 && w.recomputed == 0 && std::strstr((ohp::formatGateHead(w, line, sizeof(line)), line), "recomputed 0x0: rest 0xF from the other collectors"),
+              "walk: flags under slot 1, binding slot 0: every path closes at the group's flag; the whole answer is the collectors'");
+    }
+
+    // The material has a _HUD pass for view 0, the walk is for view 1: the view's pass is not there, the remembered one is shown.
+    {
+        sc.build(camera, sc.setOwn, 0, 1, 0xF);
+        ohp::HudMaterials mats;
+        walk(&w, &mats, camera, 0xF);
+        put<uint32_t>(sc.setOwn, ohp::kSetViewNumber, 1);
+        const int r = walk(&w, &mats, camera, 0xF);
+        const ohp::HudPath* d = sc.pathOf(w, 3);
+        check(r == ohp::kWalkMatched && w.view == 1 && d && d->closed == ohp::kGateViewPass && d->pass == 0 && d->rememberedView == 0 &&
+                  d->rememberedPass == addr(sc.pass[5][0]) && d->rememberedBits == 0x8 && w.byGate[ohp::kGateViewPass] == 4 && w.recomputed == 0x6,
+              "walk: a _HUD pass for view 0, the walk for view 1: the view pass is the first closed gate, the pass of view 0 is shown");
+        std::snprintf(want, sizeof(want), "first closed view pass; flags group 1/item 1/part 1; mesh mask 0x6 vs binding 0x4; instances 2/2; pass for view 1 none; pass for view 0 (seen with 0x8) 0x%llX lists 0x8",
+                      static_cast<unsigned long long>(addr(sc.pass[5][0])));
+        check(ohp::formatGatePath(w, 3, line, sizeof(line)) > 0 && std::strstr(line, want), "text: a _HUD path closed at the view's pass, the pass of the seen view");
+        put<uint32_t>(sc.setOwn, ohp::kSetViewNumber, 0);
+    }
+
+    // The record has a bit the meshes do not give: the rest is named. The paths give a bit the record does not have: not matched, with
+    // its own reason; the record's answer not the provider's: not matched for another.
+    {
+        sc.build(camera, sc.setOwn, 0, 1, 0x10F);
+        ohp::HudMaterials mats;
+        const int r = walk(&w, &mats, camera, 0x10F);
+        check(r == ohp::kWalkMatched && w.recomputed == 0xF && ohp::formatGateHead(w, line, sizeof(line)) > 0 &&
+                  std::strstr(line, "recomputed 0xF: rest 0x100 from the other collectors"),
+              "walk: a bit in the record's answer no mesh gives: the rest 0x100 is named, from the other collectors");
+        sc.setAnswer(0x7);
+        check(walk(&w, &mats, camera, 0x7) == ohp::kWalkBitNotInAnswer && w.recomputed == 0xF && ohp::formatGateHead(w, line, sizeof(line)) > 0 &&
+                  std::strstr(line, "recomputed 0xF: does not match (0x8 is not in the answer)"),
+              "walk: the paths give a bit the record's answer has not: not matched, with its reason");
+        sc.setAnswer(0xF);
+        check(walk(&w, &mats, camera, 0xE) == ohp::kWalkAnswerDiffers && w.recordAnswer == 0xF && w.providerAnswer == 0xE &&
+                  ohp::formatGateHead(w, line, sizeof(line)) > 0 && std::strstr(line, "record answer (rec+0x100) 0xF, differs from the provider's (+0x30) 0xE"),
+              "walk: the record's answer is not the provider's: not matched, another reason");
+        // The pairs, as the first one is said.
+        ohp::GateWalks counts;
+        counts.noteBad(ohp::kWalkAnswerDiffers, 0xF, 0xE, node);
+        counts.noteBad(ohp::kWalkBitNotInAnswer, 1, 2, node);
+        int res = -1;
+        uint64_t a = 0, b = 0, n = 0;
+        check(counts.nextBad(&res, &a, &b, &n) && res == ohp::kWalkAnswerDiffers && a == 0xF && b == 0xE && n == node && !counts.nextBad(&res, &a, &b, &n),
+              "counts: the first pair that did not match, once");
+        check(ohp::formatGateBad(ohp::kWalkAnswerDiffers, 0xF, 0xE, node, line, sizeof(line)) > 0 &&
+                  std::strcmp(line, "on-foot hud probe: first _HUD provider walk that did not match: the record's answer (rec+0x100) is 0xF but the provider's "
+                                    "(+0x30) of node 0x1234000 is 0xE; later ones are only counted") == 0 &&
+                  ohp::formatGateBad(ohp::kWalkBitNotInAnswer, 0xF, 0x7, node, line, sizeof(line)) > 0 &&
+                  std::strcmp(line, "on-foot hud probe: first _HUD provider walk that did not match: the open paths give 0xF, with a bit the record's answer 0x7 "
+                                    "of node 0x1234000 does not have; later ones are only counted") == 0 &&
+                  ohp::formatGateBad(ohp::kWalkUnbelieved, 64, 3, node, line, sizeof(line)) > 0 &&
+                  std::strcmp(line, "on-foot hud probe: first _HUD provider walk that was not made: the record's binding is not believed (slot 64, limit 63; set "
+                                    "view 3, limit 15) for node 0x1234000; later ones are only counted") == 0,
+              "text: the pair of each reason");
+    }
+
+    // No record for the camera: no gates read, the camera and set named. An unreadable item: the walk is dropped, the fault is its result.
+    {
+        sc.build(camera, sc.setOwn, 0, 1, 0xF);
+        ohp::HudMaterials mats;
+        check(walk(&w, &mats, camera + 8, 0xF) == ohp::kWalkNoRecord && w.records == 2 && w.camera == camera + 8 && w.groups == 0 && w.hudPaths == 0,
+              "walk: no record for the camera: no gates read");
+        w.place = ohp::kPlaceStereo;
+        std::snprintf(want, sizeof(want),
+                      "on-foot hud probe: no record of the _HUD provider for camera 0x%llX set 0x%llX (view bit 1, on foot in stereo, node 0x1234000, provider "
+                      "0x%llX, 2 record(s)): the gates were not read",
+                      static_cast<unsigned long long>(camera + 8), static_cast<unsigned long long>(set), static_cast<unsigned long long>(addr(sc.b)));
+        check(ohp::formatGateNoRecord(w, line, sizeof(line)) > 0 && std::strcmp(line, want) == 0, "text: no record, with the camera and the set");
+        Blocked block{addr(sc.item[2]), addr(sc.item[2]) + sizeof(sc.item[2])};
+        check(walk(&w, &mats, camera, 0xF, &block, &blockedRead) == ohp::kWalkUnreadable && w.result == ohp::kWalkUnreadable,
+              "walk: an unreadable item: the walk is dropped, the fault is its result");
+        // The same item behind its group's closed flag: the game reads nothing there, so it is skipped and counted, the walk stands.
+        put<int32_t>(sc.group[1], 4, 0);
+        check(walk(&w, &mats, camera, 0xF, &block, &blockedRead) == ohp::kWalkMatched && w.skipped == 1 && ohp::formatGateHead(w, line, sizeof(line)) > 0 &&
+                  std::strstr(line, "; 1 subtree(s) behind a closed gate could not be read, skipped; parts with a list"),
+              "walk: an unreadable item behind a closed group flag: skipped and counted, the walk matched");
+        put<int32_t>(sc.group[1], 4, 1);
+        check(walk(&w, &mats, camera, 0xF) == ohp::kWalkMatched && w.skipped == 0 && ohp::formatGateHead(w, line, sizeof(line)) > 0 &&
+                  !std::strstr(line, "behind a closed gate"),
+              "walk: nothing skipped: the head says nothing of it");
+        block = Blocked{addr(sc.b), addr(sc.b) + sizeof(sc.b)};
+        check(walk(&w, &mats, camera, 0xF, &block, &blockedRead) == ohp::kWalkUnreadable, "walk: an unreadable provider: a fault, not 'no record'");
+        block = Blocked{addr(sc.mat[5]), addr(sc.mat[5]) + sizeof(sc.mat[5])};
+        check(walk(&w, &mats, camera, 0xF, &block, &blockedRead) == ohp::kWalkUnreadable, "walk: an unreadable material: a fault");
+        block = Blocked{addr(sc.res[2]), addr(sc.res[2]) + sizeof(sc.res[2])};
+        check(walk(&w, &mats, camera, 0xF, &block, &blockedRead) == ohp::kWalkUnreadable, "walk: an unreadable resource: a fault");
+        sc.setResource(2, std::vector<std::pair<uint32_t, uint32_t>>(65, {0, 0}), {});
+        check(walk(&w, &mats, camera, 0xF) == ohp::kWalkUnreadable, "walk: a resource with 65 sections is a misread: a fault");
+        sc.setResource(2, {{0, 1}}, {0});
+    }
+
+    // The budgets: too many instances cut the walk short, so do too many pass entries; the 65th _HUD path is only counted; a slot past 63 or
+    // a view past 15 is not believed and nothing is walked.
+    {
+        sc.build(camera, sc.setOwn, 0, 1, 0xF);
+        ohp::HudMaterials mats;
+        sc.setInstances(3, std::vector<uint32_t>(20000, 0), 0x4, 4);
+        check(walk(&w, &mats, camera, 0xF) == ohp::kWalkMatched && w.cutShort == 1 && w.instances == 8 && w.meshes == 4 && w.hudPaths == 3,
+              "walk: more instances than the budget: cut short at that mesh, the walk so far stands");
+        check(ohp::formatGateHead(w, line, sizeof(line)) > 0 && std::strstr(line, "5 pass entries, 8 instance(s), cut short;"), "text: the head says cut short");
+        sc.build(camera, sc.setOwn, 0, 1, 0xF);
+        sc.setResource(2, {{0, 16385}}, std::vector<uint32_t>(16385, 0));
+        check(walk(&w, &mats, camera, 0xF) == ohp::kWalkMatched && w.cutShort == 1 && w.passEntries == 5 && w.hudPaths == 3,
+              "walk: more pass entries than the budget: cut short");
+        sc.build(camera, sc.setOwn, 0, 1, 0xF);
+        sc.setResource(2, {{0, 70}}, std::vector<uint32_t>(70, 0));
+        ohp::HudMaterials many;
+        check(walk(&w, &many, camera, 0xF) == ohp::kWalkMatched && w.cutShort == 0 && w.hudPaths == 73 && w.stored == 64 && w.byGate[ohp::kGateOpen] == 73 &&
+                  w.passEntries == 75,
+              "walk: 73 _HUD paths: 64 stored, the rest only counted by gate");
+        sc.build(camera, sc.setOwn, 0, 1, 0xF);
+        sc.setSlot(64);
+        check(walk(&w, &mats, camera, 0xF) == ohp::kWalkUnbelieved && w.slot == 64 && w.groups == 0 && w.hudPaths == 0, "walk: slot 64 is not believed, nothing is walked");
+        sc.setSlot(63);
+        check(walk(&w, &mats, camera, 0xF) == ohp::kWalkMatched && w.groups == 2, "walk: slot 63 is the last one believed");
+        sc.setSlot(1);
+        put<uint32_t>(sc.setOwn, ohp::kSetViewNumber, 16);
+        check(walk(&w, &mats, camera, 0xF) == ohp::kWalkUnbelieved && w.view == 16 && w.groups == 0, "walk: view 16 is not believed, nothing is walked");
+        put<uint32_t>(sc.setOwn, ohp::kSetViewNumber, 15);
+        check(walk(&w, &mats, camera, 0xF) == ohp::kWalkMatched, "walk: view 15 is the last one believed");
+        put<uint32_t>(sc.setOwn, ohp::kSetViewNumber, 0);
+    }
+
+    // The set of _HUD materials: 64 cells, a material once, the first view stays, the 65th is counted.
+    {
+        ohp::HudMaterials mats;
+        bool all = true;
+        for (uint64_t i = 1; i <= 64; ++i) all = all && mats.add(0x100000 + i * 0x100, static_cast<uint32_t>(i % 16));
+        uint32_t view = 99;
+        check(all && mats.count() == 64 && mats.full() == 0 && mats.add(0x100000 + 3 * 0x100, 9) && mats.find(0x100000 + 3 * 0x100, &view) && view == 3,
+              "materials: 64 fill the set, one again is the same cell and keeps its first view");
+        check(!mats.add(0x900000, 1) && mats.full() == 1 && mats.count() == 64 && !mats.find(0x900000, &view), "materials: the 65th is counted, not stored");
+    }
+
+    // The counts by place and result, the 30-second window, the collectors.
+    {
+        ohp::GateWalks walks;
+        walks.note(ohp::kPlaceCinema, ohp::kWalkMatched, false);
+        walks.note(ohp::kPlaceCinema, ohp::kWalkMatched, true);
+        walks.note(ohp::kPlaceStereo, ohp::kWalkMatched, false);
+        walks.note(ohp::kPlaceStereo, ohp::kWalkNoRecord, false);
+        walks.note(ohp::kPlaceStereo, ohp::kWalkAnswerDiffers, false);
+        walks.note(ohp::kPlaceShip, ohp::kWalkUnreadable, false);
+        check(walks.count(ohp::kPlaceCinema, ohp::kWalkMatched) == 2 && walks.cutShort(ohp::kPlaceCinema) == 1 && walks.walks(ohp::kPlaceStereo) == 3 &&
+                  walks.walks(ohp::kPlaceShip) == 1 && walks.total() == 6,
+              "counts: by place and result, the cut-short ones apart");
+        ohp::GateSummary gs;
+        uint64_t seconds = 0;
+        ohp::GateCounts win[ohp::kPlaces];
+        check(gs.step(1000, walks, &seconds, win) == 0 && gs.step(30999, walks, &seconds, win) == 0, "gate summary: the first call starts the window, not due before 30 s");
+        walks.note(ohp::kPlaceCinema, ohp::kWalkMatched, false);
+        walks.note(ohp::kPlaceStereo, ohp::kWalkMatched, true);
+        walks.note(ohp::kPlaceStereo, ohp::kWalkBitNotInAnswer, false);
+        check(gs.step(31000, walks, &seconds, win) == 1 && seconds == 30 && win[ohp::kPlaceCinema].sum() == 1 && win[ohp::kPlaceStereo].sum() == 2 &&
+                  win[ohp::kPlaceStereo].n[ohp::kWalkBitNotInAnswer] == 1 && win[ohp::kPlaceStereo].cut == 1 && win[ohp::kPlaceShip].sum() == 0,
+              "gate summary: due, the window's walks by place");
+        check(ohp::formatGateSummaryHead(30, 3, 2, line, sizeof(line)) > 0 &&
+                  std::strcmp(line, "on-foot hud probe: 30 s gates of the _HUD provider: 3 walk(s) in these seconds; ring full 2 time(s) since recording began") == 0 &&
+                  ohp::formatGateSummaryPlace(ohp::kPlaceStereo, win[ohp::kPlaceStereo], line, sizeof(line)) > 0 &&
+                  std::strcmp(line, "on-foot hud probe:   on foot in stereo: 2 walk(s): 1 matched, 1 not matched (0 the record's answer is not the provider's, 1 "
+                                    "a bit the paths give is not in the answer), 0 no record, 0 binding not believed, 0 unreadable; 1 cut short") == 0,
+              "text: the window's head and a place's line");
+        check(gs.step(61000, walks, &seconds, win) == 2 && seconds == 30 && ohp::formatGateSummaryHead(30, 0, 0, line, sizeof(line)) > 0 &&
+                  std::strstr(line, "30 s gates of the _HUD provider: no walks of the _HUD provider in these seconds") &&
+                  std::strstr(line, "not the same as the gates being open"),
+              "gate summary: no walks is said, and is not 'open'");
+        sc.build(camera, sc.setOwn, 0, 1, 0xF);
+        ohp::HudMaterials mats;
+        walk(&w, &mats, camera, 0xF);
+        w.place = ohp::kPlaceStereo;
+        check(ohp::formatGateSummaryView(w, line, sizeof(line)) > 0 &&
+                  std::strcmp(line, "on-foot hud probe:   last matched walk of view bit 1, on foot in stereo: 4 _HUD path(s) by first closed gate: open 4, group "
+                                    "0, item 0, part 0, mesh mask 0, instances 0, view pass 0, pass off 0") == 0,
+              "text: a view's last matched walk by gate");
+
+        // The collectors: read from a table in the rig's memory, published once.
+        alignas(16) static uint64_t table[2 * ohp::kCollectors] = {};
+        for (int k = 0; k < ohp::kCollectors; ++k) {
+            table[2 * k] = 0x140000000ull + 0x4C0000 + 0x100 * static_cast<uint64_t>(k);
+            table[2 * k + 1] = 0x10 * static_cast<uint64_t>(k);
+        }
+        table[2 * 3] = 0x7FF000001000ull;  // one outside the image
+        const uint64_t base = addr(table) - ohp::kCollectorTableRva;
+        uint64_t fn[ohp::kCollectors];
+        int32_t off[ohp::kCollectors];
+        check(ohp::readCollectors(&plainRead, nullptr, base, fn, off) && fn[0] == table[0] && fn[6] == table[12] && off[2] == 0x20 && off[6] == 0x60,
+              "collectors: the seven read from the table");
+        ohp::GateWalks cw;
+        uint64_t gotFn[ohp::kCollectors];
+        int32_t gotOff[ohp::kCollectors];
+        check(!cw.collectorsDone() && !cw.nextCollectors(gotFn, gotOff) && cw.claimCollectors() && !cw.claimCollectors(), "collectors: one walk claims them");
+        cw.publishCollectors(fn, off);
+        check(cw.collectorsDone() && cw.nextCollectors(gotFn, gotOff) && gotFn[5] == fn[5] && gotOff[5] == 0x50 && !cw.nextCollectors(gotFn, gotOff), "collectors: said once");
+        check(ohp::formatGateCollectors(fn, off, 0x140000000ull, 0x640C000ull, line, sizeof(line)) > 0 &&
+                  std::strcmp(line, "on-foot hud probe: collectors of the _HUD provider (table EliteDangerous64.exe+0x6054C70): #0 EliteDangerous64.exe+0x4C0000 "
+                                    "offset 0x0; #1 EliteDangerous64.exe+0x4C0100 offset 0x10; #2 EliteDangerous64.exe+0x4C0200 offset 0x20; #3 "
+                                    "0x7FF000001000 (outside the image) offset 0x30; #4 EliteDangerous64.exe+0x4C0400 offset 0x40; #5 "
+                                    "EliteDangerous64.exe+0x4C0500 offset 0x50; #6 EliteDangerous64.exe+0x4C0600 offset 0x60") == 0,
+              "text: the seven collectors as offsets into the game, the outside one absolute");
+    }
+
+    // The words of the watch that are not aligned to their length: 4 or 1 bytes at an address inside the word that is.
+    {
+        uint64_t at = 0;
+        unsigned len = 0;
+        ohp::alignWatch(0x1008, 8, &at, &len);
+        check(at == 0x1008 && len == 8, "align: 8 bytes at an 8-aligned address stay");
+        ohp::alignWatch(0x1004, 8, &at, &len);
+        check(at == 0x1004 && len == 4, "align: 8 bytes at a 4-aligned address become 4");
+        ohp::alignWatch(0x1002, 8, &at, &len);
+        check(at == 0x1002 && len == 1, "align: 8 bytes at an odd address become 1");
+        ohp::alignWatch(0x1002, 4, &at, &len);
+        check(at == 0x1002 && len == 1, "align: 4 bytes unaligned become 1");
+        ohp::alignWatch(0x1001, 1, &at, &len);
+        check(at == 0x1001 && len == 1, "align: a byte stays");
+    }
 }
 
 // ---- Part B: the real glue on a synthetic function -------------------------------------------------------------------------------
@@ -1398,7 +1945,7 @@ void setCamera(uint8_t* cam, float yawDeg, float x = 0.f, float y = 0.f, float z
     cameraBlock(m, yawDeg, 0.f, 0.f, x, y, z);
     std::memcpy(cam + ohp::kCamPose, m, sizeof(m));
 }
-// .19: the stores that change a subscription, each from its own place in the rig (a site is an instruction): Part C's two and Part B15's.
+// .20: the stores that write a watched word, each from its own place in the rig (a site is an instruction): Part C's four and Part B20's two.
 // Each leaves its own mark after the store: the linker folds identical functions into one, and a site is an instruction.
 volatile int g_mark = 0;
 __declspec(noinline) void writeSub(volatile uint64_t* p, uint64_t v) {
@@ -1412,6 +1959,18 @@ __declspec(noinline) void writeSubAlt(volatile uint64_t* p, uint64_t v) {
 __declspec(noinline) void writeSubGame(volatile uint64_t* p, uint64_t v) {
     *p = v;
     g_mark = 3;
+}
+__declspec(noinline) void writeSubFourth(volatile uint64_t* p, uint64_t v) {
+    *p = v;
+    g_mark = 4;
+}
+__declspec(noinline) void writeSubFifth(volatile uint64_t* p, uint64_t v) {
+    *p = v;
+    g_mark = 5;
+}
+__declspec(noinline) void writeSubSixth(volatile uint64_t* p, uint64_t v) {
+    *p = v;
+    g_mark = 6;
 }
 // Yaw steps of 10 deg: three up, three down, over and over.
 float triangle(int i) {
@@ -1562,12 +2121,10 @@ void partB15() {
           "pass glue .19: the summary's rows are the subscribed providers, and says no provider ever gave 0x8; no watch armed");
 
     // Thirty seconds in cinema, the PostGUI camera still, no head pose, view 1's pass no longer called: 0, and that pass retired. .19:
-    // the provider that gives _HUD is subscribed now: the frame mask has 0x8, the first matched snapshot with it arms the watch on its
-    // subscription (view 0's, the pass's), and the game rewrites the subscription at every step, with the camera's bit.
+    // the provider that gives _HUD is subscribed now: the frame mask has 0x8.
     onFootHudProbeSetPlace(ohp::kPlaceCinema);
     g_game.setProvider(0, 0x4, 0x8);
     g_game.sync();
-    const uint64_t sub0 = provider(0) + ohp::kProvSub;
     for (int n = 0; n < 60; ++n) {
         ++i;
         t += 500;
@@ -1581,17 +2138,10 @@ void partB15() {
                           "lists (cam+0x8F0) 0x4, frame mask (ctx+0x270) 0xC; 3 provider(s), 3 listed, 0 extra not listed",
                           static_cast<unsigned long long>(addr(g_game.node)), static_cast<unsigned long long>(addr(g_game.cam)));
             check(countLines(want) == 1 && anyLine("+0x28=0x4 subscribed=yes +0x30=0x8 _HUD=yes"), "pass glue .19: the list in cinema, the provider subscribed");
-            std::snprintf(want, sizeof(want), "watch on: hud provider subscription 0x%llX (0x%llX+0x28) on debug slot 2, write, 4 bytes: ",
-                          static_cast<unsigned long long>(sub0), static_cast<unsigned long long>(provider(0)));
-            check(anyLine(want) && anyLine("; the first provider with 0x8, of view bit 1, the pass's view 0") && countLines("watch on") == 1,
-                  "pass glue .19: the first provider with 0x8 watched on its subscription, view 0's");
-            std::snprintf(want, sizeof(want), "writer #3 of the hud provider subscription of 0x%llX: at ", static_cast<unsigned long long>(provider(0)));
-            check(countLines(want) == 1 && anyLine("(after the write), value 0x4 (with the HUD camera bit), on foot in cinema, thread "),
-                  "pass glue .19: one writer line, its value, the camera bit and the place");
+            check(!anyLine("watch on"), "pass glue .20: no path walked here (the provider is not the _HUD one): no gate watch");
             g_lines.clear();
         }
         onFootHudProbeCameraDrain(t, 1, 0, nullptr, &sink, nullptr);
-        writeSubGame(g_game.subOf(0), 0x4);
     }
     check(anyLine("30 s follow view 0 cinema: postgui/main k=0.00 (main turned 590 deg); main/head no head pose; 59 step(s)") &&
               countLines("follow view 0 stereo") == 0 && anyLine("pose view 0 cinema") && anyLine("head none"),
@@ -1612,94 +2162,194 @@ void partB15() {
     std::snprintf(want, sizeof(want), "new pass 0x%llX, view 1", static_cast<unsigned long long>(addr(b.pass)));
     check(anyLine(want), "pass glue: a retired pass called again is new again");
 
-    // The watch's own 30 seconds (armed at the first cinema step, t0 + 30500): 60 writes of one instruction, all in cinema, all with the
-    // camera's bit; the sites of Part C came before it, so this one is the third.
-    g_lines.clear();
-    onFootHudProbeCameraDrain(t + 500, 1, 0, nullptr, &sink, nullptr);
-    std::snprintf(want, sizeof(want),
-                  "30 s watch hud provider subscription 0x%llX: 60 write(s); #3 ship 0, stereo 0, cinema 60 (with the camera bit 0, 0, 60), last 0x4; 0 "
-                  "from sites that did not fit",
-                  static_cast<unsigned long long>(sub0));
-    check(anyLine(want), "pass glue .19: the watch's 30-second line, the writes by place with the camera bit");
-
-    // The watched provider leaves its view's list (a rebuilt scene) and another that gives _HUD is in it: after 2 s the watch moves.
-    t += 500;
-    g_game.setProvider(3, 0x4, 0x8);
-    g_game.setList({1, 2, 3});
-    g_game.sync();
-    g_draw(g_game.node);
-    onFootHudProbeCameraDrain(t + 500, 1, 0, nullptr, &sink, nullptr);
-    check(onFootHudProbeWatchOn(ohp::kWatchSubscription) && onFootHudProbeWatchAddress(ohp::kWatchSubscription) == sub0,
-          "pass glue .19: the provider is out of the list for 0.5 s: the watch stays");
-    const uint64_t sub3 = provider(3) + ohp::kProvSub;
-    g_lines.clear();
-    g_draw(g_game.node);  // the node keeps being read without it: that is what measures its absence
-    onFootHudProbeCameraDrain(t + 2200, 1, 0, nullptr, &sink, nullptr);
-    std::snprintf(want, sizeof(want), "watch moves: hud provider subscription 0x%llX -> 0x%llX (the watched provider left its view's list for 2 s; ",
-                  static_cast<unsigned long long>(sub0), static_cast<unsigned long long>(sub3));
-    check(anyLine(want) && anyLine("its provider left its view's list") && anyLine("watch on: hud provider subscription") &&
-              onFootHudProbeWatchAddress(ohp::kWatchSubscription) == sub3,
-          "pass glue .19: a provider that left its list moves the watch to the next one with 0x8");
-
-    // No provider with 0x8 is left in the list: after 2 s the watch comes off with a line.
-    t += 3000;
-    g_game.setList({1, 2});
-    g_game.sync();
-    g_draw(g_game.node);
-    onFootHudProbeCameraDrain(t, 1, 0, nullptr, &sink, nullptr);
-    check(onFootHudProbeWatchOn(ohp::kWatchSubscription), "pass glue .19: the provider is out of the list for 0.8 s: the watch stays");
-    // A loading screen: the node is not drawn for 5 s, so nothing is measured and the watch stays.
-    onFootHudProbeCameraDrain(t + 5000, 1, 0, nullptr, &sink, nullptr);
-    check(onFootHudProbeWatchOn(ohp::kWatchSubscription) && onFootHudProbeWatchAddress(ohp::kWatchSubscription) == sub3,
-          "pass glue .19: the HUD node not drawn for 5 s (a loading screen): the watch stays");
-    g_draw(g_game.node);
-    onFootHudProbeCameraDrain(t + 5500, 1, 0, nullptr, &sink, nullptr);
-    g_lines.clear();
-    g_draw(g_game.node);
-    onFootHudProbeCameraDrain(t + 7600, 1, 0, nullptr, &sink, nullptr);
-    std::snprintf(want, sizeof(want), "watch off: hud provider subscription 0x%llX: the provider has been out of its view's list for 2 s", static_cast<unsigned long long>(sub3));
-    check(anyLine(want) && !onFootHudProbeWatchOn(ohp::kWatchSubscription), "pass glue .19: the provider gone for 2 s of draws takes the watch off with a line");
-
-    // It is back: the watch is armed again on the first provider with 0x8, and the key off takes it off with the totals.
-    t += 8000;
-    g_game.setList({0, 1, 2});
-    g_game.sync();
-    g_draw(g_game.node);
-    g_lines.clear();
-    onFootHudProbeCameraDrain(t, 1, 0, nullptr, &sink, nullptr);
-    check(onFootHudProbeWatchAddress(ohp::kWatchSubscription) == sub0 && countLines("watch on: hud provider subscription") == 1,
-          "pass glue .19: the first provider with 0x8 is back and watched again");
-    onFootHudProbeSetRecording(false);
-    g_lines.clear();
-    onFootHudProbeStopWatches("the key is off", &sink, nullptr);
-    check(anyLine("watch off: hud provider subscription") && countLines("the key is off") == 1 && !onFootHudProbeWatchOn(ohp::kWatchSubscription),
-          "pass glue .19: the key off takes the watch off");
-    writeSubGame(g_game.subOf(0), 0x0);
-    g_lines.clear();
-    onFootHudProbeWatchDrain(ohp::kWatchSubscription, &sink, nullptr);
-    check(g_lines.empty(), "pass glue .19: no writer after the watch is off");
-
-    // The fuse: recording again, armed again, then more than 100 000 writes in the window: the watch is off for good, with a line.
-    onFootHudProbeSetRecording(true);
-    t += 500;
-    g_draw(g_game.node);
-    g_lines.clear();
-    onFootHudProbeCameraDrain(t, 1, 0, nullptr, &sink, nullptr);
-    check(onFootHudProbeWatchOn(ohp::kWatchSubscription), "pass glue .19: recording again, the watch is armed again");
-    for (int k = 0; k < 100001; ++k) writeSubGame(g_game.subOf(0), 0x4);
-    g_lines.clear();
-    onFootHudProbeCameraDrain(t + 500, 1, 0, nullptr, &sink, nullptr);
-    check(anyLine("over 100000 hits in 30 s: the place is written all the time; the watch stays off") && !onFootHudProbeWatchOn(ohp::kWatchSubscription),
-          "pass glue .19: the fuse takes the watch off after 100 000 writes");
-    t += 1000;
-    g_draw(g_game.node);
-    g_lines.clear();
-    onFootHudProbeCameraDrain(t + 500, 1, 0, nullptr, &sink, nullptr);
-    check(!anyLine("watch on") && !onFootHudProbeWatchOn(ohp::kWatchSubscription), "pass glue .19: a tripped fuse is not re-armed");
     onFootHudProbeSetRecording(false);
 }
 
-// ---- Part C: the write watch, real, on this rig's threads ---------------------------------------------------------------------------
+// ---- Part B, .20: the _HUD provider's gates through the real glue, the gate watch armed by the camera drain ------------------------------
+
+void partB20() {
+    if (!g_draw) {
+        check(false, "gates glue: the hooked node draw");
+        return;
+    }
+    static FakeScene sc;
+    const uintptr_t base = g_game.base();
+    // The collectors' table is at base + its RVA: the rig puts memory there (the address is picked, so the allocation can fail).
+    const uint64_t tableAt = base + ohp::kCollectorTableRva;
+    void* tableMem = VirtualAlloc(reinterpret_cast<void*>(tableAt & ~0xFFFFull), 0x20000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    check(tableMem != nullptr, "gates glue: memory at the collectors' table's address");
+    if (tableMem)
+        for (uint64_t k = 0; k < ohp::kCollectors; ++k) {
+            put<uint64_t>(reinterpret_cast<uint8_t*>(tableAt), ohp::kCollectorStride * k, base + 0x4C0000 + 0x100 * k);
+            put<uint64_t>(reinterpret_cast<uint8_t*>(tableAt), ohp::kCollectorStride * k + 8, 0x10 * k);
+        }
+    // The HUD node's one provider is B (its vtable word is base + the _HUD provider's RVA, its answer 0xF, subscribed to the camera 0x4); the
+    // scene's record is for the node's camera and set.
+    g_game.build();
+    put<uint64_t>(g_game.cam, ohp::kCamMask8E0, 0x4);
+    sc.build(addr(g_game.cam), g_game.set, 0, 1, 0xF);
+    put<uint64_t>(sc.b, 0, base + ohp::kProvBVtableRva);
+    put<uint64_t>(sc.b, ohp::kProvSub, 0x4);
+    put<uint64_t>(sc.b, ohp::kProvAnswer, 0xF);
+    g_game.setListAddr({addr(sc.b)});
+    g_game.sync();
+    sc.setResource(2, {{0, 20}}, std::vector<uint32_t>(20, 0));  // part 3's mesh has 20 passes of one material: 23 _HUD paths in all
+    auto maskOf = [&](int p) { return reinterpret_cast<volatile uint64_t*>(sc.mesh[p][0] + ohp::kMeshMask); };
+    const uint64_t maskC = sc.meshAt(2) + ohp::kMeshMask, maskD = sc.meshAt(3) + ohp::kMeshMask;
+    const int w = ohp::kWatchGate;
+    const uint64_t T = 1000000;
+    uint64_t walks = 0;
+    char want[600];
+    auto frame = [&](uint64_t at, int onFoot, int stereo) {
+        onFootHudProbeDrain(at, onFoot, &sink, nullptr);
+        onFootHudProbeCameraDrain(at, onFoot, stereo, nullptr, &sink, nullptr);
+    };
+    auto step = [&](uint64_t at, int onFoot, int stereo) {
+        g_draw(g_game.node);
+        ++walks;
+        frame(at, onFoot, stereo);
+    };
+    onFootHudProbeSetRecording(true);
+    onFootHudProbeSetPlace(ohp::kPlaceShip);
+    onFootHudProbeSetWalkInterval(ohp::kWalkEveryMs);
+    frame(T - 1000, 0, 1);  // starts the windows of the summaries
+
+    // In the ship: the first draw walks, the second inside the same second does not. The census has the head with the gates counted and 16
+    // of the 23 _HUD paths (the first line of each is #0), the collectors' addresses once.
+    g_lines.clear();
+    g_draw(g_game.node);
+    g_draw(g_game.node);
+    walks = 1;
+    frame(T, 0, 1);
+    check(anyLine("_HUD provider gates: view bit 1, in the ship, node 0x") && anyLine("recomputed 0xF: matches; 23 _HUD path(s) by first closed gate: open 23") &&
+              countLines("_HUD path #") == 16 && anyLine("_HUD path #15:") && !anyLine("_HUD path #16:"),
+          "gates glue: the ship's census: 23 _HUD paths counted, 16 written");
+    check(countLines("collectors of the _HUD provider (table EliteDangerous64.exe+0x6054C70): #0 EliteDangerous64.exe+0x4C0000 offset 0x0; #1 "
+                     "EliteDangerous64.exe+0x4C0100 offset 0x10;") == 1,
+          "gates glue: the seven collectors' addresses, once");
+
+    // The gates change: a census waits for its 5 seconds; nothing in between. With the interval at 0 every draw walks.
+    sc.setResource(2, {{0, 1}}, {0});
+    onFootHudProbeSetWalkInterval(0);
+    g_lines.clear();
+    for (uint64_t t = T + 500; t <= T + 4500; t += 500) step(t, 0, 1);
+    frame(T + 4999, 0, 1);
+    check(countLines("_HUD provider gates:") == 0 && countLines("_HUD path #") == 0, "gates glue: the gates changed: no census before 5 s");
+    step(T + 5000, 0, 1);
+    check(countLines("_HUD provider gates: view bit 1, in the ship") == 1 && anyLine("4 _HUD path(s) by first closed gate: open 4") && countLines("_HUD path #") == 4 &&
+              countLines("collectors of the _HUD provider") == 0,
+          "gates glue: the changed census at 5 s, the collectors not again");
+
+    // On foot in cinema: the census is the place's and the paths are open; no watch.
+    onFootHudProbeSetPlace(ohp::kPlaceCinema);
+    g_lines.clear();
+    for (uint64_t t = T + 5500; t <= T + 10000; t += 500) step(t, 1, 0);
+    check(countLines("_HUD provider gates: view bit 1, on foot in cinema, node 0x") == 1 && anyLine("4 _HUD path(s) by first closed gate: open 4") &&
+              countLines("_HUD path #") == 4 && anyLine("; instances 2/2; pass for view 0 0x") && countLines("watch on") == 0 && !onFootHudProbeWatchOn(w),
+          "gates glue: the cinema census at 5 s after the last, all open, no watch");
+
+    // On foot in stereo, the mesh D's mask closes: the first stereo walk finds the path open in cinema and closed, and the camera drain arms
+    // the watch on the mask that changed (its value 0x6 in cinema, 0x1 now), against the binding's mask; the census follows at 5 s.
+    put<uint64_t>(sc.mesh[3][0], ohp::kMeshMask, 0x1);
+    onFootHudProbeSetPlace(ohp::kPlaceStereo);
+    g_lines.clear();
+    step(T + 10500, 1, 1);
+    std::snprintf(want, sizeof(want), "watch on: hud gate mesh mask 0x%llX (0x%llX+0x30) on debug slot 2, write, 8 bytes: ", static_cast<unsigned long long>(maskD),
+                  static_cast<unsigned long long>(sc.meshAt(3)));
+    check(anyLine(want) && anyLine("; the mesh's mask, changed against cinema (0x6 -> 0x1)") && countLines("watch on") == 1 && onFootHudProbeWatchOn(w) &&
+              onFootHudProbeWatchAddress(w) == maskD,
+          "gates glue: the path closed in stereo, open in cinema: the watch armed on the mask that changed");
+    for (uint64_t t = T + 11000; t <= T + 15000; t += 500) step(t, 1, 1);
+    check(countLines("_HUD provider gates: view bit 1, on foot in stereo, node 0x") == 1 &&
+              anyLine("4 _HUD path(s) by first closed gate: open 3, group 0, item 0, part 0, mesh mask 1, instances 0, view pass 0, pass off 0") &&
+              anyLine("first closed mesh mask; flags group 1/item 1/part 1; mesh mask 0x1 vs binding 0x4; instances 2/2") && countLines("watch on") == 1,
+          "gates glue: the stereo census at 5 s: the path's first closed gate is the mesh's mask, the watch stays");
+
+    // Writes: the game opens the mask (a value that meets the binding's), then closes it again from another instruction; a repeat only counts.
+    g_lines.clear();
+    writeSubFifth(maskOf(3), 0x6);
+    writeSubSixth(maskOf(3), 0x1);
+    frame(T + 15200, 1, 1);
+    std::snprintf(want, sizeof(want), "writer #5 of the hud gate mesh mask of 0x%llX: at ", static_cast<unsigned long long>(sc.meshAt(3)));
+    check(countLines(want) == 1 && anyLine("(after the write), value 0x6 (opens the gate), on foot in stereo, thread ") && countLines("writer #6 of the hud gate mesh mask") == 1 &&
+              anyLine("(after the write), value 0x1 (keeps it closed), on foot in stereo, thread "),
+          "gates glue: one line per writer: the value, whether it opens the gate, the place");
+    g_lines.clear();
+    writeSubFifth(maskOf(3), 0x1);
+    frame(T + 15300, 1, 1);
+    check(countLines("writer #") == 0, "gates glue: a repeat of a known writer only counts");
+
+    // The path leaves the walks (its part has no mesh now): the watch stays for 1.5 s and comes off at 2 s with a line.
+    put<uint64_t>(sc.part[3], ohp::kPartMeshCount, 0);
+    g_lines.clear();
+    for (uint64_t t = T + 15500; t <= T + 16500; t += 500) step(t, 1, 1);
+    check(onFootHudProbeWatchOn(w) && countLines("watch off") == 0, "gates glue: the path out of the walks for 1.5 s: the watch stays");
+    step(T + 17000, 1, 1);
+    std::snprintf(want, sizeof(want), "watch off: hud gate mesh mask 0x%llX: the path has been out of its view's walks for 2 s", static_cast<unsigned long long>(maskD));
+    check(anyLine(want) && !onFootHudProbeWatchOn(w) && countLines("watch moves") == 0 && countLines("watch on") == 0,
+          "gates glue: the path out of the walks for 2 s takes the watch off with a line");
+
+    // The path is back, still closed: armed again. Then mesh C closes too and D leaves: the watch moves to C.
+    put<uint64_t>(sc.part[3], ohp::kPartMeshCount, 1);
+    g_lines.clear();
+    step(T + 17500, 1, 1);
+    std::snprintf(want, sizeof(want), "watch on: hud gate mesh mask 0x%llX (", static_cast<unsigned long long>(maskD));
+    check(countLines(want) == 1 && onFootHudProbeWatchOn(w), "gates glue: the path is back, closed in stereo: the watch armed again");
+    for (uint64_t t = T + 18000; t <= T + 18500; t += 500) step(t, 1, 1);
+    put<uint64_t>(sc.mesh[2][0], ohp::kMeshMask, 0x1);
+    put<uint64_t>(sc.part[3], ohp::kPartMeshCount, 0);
+    g_lines.clear();
+    for (uint64_t t = T + 19000; t <= T + 20000; t += 500) step(t, 1, 1);
+    check(onFootHudProbeWatchAddress(w) == maskD && countLines("watch moves") == 0, "gates glue: D out for 1.5 s, C closed: the watch stays on D");
+    step(T + 20500, 1, 1);
+    std::snprintf(want, sizeof(want),
+                  "watch moves: hud gate mesh mask 0x%llX -> 0x%llX (the watched path left its view's walks for 2 s; this one is open in cinema and closed in stereo)",
+                  static_cast<unsigned long long>(maskD), static_cast<unsigned long long>(maskC));
+    check(anyLine(want) && anyLine("its path left its view's walks") && countLines("watch off: hud gate mesh mask") == 1 && onFootHudProbeWatchOn(w) &&
+              onFootHudProbeWatchAddress(w) == maskC,
+          "gates glue: D leaves, C is closed too: the watch moves to C");
+
+    // 30 s after the windows began: the walks that went (the second draw inside the first second did not), by place, each view's last census.
+    g_lines.clear();
+    for (uint64_t t = T + 21000; t <= T + 29000; t += 500) step(t, 1, 1);
+    std::snprintf(want, sizeof(want), "30 s gates of the _HUD provider: %llu walk(s) in these seconds; ring full 0 time(s) since recording began",
+                  static_cast<unsigned long long>(walks));
+    check(anyLine(want) && anyLine("on foot in stereo: ") && anyLine("on foot in cinema: ") && anyLine("in the ship: ") &&
+              anyLine("last matched walk of view bit 1, on foot in stereo: 3 _HUD path(s) by first closed gate: open 2, group 0, item 0, part 0, mesh mask 1,"),
+          "gates glue: the 30-second walks by place and the last census by gate");
+
+    // The key off takes the watch off; no writer after it.
+    onFootHudProbeSetRecording(false);
+    g_lines.clear();
+    onFootHudProbeStopWatches("the key is off", &sink, nullptr);
+    std::snprintf(want, sizeof(want), "watch off: hud gate mesh mask 0x%llX: the key is off; ", static_cast<unsigned long long>(maskC));
+    check(anyLine(want) && !onFootHudProbeWatchOn(w), "gates glue: the key off takes the watch off");
+    writeSubFifth(maskOf(2), 0x1);
+    g_lines.clear();
+    onFootHudProbeWatchDrain(w, &sink, nullptr);
+    check(g_lines.empty(), "gates glue: no writer after the watch is off");
+
+    // The fuse: recording again, armed again on C, more than 100 000 writes in the window: off for good, with a line.
+    onFootHudProbeSetRecording(true);
+    g_lines.clear();
+    step(T + 30000, 1, 1);
+    check(onFootHudProbeWatchOn(w) && onFootHudProbeWatchAddress(w) == maskC, "gates glue: recording again, the watch is armed again");
+    frame(T + 60000, 1, 1);  // a new window for the fuse
+    for (int k = 0; k < 100001; ++k) writeSubFifth(maskOf(2), 0x1);
+    g_lines.clear();
+    frame(T + 60500, 1, 1);
+    check(anyLine("over 100000 hits in 30 s: the place is written all the time; the watch stays off") && !onFootHudProbeWatchOn(w),
+          "gates glue: the fuse takes the watch off after 100 000 writes");
+    g_lines.clear();
+    step(T + 61000, 1, 1);
+    step(T + 61500, 1, 1);
+    check(countLines("watch on") == 0 && !onFootHudProbeWatchOn(w), "gates glue: a tripped fuse is not re-armed");
+    onFootHudProbeSetRecording(false);
+    onFootHudProbeSetPlace(ohp::kPlaceShip);
+    onFootHudProbeSetWalkInterval(ohp::kWalkEveryMs);
+}
+
+// ---- Part C: the gate watch, real, on this rig's threads ---------------------------------------------------------------------------
 
 HANDLE g_busyGo = nullptr;
 DWORD WINAPI busyThread(void*) {
@@ -1708,9 +2358,12 @@ DWORD WINAPI busyThread(void*) {
 }
 
 void partC() {
-    alignas(16) static uint64_t sub[2] = {0x4};  // a provider's subscription: the watched place is its low four bytes
+    alignas(16) static uint64_t flag[2] = {0x0};      // a flag: the watched place is its low four bytes
+    alignas(16) static uint64_t mask[2] = {0x1};      // a mesh's mask: eight bytes
+    alignas(16) static uint64_t pass[2] = {0x1};      // a pass's byte: the watched place is its lowest byte
     alignas(16) static uint8_t other[16] = {};
-    const uint64_t subAt = addr(sub);
+    const uint64_t flagAt = addr(flag), maskAt = addr(mask), passAt = addr(pass);
+    const int w = ohp::kWatchGate;
     // A thread that already holds slot 2 for someone else.
     g_busyGo = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     HANDLE busy = CreateThread(nullptr, 0, &busyThread, nullptr, 0, nullptr);
@@ -1727,11 +2380,13 @@ void partC() {
     }
     check(held, "watch: a thread with slot 2 taken");
 
+    // A part's flag, four bytes: any value but 0 opens the gate.
     g_lines.clear();
-    const int armed = onFootHudProbeWatchArm(ohp::kWatchSubscription, subAt, subAt - ohp::kProvSub, "the rig's provider", &sink, nullptr);
-    check(armed > 0 && onFootHudProbeWatchOn(ohp::kWatchSubscription) && anyLine("watch on: hud provider subscription") && anyLine("on debug slot 2") &&
-              anyLine("; the rig's provider") && !anyLine(" 0 skipped"),
-          "watch: the subscription's armed on the rig's threads, the taken one skipped");
+    const OnFootHudProbeGateWatch partFlag{ohp::kGatePart, static_cast<uintptr_t>(flagAt), 4, false, 0, flagAt - ohp::kPartFlags - 4, "the rig's part flag"};
+    const int armed = onFootHudProbeWatchArm(w, partFlag, &sink, nullptr);
+    check(armed > 0 && onFootHudProbeWatchOn(w) && anyLine("watch on: hud gate part") && anyLine("on debug slot 2, write, 4 bytes") && anyLine("; the rig's part flag") &&
+              !anyLine(" 0 skipped"),
+          "watch: the flag's armed on the rig's threads, the taken one skipped");
     if (busy) {
         CONTEXT c{};
         c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
@@ -1740,45 +2395,75 @@ void partC() {
         ResumeThread(busy);
     }
     g_lines.clear();
-    check(onFootHudProbeWatchArm(ohp::kWatchSubscription, subAt, 0, nullptr, &sink, nullptr) == 0 && onFootHudProbeWatchArm(1, subAt, 0, nullptr, &sink, nullptr) == 0 &&
-              g_lines.empty(),
+    check(onFootHudProbeWatchArm(w, partFlag, &sink, nullptr) == 0 && onFootHudProbeWatchArm(1, partFlag, &sink, nullptr) == 0 && g_lines.empty(),
           "watch: armed again or another watch: nothing");
-    // The HUD nodes' camera bit is 0x4. On foot in stereo the subscription is written twice by one instruction with the bit; in cinema once
-    // more by it; in the ship without the bit; then another instruction writes it in stereo without the bit.
-    onFootHudProbeSetCameraBits(0x4);
+    // On foot in stereo the flag is written twice by one instruction with a value; in cinema once more by it; in the ship with 0; then
+    // another instruction writes 0 in stereo.
     onFootHudProbeSetPlace(ohp::kPlaceStereo);
-    writeSub(sub, 0x4);
-    writeSub(sub, 0x4);
+    writeSub(flag, 0x4);
+    writeSub(flag, 0x4);
     onFootHudProbeSetPlace(ohp::kPlaceCinema);
-    writeSub(sub, 0x4);
+    writeSub(flag, 0x4);
     onFootHudProbeSetPlace(ohp::kPlaceShip);
-    writeSub(sub, 0x0);
+    writeSub(flag, 0x0);
     onFootHudProbeSetPlace(ohp::kPlaceStereo);
-    writeSubAlt(sub, 0x0);
+    writeSubAlt(flag, 0x0);
     g_lines.clear();
-    onFootHudProbeWatchDrain(ohp::kWatchSubscription, &sink, nullptr);
-    check(g_lines.size() == 2 && anyLine("writer #1 of the hud provider subscription of") && anyLine("value 0x4 (with the HUD camera bit), on foot in stereo") &&
-              anyLine("writer #2 of the hud provider subscription of") && anyLine("value 0x0 (without the HUD camera bit), on foot in stereo"),
-          "watch: one line per writer, with the value it wrote, the camera bit and where; the repeats only counted");
+    onFootHudProbeWatchDrain(w, &sink, nullptr);
+    check(g_lines.size() == 2 && anyLine("writer #1 of the hud gate part of") && anyLine("value 0x4 (opens the gate), on foot in stereo") &&
+              anyLine("writer #2 of the hud gate part of") && anyLine("value 0x0 (keeps it closed), on foot in stereo"),
+          "watch: one line per writer, with the value it wrote, whether it opens the gate and where; the repeats only counted");
     g_lines.clear();
-    onFootHudProbeWatchDisarm(ohp::kWatchSubscription, "the rig is done", &sink, nullptr);
-    check(anyLine("watch off: hud provider subscription") && countLines("the rig is done; 2 site(s), 5 hit(s)") == 1 &&
-              !onFootHudProbeWatchOn(ohp::kWatchSubscription),
-          "watch: off, with its totals");
-    writeSub(sub, 0x4);
+    onFootHudProbeWatchDisarm(w, "the rig is done", &sink, nullptr);
+    check(anyLine("watch off: hud gate part") && countLines("the rig is done; 2 site(s), 5 hit(s)") == 1 && !onFootHudProbeWatchOn(w), "watch: off, with its totals");
+    writeSub(flag, 0x4);
     g_lines.clear();
-    onFootHudProbeWatchDrain(ohp::kWatchSubscription, &sink, nullptr);
+    onFootHudProbeWatchDrain(w, &sink, nullptr);
     check(g_lines.empty(), "watch: off, no trap");
+
+    // A mask, eight bytes: it opens the gate when it meets the other mask (0x4); the whole eight bytes are the value, and the high ones count.
     g_lines.clear();
-    check(onFootHudProbeWatchArm(ohp::kWatchSubscription, subAt + 1, 0, nullptr, &sink, nullptr) == 0 && anyLine("not 4-aligned"),
-          "watch: an unaligned address is refused with a line");
+    const OnFootHudProbeGateWatch meshMask{ohp::kGateMeshMask, static_cast<uintptr_t>(maskAt), 8, true, 0x4, maskAt - ohp::kMeshMask, "the rig's mesh mask"};
+    check(onFootHudProbeWatchArm(w, meshMask, &sink, nullptr) > 0 && anyLine("watch on: hud gate mesh mask") && anyLine("on debug slot 2, write, 8 bytes") &&
+              anyLine("; the rig's mesh mask"),
+          "watch: a mask, eight bytes, armed");
+    onFootHudProbeSetPlace(ohp::kPlaceStereo);
+    writeSubGame(mask, 0x100000006ull);
+    writeSubFourth(mask, 0x1);
+    writeSubGame(mask, 0x2);
+    g_lines.clear();
+    onFootHudProbeWatchDrain(w, &sink, nullptr);
+    check(g_lines.size() == 2 && anyLine("writer #3 of the hud gate mesh mask of") && anyLine("value 0x100000006 (opens the gate), on foot in stereo") &&
+              anyLine("writer #4 of the hud gate mesh mask of") && anyLine("value 0x1 (keeps it closed), on foot in stereo"),
+          "watch: a mask's value is its eight bytes, it opens the gate when it meets the other mask");
+    g_lines.clear();
+    onFootHudProbeWatchDisarm(w, "the rig is done", &sink, nullptr);
+    check(countLines("watch off: hud gate mesh mask") == 1 && countLines("the rig is done; 4 site(s), 8 hit(s)") == 1 && !onFootHudProbeWatchOn(w),
+          "watch: the mask off, with its totals");
+
+    // A byte: one byte of the pass; the eight-byte write over it is trapped, the value is its lowest byte.
+    g_lines.clear();
+    const OnFootHudProbeGateWatch passOn{ohp::kGatePassOff, static_cast<uintptr_t>(passAt), 1, false, 0, passAt - ohp::kPassOn, "the rig's pass byte"};
+    check(onFootHudProbeWatchArm(w, passOn, &sink, nullptr) > 0 && anyLine("watch on: hud gate pass off") && anyLine("on debug slot 2, write, 1 bytes"),
+          "watch: a byte, armed");
+    writeSubGame(pass, 0x100);
+    writeSubGame(pass, 0x5);
+    g_lines.clear();
+    onFootHudProbeWatchDisarm(w, "the rig is done", &sink, nullptr);
+    check(countLines("the rig is done; 4 site(s), 10 hit(s)") == 1, "watch: the byte's two writes were trapped");
+
+    g_lines.clear();
+    const OnFootHudProbeGateWatch unaligned{ohp::kGatePart, static_cast<uintptr_t>(flagAt + 1), 4, false, 0, 0, nullptr};
+    const OnFootHudProbeGateWatch oddLength{ohp::kGatePart, static_cast<uintptr_t>(flagAt), 3, false, 0, 0, nullptr};
+    check(onFootHudProbeWatchArm(w, unaligned, &sink, nullptr) == 0 && anyLine("not aligned to its length") && onFootHudProbeWatchArm(w, oddLength, &sink, nullptr) == 0 &&
+              countLines("not aligned to its length") == 2,
+          "watch: an address not aligned to its length, and a length of 3, are refused with a line");
     SetEvent(g_busyGo);
     if (busy) {
         WaitForSingleObject(busy, 5000);
         CloseHandle(busy);
     }
     onFootHudProbeSetPlace(ohp::kPlaceShip);  // as the process began: Part B's draws are read in the ship
-    onFootHudProbeSetCameraBits(0);
 }
 }  // namespace
 
@@ -1792,10 +2477,12 @@ int main(int argc, char** argv) {
     partA15();
     partA16();
     partA19();
+    partA20();
     partC();  // before Part B: its writer tables start empty
     partB();
     partB13();
     partB15();
+    partB20();
     std::printf("%s: on_foot_hud_probe_test, %d checks, %d failed\n", g_failures ? "FAIL" : "PASS", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

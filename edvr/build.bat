@@ -3061,9 +3061,17 @@ REM the pass forwarded unchanged and noted, the camera drain's pose, follow and 
 REM node's provider list on fake providers (read as the node's prepare reads it, checked against the frame mask: another node's
 REM context and an OR that is not the mask dropped by reason, the 65th provider only a number, an unreadable address skipping the
 REM snapshot, the shape changing with the subscription and not with the answers, counts by place, the lists and 30-second summary
-REM lines, "no snapshots" told from "providers silent"); the one write watch on the first _HUD provider's subscription (slot 2): sites
-REM by place with the camera bit, its lines, armed for real on the rig's threads, armed by the camera drain in cinema (not in stereo,
-REM where no provider gives 0x8), moved when its provider leaves the list, taken off with a line, with the key and by the fuse.
+REM lines, "no snapshots" told from "providers silent"). .20: the _HUD provider's gates on a fake record (B, its record for the
+REM node's camera and set, groups, items, parts, meshes with sections, instances and materials): the walk reads all seven gates of
+REM every path and names the first closed one (each of the seven closed alone, flags under another slot, a pass for another view with
+REM the remembered pass shown), recomputes the lists and checks them against the record's answer and the provider's (the collectors'
+REM rest named, a bit the paths give and the record has not, an answer that differs, no record, an unreadable element, the budgets,
+REM the 65th _HUD path only counted, a slot or view not believed), the census, the 30-second walks by place and the collectors' table
+REM through the real glue (one walk a second, a changed census after 5 s); the one write watch on the word of the first closed gate of
+REM a path open in cinema and closed in stereo (slot 2; 1, 4 or 8 bytes; the mesh's mask that changed, else the binding's): sites by
+REM place with whether a write opens the gate, armed for real on the rig's threads, armed by the camera drain in the first stereo
+REM walk, moved to the next closed path or taken off with a line when its path leaves the walks for 2 s, taken off with the key and by
+REM the fuse.
 if not exist "%OBJ%\onfoothudprobe" mkdir "%OBJ%\onfoothudprobe"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^

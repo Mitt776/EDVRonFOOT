@@ -67,11 +67,18 @@ ohp::PassTable g_passes;
 ohp::MaskByCamera g_masks;
 // .19: the HUD node's providers. The node draw hook reads the list after the original and keeps the answers by provider, view and place
 // in the table; a list of a new shape (or in a new place) goes to the ring for the frame thread. g_place is the frame thread's, for the
-// hook and the write watch's handler; g_hudCamBits the OR of the HUD nodes' camera bits of both views, for the handler.
+// hook and the write watch's handler.
 ohp::ProviderTable g_providers;
 ohp::Ring<4, ohp::ProviderSnap> g_providerRing;
 std::atomic<int> g_place{ohp::kPlaceShip};
-std::atomic<uint64_t> g_hudCamBits{0};
+// .20: the _HUD provider's gates. After a matched snapshot of the HUD node that lists the provider (vtable base + kProvBVtableRva) the
+// hook walks its record, at most once per g_walkEveryMs per view (g_walkAt: the tick of the view's last walk); the walk goes to the ring
+// when it matched or found no record, every walk is counted by place and result; g_hudMaterials remembers the materials that gave _HUD.
+ohp::HudMaterials g_hudMaterials;
+ohp::GateWalks g_gateWalks;
+ohp::Ring<2, ohp::GateWalk> g_gateRing;
+std::atomic<uint64_t> g_walkAt[ohp::kProvViews];
+std::atomic<uint64_t> g_walkEveryMs{ohp::kWalkEveryMs};
 
 // ---- the hook side: no lock, no allocation, no log -------------------------------------------------------------------------------
 
@@ -118,13 +125,49 @@ void remember(int kind, int32_t viewBit, uint64_t node) {
     g_cellsFull.fetch_add(1, std::memory_order_relaxed);
 }
 
+// .20: the walk of the _HUD provider's record (a few KB more on the stack than the snapshot, so a function of its own: only a walk that
+// goes pays for it). The record is found by the camera and the set of the snapshot, the provider's answer is its +0x30 in it.
+__declspec(noinline) void walkOfRecord(const ohp::ProviderSnap& s, const ohp::Provider& b, int place) {
+    ohp::GateWalk w;
+    const int result = ohp::walkHudProvider(b.addr, s.node, s.cam, s.set, b.answer, s.viewBit, s.viewSlot, place, &sehRead, nullptr, &g_hudMaterials, &w);
+    g_gateWalks.note(place, result, w.cutShort != 0);
+    if (result == ohp::kWalkMatched || result == ohp::kWalkNoRecord) g_gateRing.push(w);
+    else if (result == ohp::kWalkAnswerDiffers) g_gateWalks.noteBad(result, w.recordAnswer, w.providerAnswer, s.node);
+    else if (result == ohp::kWalkBitNotInAnswer) g_gateWalks.noteBad(result, w.recomputed, w.recordAnswer, s.node);
+    else if (result == ohp::kWalkUnbelieved) g_gateWalks.noteBad(result, w.slot, w.view, s.node);
+}
+
+// After a matched snapshot that lists the _HUD provider: at most once per g_walkEveryMs per view (a compare-and-swap on the view's tick),
+// the first time also the collectors' table.
+__declspec(noinline) void walkHudProviderOf(const ohp::ProviderSnap& s) {
+    const uintptr_t base = gameBase();
+    int at = -1;
+    for (uint32_t i = 0; i < s.stored && at < 0; ++i)
+        if (s.p[i].addr && s.p[i].vtable == base + ohp::kProvBVtableRva) at = static_cast<int>(i);
+    if (at < 0 || s.viewSlot < 0 || s.viewSlot >= ohp::kProvViews) return;
+    uint64_t now = GetTickCount64();
+    if (!now) now = 1;
+    std::atomic<uint64_t>& stamp = g_walkAt[s.viewSlot];
+    uint64_t last = stamp.load(std::memory_order_relaxed);
+    if (last != 0 && now - last < g_walkEveryMs.load(std::memory_order_relaxed)) return;
+    if (!stamp.compare_exchange_strong(last, now, std::memory_order_relaxed)) return;
+    if (!g_gateWalks.collectorsDone()) {
+        uint64_t fn[ohp::kCollectors];
+        int32_t offset[ohp::kCollectors];
+        if (ohp::readCollectors(&sehRead, nullptr, base, fn, offset) && g_gateWalks.claimCollectors()) g_gateWalks.publishCollectors(fn, offset);
+    }
+    walkOfRecord(s, s.p[at], static_cast<int>(s.place));
+}
+
 // .19, the HUD node only, after its draw: its context is still prepared for it, so the providers' answers are this node's. The snapshot
 // (a few KB on the stack, filled by the reader) goes in the table when it matches; only a list of a new shape or a new place is copied
 // into the ring.
 __declspec(noinline) void providersOfHudNode(void* node) {
     ohp::ProviderSnap s;
     const int result = ohp::readProviders(reinterpret_cast<uint64_t>(node), &sehRead, nullptr, &s);
-    if (g_providers.take(result, s, g_place.load(std::memory_order_relaxed))) g_providerRing.push(s);
+    const bool fresh = g_providers.take(result, s, g_place.load(std::memory_order_relaxed));
+    if (fresh) g_providerRing.push(s);
+    if (result == ohp::kSnapOk) walkHudProviderOf(s);
 }
 
 // After the original: a list's models may be handed in during the draw itself (0x594EF0's first loop), so before it would read empty.
@@ -231,12 +274,17 @@ const void* hookFor(int point) {
 }
 
 // ---- the write watches: the handler side (any thread; no lock, no allocation, no log) ----------------------------------------------
-// .19: slot 2 the subscription (+0x28) of the first HUD provider (ohp::kWatchSlot): the same technique as native_vr_probe.cpp's writer
-// watch (slot 1). Slot 3 is free again.
+// .20: slot 2 the word of the first closed gate of a _HUD path (ohp::kWatchSlot): the same technique as native_vr_probe.cpp's writer
+// watch (slot 1). Slot 3 is free. The handler reads the value (g_watchLength bytes), and whether it opens the gate: a flag, a pass or a
+// byte when it is not 0, a mask (g_watchMask) when it meets g_gateOther, the other mask the frame thread publishes.
 
 std::atomic<uintptr_t> g_watchAddress[ohp::kWatchCount];
 std::atomic<uintptr_t> g_watchPrevious[ohp::kWatchCount];
 std::atomic<bool> g_watchActive[ohp::kWatchCount];
+std::atomic<unsigned> g_watchLength[ohp::kWatchCount];
+std::atomic<int> g_watchGate[ohp::kWatchCount];
+std::atomic<bool> g_watchMask[ohp::kWatchCount];
+std::atomic<uint64_t> g_gateOther{0};
 ohp::SiteTable g_sites[ohp::kWatchCount];
 
 DWORD64& slotRegister(CONTEXT* c, unsigned slot) { return slot == 2 ? c->Dr2 : c->Dr3; }
@@ -288,18 +336,18 @@ LONG CALLBACK watchHandler(EXCEPTION_POINTERS* ep) {
             dr = 0;
             return EXCEPTION_CONTINUE_EXECUTION;
         }
-        // The whole subscription (the watch covers its low half, the bits of both PostGUI cameras among them), and whether it carries a
-        // bit of the HUD nodes' cameras.
+        // The watched word as written (its length, 1, 4 or 8 bytes), and whether it opens the gate.
         uint64_t value = 0;
-        sehRead(nullptr, address, &value, 8);
+        const unsigned length = g_watchLength[f].load(std::memory_order_relaxed);
+        sehRead(nullptr, address, &value, length < 8 ? length : 8);
         const int place = g_place.load(std::memory_order_relaxed);
-        const bool camBit = (value & g_hudCamBits.load(std::memory_order_relaxed)) != 0;
+        const bool opens = ohp::gateOpens(g_watchMask[f].load(std::memory_order_relaxed), value, g_gateOther.load(std::memory_order_relaxed));
         bool fresh = false;
-        const int row = g_sites[f].record(static_cast<uint64_t>(c->Rip), place, value, camBit, &fresh);
+        const int row = g_sites[f].record(static_cast<uint64_t>(c->Rip), place, value, opens, &fresh);
         if (fresh) {
             uint64_t stack[ohp::kStackFrames] = {};
             const int frames = sehUnwind(c, stack);
-            g_sites[f].publish(row, GetCurrentThreadId(), place, value, camBit, stack, frames);
+            g_sites[f].publish(row, GetCurrentThreadId(), place, value, opens, stack, frames);
         }
         return EXCEPTION_CONTINUE_EXECUTION;
     }
@@ -313,7 +361,7 @@ enum : int { kDrFailed = 0, kDrDone = 1, kDrSkipped = 2 };
 // One slot on one thread, from OUTSIDE that thread (a running thread's own debug registers cannot be set by itself): suspend, read,
 // change only that slot, write, resume. Arming leaves a thread whose slot someone else holds alone; disarming touches only a slot that
 // still holds our address.
-int setThreadWatch(DWORD tid, unsigned slot, uintptr_t address, bool arm) noexcept {
+int setThreadWatch(DWORD tid, unsigned slot, uintptr_t address, unsigned length, bool arm) noexcept {
     HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, tid);
     if (!h) return kDrFailed;
     int result = kDrFailed;
@@ -330,7 +378,7 @@ int setThreadWatch(DWORD tid, unsigned slot, uintptr_t address, bool arm) noexce
                     result = kDrSkipped;
                 } else {
                     dr = address;
-                    ctx.Dr7 = high | dr7::armSlotDr7(low, slot, dr7::kDr7RwWrite, dr7::kDr7Len4Bytes);
+                    ctx.Dr7 = high | dr7::armSlotDr7(low, slot, dr7::kDr7RwWrite, ohp::drLengthCode(length));
                     result = SetThreadContext(h, &ctx) ? kDrDone : kDrFailed;
                 }
             } else if (ours) {
@@ -352,17 +400,18 @@ struct DrJob {
     DWORD tid;
     unsigned slot;
     uintptr_t address;
+    unsigned length;
     bool arm;
     int result;
 };
 DWORD WINAPI drHelper(void* p) {
     auto* job = static_cast<DrJob*>(p);
-    job->result = setThreadWatch(job->tid, job->slot, job->address, job->arm);
+    job->result = setThreadWatch(job->tid, job->slot, job->address, job->length, job->arm);
     return 0;
 }
-int setThreadWatchSafe(DWORD tid, unsigned slot, uintptr_t address, bool arm) noexcept {
-    if (tid != GetCurrentThreadId()) return setThreadWatch(tid, slot, address, arm);
-    DrJob job{tid, slot, address, arm, kDrFailed};
+int setThreadWatchSafe(DWORD tid, unsigned slot, uintptr_t address, unsigned length, bool arm) noexcept {
+    if (tid != GetCurrentThreadId()) return setThreadWatch(tid, slot, address, length, arm);
+    DrJob job{tid, slot, address, length, arm, kDrFailed};
     HANDLE h = CreateThread(nullptr, 0, &drHelper, &job, 0, nullptr);
     if (!h) return kDrFailed;
     const bool done = WaitForSingleObject(h, 5000) == WAIT_OBJECT_0;
@@ -373,7 +422,7 @@ int setThreadWatchSafe(DWORD tid, unsigned slot, uintptr_t address, bool arm) no
 constexpr size_t kWatchThreads = 1024;
 DWORD g_watchTids[ohp::kWatchCount][kWatchThreads];
 size_t g_watchTidCount[ohp::kWatchCount] = {};
-uint64_t g_watchObject[ohp::kWatchCount] = {};  // the watched provider, for the lines
+uint64_t g_watchObject[ohp::kWatchCount] = {};  // the structure the watched word is a field of, for the lines
 PVOID g_watchHandler = nullptr;
 
 void say(OnFootHudProbeSink sink, void* ctx, int n, const char* line) {
@@ -538,20 +587,28 @@ void onFootHudProbeSetRecording(bool on) { g_recording.store(on, std::memory_ord
 uint64_t onFootHudProbeCalls() { return g_calls.load(std::memory_order_relaxed); }
 uint64_t onFootHudProbeFaults() { return g_faults.load(std::memory_order_relaxed); }
 
-int onFootHudProbeWatchArm(int watch, uintptr_t address, uint64_t object, const char* note, OnFootHudProbeSink sink, void* ctx) {
+int onFootHudProbeWatchArm(int watch, const OnFootHudProbeGateWatch& target, OnFootHudProbeSink sink, void* ctx) {
     char line[400];
+    const uintptr_t address = target.address;
+    const uint64_t object = target.object;
+    const char* const note = target.note;
     if (watch < 0 || watch >= ohp::kWatchCount || g_watchTidCount[watch] || !address) return 0;
-    if (address & 3) {
-        say(sink, ctx, ohp::formatWatchNotOn(watch, address, "the address is not 4-aligned", line, sizeof(line)), line);
+    const char* const name = ohp::watchName(target.gate);
+    if ((target.length != 1 && target.length != 4 && target.length != 8) || (address & (target.length - 1))) {
+        say(sink, ctx, ohp::formatWatchNotOn(name, address, "the address is not aligned to its length (1, 4 or 8 bytes)", line, sizeof(line)), line);
         return 0;
     }
     if (!g_watchHandler) g_watchHandler = AddVectoredExceptionHandler(1, &watchHandler);
     if (!g_watchHandler) {
-        say(sink, ctx, ohp::formatWatchNotOn(watch, address, "the exception handler could not be added", line, sizeof(line)), line);
+        say(sink, ctx, ohp::formatWatchNotOn(name, address, "the exception handler could not be added", line, sizeof(line)), line);
         return 0;
     }
     const unsigned slot = ohp::kWatchSlot[watch];
-    // The handler must know the address before the first thread can trap on it.
+    // The handler must know the address, the length and the gate before the first thread can trap on it.
+    g_watchLength[watch].store(target.length, std::memory_order_release);
+    g_watchGate[watch].store(target.gate, std::memory_order_release);
+    g_watchMask[watch].store(target.mask, std::memory_order_release);
+    g_gateOther.store(target.other, std::memory_order_release);
     const uintptr_t was = g_watchAddress[watch].exchange(address, std::memory_order_acq_rel);
     if (was && was != address) g_watchPrevious[watch].store(was, std::memory_order_release);
     g_watchActive[watch].store(true, std::memory_order_release);
@@ -559,7 +616,7 @@ int onFootHudProbeWatchArm(int watch, uintptr_t address, uint64_t object, const 
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
     if (snap == INVALID_HANDLE_VALUE) {
         g_watchActive[watch].store(false, std::memory_order_release);
-        say(sink, ctx, ohp::formatWatchNotOn(watch, address, "the process's threads could not be listed", line, sizeof(line)), line);
+        say(sink, ctx, ohp::formatWatchNotOn(name, address, "the process's threads could not be listed", line, sizeof(line)), line);
         return 0;
     }
     uint32_t armed = 0, skipped = 0, failed = 0;
@@ -572,7 +629,7 @@ int onFootHudProbeWatchArm(int watch, uintptr_t address, uint64_t object, const 
             ++failed;
             continue;
         }
-        const int r = setThreadWatchSafe(te.th32ThreadID, slot, address, true);
+        const int r = setThreadWatchSafe(te.th32ThreadID, slot, address, target.length, true);
         if (r == kDrDone) {
             g_watchTids[watch][g_watchTidCount[watch]++] = te.th32ThreadID;
             ++armed;
@@ -587,10 +644,10 @@ int onFootHudProbeWatchArm(int watch, uintptr_t address, uint64_t object, const 
         g_watchActive[watch].store(false, std::memory_order_release);
         char why[160];
         std::snprintf(why, sizeof(why), "no thread took it (%u skipped, %u could not be set)", skipped, failed);
-        say(sink, ctx, ohp::formatWatchNotOn(watch, address, why, line, sizeof(line)), line);
+        say(sink, ctx, ohp::formatWatchNotOn(name, address, why, line, sizeof(line)), line);
         return 0;
     }
-    say(sink, ctx, ohp::formatWatchOn(watch, address, object, armed, skipped, failed, note, line, sizeof(line)), line);
+    say(sink, ctx, ohp::formatWatchOn(name, address, object, target.length, slot, armed, skipped, failed, note, line, sizeof(line)), line);
     return static_cast<int>(armed);
 }
 
@@ -606,7 +663,8 @@ void onFootHudProbeWatchDrain(int watch, OnFootHudProbeSink sink, void* ctx) {
     int row = 0;
     while (g_sites[watch].nextUnsaid(&row))
         say(sink, ctx,
-            ohp::formatWriter(watch, row, g_sites[watch].site(row), g_watchObject[watch], g_base.load(std::memory_order_relaxed),
+            ohp::formatWriter(ohp::watchName(g_watchGate[watch].load(std::memory_order_acquire)), row, g_sites[watch].site(row), g_watchObject[watch],
+                              g_base.load(std::memory_order_relaxed),
                               g_imageSize.load(std::memory_order_relaxed), line, sizeof(line)),
             line);
 }
@@ -615,12 +673,14 @@ void onFootHudProbeWatchDisarm(int watch, const char* why, OnFootHudProbeSink si
     if (!onFootHudProbeWatchOn(watch)) return;
     const unsigned slot = ohp::kWatchSlot[watch];
     const uintptr_t address = g_watchAddress[watch].load(std::memory_order_acquire);
-    for (size_t i = 0; i < g_watchTidCount[watch]; ++i) setThreadWatchSafe(g_watchTids[watch][i], slot, address, false);
+    const unsigned length = g_watchLength[watch].load(std::memory_order_acquire);
+    for (size_t i = 0; i < g_watchTidCount[watch]; ++i) setThreadWatchSafe(g_watchTids[watch][i], slot, address, length, false);
     g_watchTidCount[watch] = 0;
     g_watchActive[watch].store(false, std::memory_order_release);
     onFootHudProbeWatchDrain(watch, sink, ctx);
     char line[400];
-    say(sink, ctx, ohp::formatWatchOff(watch, address, why, g_sites[watch], line, sizeof(line)), line);
+    say(sink, ctx, ohp::formatWatchOff(ohp::watchName(g_watchGate[watch].load(std::memory_order_acquire)), address, why, g_sites[watch], line, sizeof(line)),
+        line);
 }
 
 void onFootHudProbeStopWatches(const char* why, OnFootHudProbeSink sink, void* ctx) {
@@ -629,8 +689,8 @@ void onFootHudProbeStopWatches(const char* why, OnFootHudProbeSink sink, void* c
 
 namespace {
 
-// The frame thread's side of the graph: the cells' new nodes and graphs, each cell's state, the events (the providers and the watch are
-// .19's, drainProviders below).
+// The frame thread's side of the graph: the cells' new nodes and graphs, each cell's state, the events (the providers are .19's and the
+// gates and the watch .20's, drainProviders and drainGates below).
 void drainGraph(uint64_t nowMs, int onFoot, OnFootHudProbeSink sink, void* ctx) {
     static ohp::StateLog stateLog;
     static ohp::GraphSummary summary;
@@ -693,35 +753,252 @@ void drainGraph(uint64_t nowMs, int onFoot, OnFootHudProbeSink sink, void* ctx) 
     const ohp::GraphCounts total{g_walks.load(std::memory_order_relaxed), g_idleWalks.load(std::memory_order_relaxed),
                                  g_walkFaults.load(std::memory_order_relaxed), g_graphPostGui.load(std::memory_order_relaxed),
                                  g_graphOther.load(std::memory_order_relaxed), g_events.dropped(),
-                                 g_sites[ohp::kWatchSubscription].hits(), stateLog.held()};
+                                 g_sites[ohp::kWatchGate].hits(), stateLog.held()};
     say(sink, ctx, summary.step(nowMs, total, views, nViews, line, sizeof(line)), line);
 }
 
-// .19, from the camera drain: the HUD node's providers and the subscription watch. Every frame: the place and the HUD nodes' camera
-// bits for the hook and the handler, the lists the ring brought (a view's at most every 5 s, the latest kept), the first snapshot that
-// did not match, the new writers' lines, the watch's 30-second line while it is on, the fuse. Every 30 s: the providers' summary. The
-// watch takes the subscription of the first provider that answered with 0x8 (view 0's, the pass's, when it has one); it comes off, with
-// a line, when that provider stays out of its view's list for 2 s, and is re-armed when the journal's on-foot changes (threads started
-// since).
-void drainProviders(uint64_t nowMs, int onFoot, int stereo, uint64_t pass0, OnFootHudProbeSink sink, void* ctx) {
+// .20, from drainProviders: the _HUD provider's gates and the gate watch. Every frame: the walks the ring brought (the latest matched one
+// of each view is kept, a cinema walk also gives each _HUD path's cinema state: its first closed gate and its mesh's mask), each view's
+// census when its picture changed (a view's at most every 5 s, the latest pending one kept), the first walk that did not match and the
+// collectors' table, once. Every 30 s: the walks by place. The watch takes the first _HUD path that was open in cinema and is closed in a
+// matched stereo walk: the word of its first closed gate (ohp::gateWatchTarget). It comes off, with a line, when the path stays out of
+// its view's walks for 2 s while the view's HUD node keeps being drawn (a replacement is named when there is one), when the journal's
+// on-foot changes (it is armed again for the threads started since), with the key, and for good after 100 000 hits in 30 s.
+struct CinemaPath {
+    uint64_t mesh = 0, material = 0, meshMask = 0;
+    uint32_t section = 0;
+    uint8_t closed = 0;
+};
+
+void drainGates(uint64_t nowMs, int onFoot, OnFootHudProbeSink sink, void* ctx) {
+    static ohp::GateSummary summary;
     static ohp::Fuse fuse;
     static ohp::WatchSummary watchSummary;
+    static ohp::GateWalk rec;
+    static ohp::GateWalk pending[ohp::kProvViews], lastMatched[ohp::kProvViews];
+    static bool hasPending[ohp::kProvViews] = {}, hasMatched[ohp::kProvViews] = {}, saidView[ohp::kProvViews] = {};
+    static uint64_t saidPicture[ohp::kProvViews] = {}, saidMs[ohp::kProvViews] = {}, matchedMs[ohp::kProvViews] = {};
+    static uint64_t lastSnaps[ohp::kProvViews] = {}, lastGrowMs[ohp::kProvViews] = {};
+    static int saidPlace[ohp::kProvViews] = {};
+    static CinemaPath cinema[2 * ohp::kMaxHudPaths];
+    static int cinemaUsed = 0, cinemaNext = 0;
+    static bool seenCinema = false, seenStereo = false, differed = false, fused = false;
+    // The watch: its path (mesh, section, material) and view, which mask it is met against (0 none, 1 the binding's, 2 the mesh's), when the
+    // path was last seen, the matched walks of its view without it since, the address no thread took, the last path with nothing to watch.
+    static bool watched = false;
+    static int watchedView = -1, otherKind = 0, absent = 0;
+    static uint64_t watchedMesh = 0, watchedMaterial = 0, seenMs = 0, refused = 0, noTarget = 0;
+    static uint32_t watchedSection = 0;
+    static int lastOnFoot = -2;
+    constexpr uint64_t kStereoFreshMs = 3000, kNotDrawnMs = 500;
+    char line[1600];
+    const uintptr_t base = g_base.load(std::memory_order_relaxed);
+    const uint64_t imageSize = g_imageSize.load(std::memory_order_relaxed);
+    const int w = ohp::kWatchGate;
+    const int place = g_place.load(std::memory_order_relaxed);
+    if (watched && !onFootHudProbeWatchOn(w)) watched = false;  // taken off from outside: the key, the fuse
+
+    const auto cinemaOf = [&](const ohp::HudPath& p) -> const CinemaPath* {
+        for (int c = 0; c < cinemaUsed; ++c)
+            if (cinema[c].mesh == p.mesh && cinema[c].section == p.section && cinema[c].material == p.material) return &cinema[c];
+        return nullptr;
+    };
+    const auto noteCinema = [&](const ohp::GateWalk& walk) {
+        for (uint32_t i = 0; i < walk.stored; ++i) {
+            const ohp::HudPath& p = walk.path[i];
+            CinemaPath* at = const_cast<CinemaPath*>(cinemaOf(p));
+            if (!at) {
+                if (cinemaUsed < 2 * ohp::kMaxHudPaths) {
+                    at = &cinema[cinemaUsed++];
+                } else {
+                    at = &cinema[cinemaNext];
+                    cinemaNext = (cinemaNext + 1) % (2 * ohp::kMaxHudPaths);
+                }
+                at->mesh = p.mesh;
+                at->section = p.section;
+                at->material = p.material;
+            }
+            at->closed = p.closed;
+            at->meshMask = p.meshMask;
+        }
+    };
+
+    // The walks: each matched one is the view's latest, a cinema one gives the paths' cinema state, and the watched path is seen in it or
+    // not; a census is pending when the picture or the place is not the one written last.
+    while (g_gateRing.pop(&rec)) {
+        const int v = rec.viewSlot;
+        if (v < 0 || v >= ohp::kProvViews) continue;
+        if (rec.result == ohp::kWalkMatched) {
+            lastMatched[v] = rec;
+            hasMatched[v] = true;
+            matchedMs[v] = nowMs;
+            if (rec.place == static_cast<uint32_t>(ohp::kPlaceCinema)) {
+                noteCinema(rec);
+                seenCinema = true;
+            }
+            if (rec.place == static_cast<uint32_t>(ohp::kPlaceStereo)) seenStereo = true;
+            if (watched && v == watchedView) {
+                const ohp::HudPath* found = nullptr;
+                for (uint32_t i = 0; i < rec.stored && !found; ++i)
+                    if (rec.path[i].mesh == watchedMesh && rec.path[i].section == watchedSection && rec.path[i].material == watchedMaterial) found = &rec.path[i];
+                if (found) {
+                    seenMs = nowMs;
+                    absent = 0;
+                    if (otherKind == 1) onFootHudProbeSetGateOther(rec.bindingMask);
+                    else if (otherKind == 2) onFootHudProbeSetGateOther(found->meshMask);
+                } else {
+                    ++absent;
+                }
+            }
+        }
+        if (!saidView[v] || ohp::gatePicture(rec) != saidPicture[v] || static_cast<int>(rec.place) != saidPlace[v]) {
+            pending[v] = rec;
+            hasPending[v] = true;
+        } else {
+            hasPending[v] = false;
+        }
+    }
+    for (int v = 0; v < ohp::kProvViews; ++v) {
+        if (!hasPending[v] || (saidView[v] && nowMs - saidMs[v] < ohp::kGateLineMs)) continue;
+        hasPending[v] = false;
+        saidView[v] = true;
+        saidMs[v] = nowMs;
+        saidPicture[v] = ohp::gatePicture(pending[v]);
+        saidPlace[v] = static_cast<int>(pending[v].place);
+        if (pending[v].result == ohp::kWalkNoRecord) {
+            say(sink, ctx, ohp::formatGateNoRecord(pending[v], line, sizeof(line)), line);
+            continue;
+        }
+        say(sink, ctx, ohp::formatGateHead(pending[v], line, sizeof(line)), line);
+        for (uint32_t i = 0; i < pending[v].stored && i < static_cast<uint32_t>(ohp::kCensusPaths); ++i)
+            say(sink, ctx, ohp::formatGatePath(pending[v], i, line, sizeof(line)), line);
+    }
+    int result = 0;
+    uint64_t badA = 0, badB = 0, badNode = 0;
+    if (g_gateWalks.nextBad(&result, &badA, &badB, &badNode)) say(sink, ctx, ohp::formatGateBad(result, badA, badB, badNode, line, sizeof(line)), line);
+    uint64_t fn[ohp::kCollectors];
+    int32_t offset[ohp::kCollectors];
+    if (g_gateWalks.nextCollectors(fn, offset)) say(sink, ctx, ohp::formatGateCollectors(fn, offset, base, imageSize, line, sizeof(line)), line);
+
+    // The summary: the window's walks by place, each view's last matched walk by gate, and, when both places had matched walks and none
+    // of their paths was open in cinema and closed in stereo, that.
+    uint64_t seconds = 0;
+    ohp::GateCounts window[ohp::kPlaces];
+    const int due = summary.step(nowMs, g_gateWalks, &seconds, window);
+    if (due) {
+        uint64_t walks = 0;
+        for (const ohp::GateCounts& c : window) walks += c.sum();
+        say(sink, ctx, ohp::formatGateSummaryHead(seconds, walks, g_gateRing.dropped(), line, sizeof(line)), line);
+        for (int p = 0; p < ohp::kPlaces; ++p)
+            if (window[p].sum()) say(sink, ctx, ohp::formatGateSummaryPlace(p, window[p], line, sizeof(line)), line);
+        for (int v = 0; v < ohp::kProvViews; ++v)
+            if (hasMatched[v]) say(sink, ctx, ohp::formatGateSummaryView(lastMatched[v], line, sizeof(line)), line);
+        if (seenCinema && seenStereo && !differed) say(sink, ctx, ohp::formatNoGateDifference(line, sizeof(line)), line);
+    }
+
+    // The watch. A view's HUD node is being drawn while its snapshots grow; a path's absence counts only then.
+    for (int v = 0; v < ohp::kProvViews; ++v) {
+        const uint64_t snaps = g_providers.view(v).snaps.load(std::memory_order_relaxed);
+        if (snaps != lastSnaps[v]) {
+            lastSnaps[v] = snaps;
+            lastGrowMs[v] = nowMs;
+        }
+    }
+    const bool rearm = lastOnFoot != -2 && onFoot != lastOnFoot;
+    lastOnFoot = onFoot;
+    struct Candidate {
+        int view = -1;
+        uint32_t index = 0;
+        ohp::GateTarget t;
+    };
+    // The first path that was open in cinema and is closed in the latest matched stereo walk of a view.
+    const auto findCandidate = [&](Candidate* c) {
+        for (int v = 0; v < ohp::kProvViews; ++v) {
+            if (!hasMatched[v] || lastMatched[v].place != static_cast<uint32_t>(ohp::kPlaceStereo) || nowMs - matchedMs[v] > kStereoFreshMs) continue;
+            for (uint32_t i = 0; i < lastMatched[v].stored; ++i) {
+                const ohp::HudPath& p = lastMatched[v].path[i];
+                const CinemaPath* before = p.closed != ohp::kGateOpen ? cinemaOf(p) : nullptr;
+                if (!before || before->closed != ohp::kGateOpen) continue;
+                differed = true;
+                const int r = ohp::gateWatchTarget(lastMatched[v], p, before->meshMask, &c->t);
+                if (r == 0) {
+                    c->view = v;
+                    c->index = i;
+                    return true;
+                }
+                const uint64_t key = p.mesh ^ (static_cast<uint64_t>(p.section) << 56) ^ p.material;
+                if (r == 2 && key != noTarget) {
+                    noTarget = key;
+                    char why[100];
+                    std::snprintf(why, sizeof(why), "the section has no instance with a mask to watch (path of mesh 0x%llX section %u)",
+                                  static_cast<unsigned long long>(p.mesh), p.section);
+                    say(sink, ctx, ohp::formatWatchNotOn(ohp::watchName(p.closed), 0, why, line, sizeof(line)), line);
+                }
+            }
+        }
+        return false;
+    };
+    if (watched && onFootHudProbeWatchOn(w)) {
+        const uintptr_t at = onFootHudProbeWatchAddress(w);
+        if (nowMs - lastGrowMs[watchedView] >= kNotDrawnMs) seenMs = nowMs;  // not drawn lately: absence is not measured
+        if (absent >= 1 && nowMs - seenMs >= ohp::kGateStaleMs) {
+            Candidate c;
+            if (!fused && place == ohp::kPlaceStereo && findCandidate(&c) && c.t.address != at) {
+                const char* const name = ohp::watchName(g_watchGate[w].load(std::memory_order_acquire));
+                say(sink, ctx, ohp::formatWatchMoves(name, at, c.t.address, line, sizeof(line)), line);
+                onFootHudProbeWatchDisarm(w, "its path left its view's walks", sink, ctx);
+            } else {
+                onFootHudProbeWatchDisarm(w, "the path has been out of its view's walks for 2 s", sink, ctx);
+            }
+            watched = false;
+        } else if (rearm) {
+            onFootHudProbeWatchDisarm(w, "on foot changed: re-armed for threads started since", sink, ctx);
+            watched = false;
+        }
+    }
+    if (!fused && !onFootHudProbeWatchOn(w) && place == ohp::kPlaceStereo) {
+        Candidate c;
+        if (findCandidate(&c) && (c.t.address != refused || rearm)) {
+            const OnFootHudProbeGateWatch target{c.t.gate, static_cast<uintptr_t>(c.t.address), c.t.length, c.t.mask, c.t.other, c.t.object, c.t.note};
+            if (onFootHudProbeWatchArm(w, target, sink, ctx)) {
+                const ohp::HudPath& p = lastMatched[c.view].path[c.index];
+                watched = true;
+                watchedView = c.view;
+                watchedMesh = p.mesh;
+                watchedSection = p.section;
+                watchedMaterial = p.material;
+                otherKind = !c.t.mask ? 0 : (c.t.gate == ohp::kGateMeshMask && c.t.object == lastMatched[c.view].binding) ? 2 : 1;
+                seenMs = nowMs;
+                absent = 0;
+            } else {
+                refused = c.t.address;
+            }
+        }
+    }
+    onFootHudProbeWatchDrain(w, sink, ctx);
+    if (onFootHudProbeWatchOn(w))
+        say(sink, ctx,
+            watchSummary.step(nowMs, ohp::watchName(g_watchGate[w].load(std::memory_order_acquire)), onFootHudProbeWatchAddress(w), g_sites[w], line,
+                              sizeof(line)),
+            line);
+    if (!fused && fuse.step(nowMs, g_sites[w].hits())) {
+        fused = true;
+        watched = false;
+        onFootHudProbeStopWatches("over 100000 hits in 30 s: the place is written all the time; the watch stays off", sink, ctx);
+    }
+}
+
+// .19, from the camera drain: the HUD node's providers. Every frame: the place for the hook and the handler, the lists the ring brought (a
+// view's at most every 5 s, the latest kept), the first snapshot that did not match; every 30 s the providers' summary; then .20's gates.
+void drainProviders(uint64_t nowMs, int onFoot, int stereo, OnFootHudProbeSink sink, void* ctx) {
     static ohp::ProviderSummary summary;
     static ohp::ProviderSnap pending[ohp::kProvViews];
     static bool hasPending[ohp::kProvViews] = {}, saidView[ohp::kProvViews] = {};
     static uint64_t saidMs[ohp::kProvViews] = {};
-    // Per row: its frames when last looked at, when they last grew (or its view was last not read), and its view's snapshots then.
-    static uint64_t seenFrames[ohp::kProvRows] = {}, seenMs[ohp::kProvRows] = {}, seenViewSnaps[ohp::kProvRows] = {};
-    static int targetRow = -1;
-    static uint64_t refused = 0;
-    static bool fused = false;
-    static int lastOnFoot = -2;
     char line[1600];
     const uintptr_t base = g_base.load(std::memory_order_relaxed);
     const uint64_t imageSize = g_imageSize.load(std::memory_order_relaxed);
-    const int w = ohp::kWatchSubscription;
     g_place.store(ohp::placeOf(onFoot, stereo), std::memory_order_relaxed);
-    g_hudCamBits.store(g_providers.camBits(), std::memory_order_relaxed);
 
     // The lists: a view's latest waits for its 5 seconds.
     ohp::ProviderSnap rec;
@@ -755,80 +1032,7 @@ void drainProviders(uint64_t nowMs, int onFoot, int stereo, uint64_t pass0, OnFo
         }
         if (g_providers.matched() > 0 && !g_providers.hudSeen()) say(sink, ctx, ohp::formatNoHudProvider(line, sizeof(line)), line);
     }
-
-    // The rows still in their view's list: a row whose frames grew is seen now. A row is out of its list only while its view's HUD node
-    // keeps being read without it: while the node is not read at all (a loading screen, the very moment a subscription may be rewritten)
-    // nothing goes stale.
-    const uint64_t stamp = nowMs ? nowMs : 1;
-    for (int i = 0; i < ohp::kProvRows; ++i) {
-        const auto& r = g_providers.rowAt(i);
-        if (!r.key.load(std::memory_order_acquire)) continue;
-        const int v = ohp::ProviderTable::rowView(r);
-        const uint64_t viewSnaps = v >= 0 && v < ohp::kProvViews ? g_providers.view(v).snaps.load(std::memory_order_relaxed) : 0;
-        uint64_t total = 0;
-        for (int p = 0; p < ohp::kPlaces; ++p) total += r.frames[p].load(std::memory_order_relaxed);
-        if (!seenMs[i] || total != seenFrames[i] || viewSnaps == seenViewSnaps[i]) {
-            seenFrames[i] = total;
-            seenMs[i] = stamp;  // grew, or its view was not read since the last frame: absence is not measured
-        }
-        seenViewSnaps[i] = viewSnaps;
-    }
-    const auto inList = [&](int i) { return seenMs[i] != 0 && nowMs - seenMs[i] < ohp::kProvStaleMs; };
-
-    // The first provider with 0x8 still in its list: view 0's (the view whose HUD node was drawn with the pass's PostGUI camera) first,
-    // else any view's.
-    uint64_t postCam = 0;
-    const bool passKnown = pass0 && sehRead(nullptr, pass0 + ohp::kPassPostGuiCamera, &postCam, sizeof(postCam)) && postCam;
-    int best = -1, bestPass = -1;
-    uint64_t bestSeq = 0, bestPassSeq = 0;
-    for (int i = 0; i < ohp::kProvRows; ++i) {
-        const auto& r = g_providers.rowAt(i);
-        const uint64_t seq = r.hudSeq.load(std::memory_order_relaxed);
-        if (!r.key.load(std::memory_order_acquire) || !seq || !inList(i)) continue;
-        const int v = ohp::ProviderTable::rowView(r);
-        if (passKnown && v >= 0 && v < ohp::kProvViews && g_providers.view(v).cam.load(std::memory_order_relaxed) == postCam &&
-            (bestPass < 0 || seq < bestPassSeq)) {
-            bestPass = i;
-            bestPassSeq = seq;
-        }
-        if (best < 0 || seq < bestSeq) {
-            best = i;
-            bestSeq = seq;
-        }
-    }
-    const int pick = bestPass >= 0 ? bestPass : best;
-    const uintptr_t pickAt = pick >= 0 ? static_cast<uintptr_t>(ohp::ProviderTable::rowAddress(g_providers.rowAt(pick)) + ohp::watchOffset(w)) : 0;
-
-    const bool rearm = lastOnFoot != -2 && onFoot != lastOnFoot;
-    lastOnFoot = onFoot;
-    if (onFootHudProbeWatchOn(w)) {
-        const uintptr_t at = onFootHudProbeWatchAddress(w);
-        if (targetRow < 0 || !inList(targetRow)) {
-            if (pickAt && pickAt != at) {
-                say(sink, ctx, ohp::formatWatchMoves(w, at, pickAt, line, sizeof(line)), line);
-                onFootHudProbeWatchDisarm(w, "its provider left its view's list", sink, ctx);
-            } else {
-                onFootHudProbeWatchDisarm(w, "the provider has been out of its view's list for 2 s", sink, ctx);
-            }
-            targetRow = -1;
-        } else if (rearm) {
-            onFootHudProbeWatchDisarm(w, "on foot changed: re-armed for threads started since", sink, ctx);
-        }
-    }
-    if (!fused && !onFootHudProbeWatchOn(w) && pickAt && (pickAt != refused || rearm)) {
-        char note[200];
-        ohp::formatWatchTarget(g_providers.viewBitOf(ohp::ProviderTable::rowView(g_providers.rowAt(pick))), bestPass >= 0 ? 1 : passKnown ? 0 : -1, note,
-                               sizeof(note));
-        if (onFootHudProbeWatchArm(w, pickAt, pickAt - ohp::watchOffset(w), note, sink, ctx)) targetRow = pick;
-        else refused = pickAt;
-    }
-    onFootHudProbeWatchDrain(w, sink, ctx);
-    if (onFootHudProbeWatchOn(w))
-        say(sink, ctx, watchSummary.step(nowMs, w, onFootHudProbeWatchAddress(w), g_sites[w], line, sizeof(line)), line);
-    if (!fused && fuse.step(nowMs, g_sites[w].hits())) {
-        fused = true;
-        onFootHudProbeStopWatches("over 100000 hits in 30 s: the place is written all the time; the watch stays off", sink, ctx);
-    }
+    drainGates(nowMs, onFoot, sink, ctx);
 }
 
 }  // namespace
@@ -985,19 +1189,13 @@ void onFootHudProbeCameraDrain(uint64_t nowMs, int onFoot, int stereo, const flo
         window = ohp::SwitchWindow{};
     }
 
-    // .19: the providers and the watch, on view 0's pass called within the last second.
-    uint64_t pass0 = 0;
-    for (const Track& t : track) {
-        int32_t view = -1;
-        if (!t.pass || nowMs - t.calledMs > ohp::kCalledMs || !sehRead(nullptr, t.pass + ohp::kPassView, &view, sizeof(view)) || view != 0) continue;
-        pass0 = t.pass;
-        break;
-    }
-    drainProviders(nowMs, onFoot, stereo, pass0, sink, ctx);
+    // .19 and .20: the providers, the _HUD provider's gates and the gate watch.
+    drainProviders(nowMs, onFoot, stereo, sink, ctx);
 }
 
 void onFootHudProbeSetPlace(int place) { g_place.store(place, std::memory_order_relaxed); }
-void onFootHudProbeSetCameraBits(uint64_t bits) { g_hudCamBits.store(bits, std::memory_order_relaxed); }
+void onFootHudProbeSetGateOther(uint64_t other) { g_gateOther.store(other, std::memory_order_release); }
+void onFootHudProbeSetWalkInterval(uint64_t ms) { g_walkEveryMs.store(ms, std::memory_order_relaxed); }
 
 void onFootHudProbeFrameBoundary() {
     static uint32_t generation = ~0u;

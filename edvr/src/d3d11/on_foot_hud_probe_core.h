@@ -4,8 +4,9 @@
 // build-334473 identity and prologue, the fields of the game's objects, which node is ours, the snapshot taken through a reader the
 // caller supplies, the ring from the game's threads to the frame thread, the filter that writes a node only when it changed, the
 // 30-second summary and the text of every line. .19 adds the HUD node's provider list (read the way the node's prepare reads it,
-// checked against the frame mask, kept in a lock-free table by provider, view and place) and the write watch on one provider's
-// subscription (".19: the HUD node's providers and the subscription watch" below).
+// checked against the frame mask, kept in a lock-free table by provider, view and place) (".19: the HUD node's providers" below). .20
+// walks the _HUD provider's record for the node's camera, reads every gate of every path in it and puts the write watch on the word of
+// the first gate a path that was open in cinema is closed on in stereo (".20: the _HUD provider's gates" and ".20 gate watch" below).
 //
 // What it answers: in headset stereo on foot the game builds its PostGUI pass (render lists 36-39 PostGui_FirstPerson_*, the HUD, and
 // 40-46) but the HUD never reaches the headset. Either the lists hold nothing, or they hold models the view's camera does not draw.
@@ -1100,7 +1101,7 @@ inline int formatSwitchSummary(uint64_t seconds, const SwitchWindow& w, const ui
     return len;
 }
 
-// ---- .19: the HUD node's providers and the subscription watch (docs: "Зонд .19: поставщики узла HUD") -----------------------------
+// ---- .19: the HUD node's providers (docs: "Зонд .19: поставщики узла HUD"; its subscription watch is .20's gate watch below) -------
 // Flight .15 and .16: on foot in stereo the frame mask never asks for list 39 _HUD, in cinema it does; the mask is written by the node's
 // prepare 0x58F940 and by nothing else. What decides it is the scene providers that prepare asks. The static reading of 0x58F940
 // (node, ctx = *(*(node+0x108)+0x60), cam the node's camera, L = *(ctx+0x108) the provider list):
@@ -1140,6 +1141,7 @@ struct Provider {
 // readProviders sets every field the rest reads.
 struct ProviderSnap {
     uint64_t node, ctx, cam, cam8E0, cam8F0, mask;
+    uint64_t set;         // *(node+0x108): the list set S, with the camera the key of a provider's record (.20)
     uint64_t shape;       // a hash of the list's length, the providers' addresses and vtables and who is subscribed
     uint64_t badA, badB;  // the pair that did not match
     int32_t viewBit;
@@ -1159,7 +1161,7 @@ inline bool subscribed(const Provider& p, uint64_t cam8E0) { return (p.sub & cam
 // when the answers' OR with cam+0x8F0 is not the frame mask. The vtable's answer method is best effort (0 when unreadable).
 inline int readProviders(uint64_t node, ReadFn read, void* rctx, ProviderSnap* s) {
     s->node = node;
-    s->ctx = s->cam = s->cam8E0 = s->cam8F0 = s->mask = s->shape = s->badA = s->badB = 0;
+    s->ctx = s->cam = s->cam8E0 = s->cam8F0 = s->mask = s->set = s->shape = s->badA = s->badB = 0;
     s->viewBit = -1;
     s->viewSlot = -1;
     s->number = s->stored = s->extras = s->place = 0;
@@ -1168,6 +1170,7 @@ inline int readProviders(uint64_t node, ReadFn read, void* rctx, ProviderSnap* s
     if (!readAs(read, rctx, node + kNodeSet, &set) || !readAs(read, rctx, set + kSetContext, &s->ctx) ||
         !readAs(read, rctx, s->ctx + kCtxNode, &ctxNode))
         return kSnapFault;
+    s->set = set;
     if (ctxNode != node) {
         s->badA = ctxNode;
         s->badB = node;
@@ -1471,34 +1474,803 @@ inline int formatProviderRow(const ProviderTable::Row& r, int viewBit, uint64_t 
     return n;
 }
 
-// No provider answered with 0x8 in a matched snapshot: said in the 30-second summary, and it is why no watch is armed.
+// No provider answered with 0x8 in a matched snapshot: said in the 30-second summary.
 inline int formatNoHudProvider(char* out, size_t cap) {
-    return std::snprintf(out, cap,
-                         "on-foot hud probe: no provider of the HUD node has answered with the _HUD bit 0x8 in a matched snapshot yet: the "
-                         "subscription watch is not armed");
+    return std::snprintf(out, cap, "on-foot hud probe: no provider of the HUD node has answered with the _HUD bit 0x8 in a matched snapshot yet");
 }
 
-// ---- the subscription watch (the .16 camera and mask watches are gone: flight .16 answered them) -----------------------------------
-// Debug register slot 2 watches the low four bytes of the subscription (p+0x28) of the first provider that answered with 0x8 in a
-// matched snapshot -- write, 4 bytes, every thread (slot 0 is the flat camera producer probe's, slot 1 native_vr_probe's, slot 3 is
-// free). The low four bytes hold the bits of both PostGUI cameras (0x4 and 0x800000). The CPU reports a data breakpoint AFTER the
-// write: the handler records each distinct instruction once (the address after it, the value it wrote, where the commander was, the
-// callers) and counts the rest by place, and how many of the writes carried a bit of the HUD nodes' cameras.
-enum Watch : int { kWatchSubscription = 0, kWatchCount = 1 };
-constexpr unsigned kWatchSlot[kWatchCount] = {2};
-inline const char* watchName(int) { return "hud provider subscription"; }
-inline uintptr_t watchOffset(int) { return kProvSub; }
-constexpr int kSites = 8;
+// ---- .20: the _HUD provider's gates (docs: "Зонд .20: ворота поставщика _HUD") ------------------------------------------------------
+// Flight .19 (P2): the HUD node's provider B (vtable +0x5A72D58) answers 0x8 (_HUD) in cinema and not in stereo on foot, subscribed to
+// both cameras either way. Its answer is one record's, and the record's answer is made of gates. The static reading of 0x4C84360,
+// 0x4C7C620, 0x4C82940, 0x4C80480 and 0x4C7E630 (B the provider, cam the node's camera, S = *(node+0x108)):
+//   0x4C84360: the record is the one of B's array *(B+0x70) ((u64) B+0x68 pointers) whose binding bnd = *(rec+0x10) has *(bnd+0x10) == cam
+//     and *(bnd+0x18) == S; its answer is *(rec+0x100) -- the same as B+0x30 that prepare 0x58F940 stored for this node.
+//   0x4C82940 makes it: bnd+0x28 the cameras' mask (u64), bnd+0x30 the slot (u32), view = (u32)*(S+0x38). The groups *(rec+0xE8) (+8 how
+//     many, +0x10 the pointers) -> a group g (flag (i32) g+slot*4; items +0x198 how many, +0x1A0 the pointers) -> an item (flag
+//     it+0x38+slot*4; parts +0x140, +0x148) -> a part s (flag s+0xD8+slot*4; meshes: s+8 how many, s+0x10 the array, 0x48 each; seven
+//     collectors' lists, a count at s+0x20+0x18*k) -> a mesh m (resource R *m, instance data m+0x10 and masks m+0x18 (u64 each), the
+//     material set M m+0x28, the cameras' mask m+0x30, instances (u32) m+0x3C, the data's step (u16, bytes) m+0x40).
+//   0x4C80480: an instance counts when its mask & bnd+0x28 is not 0, in the section min(((u32)data >> 18) & 0x3F, (u32)R+0x38 - 1); the
+//     section's pass entries (R+0x40 the sections, 0x10 each: u32 start, u32 end; R+0x80 the entries, 8 each, the first u32 a material
+//     number) give the material mat = *(M+0x10+number*8) and its pass p = *(mat+0xB8+view*8); 0x4C7E630: p's byte +0x60 on, and the
+//     pass's lists *(*(p+0x50)+0x30) go into the answer. The seven collectors (the table 0x6054C70: {function, offset} x 7, called for
+//     the parts with a list) add bits of their own.
+// The gates of one path (mesh, section, material), in the game's order: G1 the group's flag, G2 the item's, G3 the part's, G4 the mesh's
+// mask & bnd+0x28, G5 an instance of the section with a mask & bnd+0x28, G6 the pass p of the walk's view, G7 its byte +0x60. The hook
+// walks the record once a second per view, from the node's draw (the provider's answer of this frame is in hand), reads EVERY gate of
+// every path and names the first closed one; a path is a _HUD one when its material gave a pass with 0x8 at any time (a lock-free
+// set remembers the view). The OR of the open paths' lists is recomputed and checked against the record's answer: what the record has
+// more is the collectors', a bit the paths give and the record does not is a misread walk (counted by reason, never a finding).
+constexpr uintptr_t kProvBVtableRva = 0x5A72D58u;       // provider B: the _HUD provider
+constexpr uintptr_t kCollectorTableRva = 0x6054C70u;    // {function, int offset} x 7, 16 bytes each, filled at launch
+constexpr int kCollectors = 7;
+constexpr uintptr_t kCollectorStride = 16;
+constexpr uintptr_t kProvRecordCount = 0x68;            // u64
+constexpr uintptr_t kProvRecords = 0x70;                // the pointers
+constexpr uint64_t kMaxRecords = 256;                   // more is not believed
+constexpr uintptr_t kRecBinding = 0x10, kRecGroups = 0xE8, kRecAnswer = 0x100;
+constexpr uintptr_t kBindCamera = 0x10, kBindSet = 0x18, kBindMask = 0x28, kBindSlot = 0x30;
+constexpr uintptr_t kSetViewNumber = 0x38;              // u32
+constexpr uintptr_t kGroupsCount = 0x8, kGroupsArray = 0x10;
+constexpr uintptr_t kGroupItemCount = 0x198, kGroupItems = 0x1A0;
+constexpr uintptr_t kItemFlags = 0x38, kItemPartCount = 0x140, kItemParts = 0x148;
+constexpr uintptr_t kPartFlags = 0xD8, kPartMeshCount = 0x8, kPartMeshes = 0x10, kPartCollectors = 0x20, kPartCollectorStride = 0x18;
+constexpr uintptr_t kMeshBytes = 0x48;
+constexpr uintptr_t kMeshResource = 0x0, kMeshData = 0x10, kMeshMasks = 0x18, kMeshMaterials = 0x28, kMeshMask = 0x30, kMeshInstances = 0x3C,
+                    kMeshDataStep = 0x40;
+constexpr uintptr_t kResSections = 0x38, kResSectionTable = 0x40, kResPassEntries = 0x80;
+constexpr uintptr_t kSectionBytes = 0x10, kPassEntryBytes = 8;
+constexpr uintptr_t kMaterialSetArray = 0x10, kMaterialPasses = 0xB8;
+constexpr uintptr_t kPassOn = 0x60, kPassFeature = 0x50, kFeatureBits = 0x30;
+constexpr uint32_t kWalkPassBudget = 16384, kWalkInstanceBudget = 16384;  // pass entries and instances read in one walk; more cuts it short
+constexpr uint32_t kWalkNodeBudget = 1u << 17;          // groups + items + parts + meshes in one walk, the same
+constexpr uint64_t kMaxNodes = 1u << 16;                // one container longer than this is not believed
+constexpr uint32_t kSlotLimit = 63, kViewLimit = 15;    // a binding past these is not believed: the flags are 4 bytes a slot, 16 passes a material
+constexpr uint32_t kMaxSections = 64;                   // a resource with more is a misread
+constexpr int kMaxHudPaths = 64;                        // _HUD paths kept per walk, the rest are counted
+constexpr int kCensusPaths = 16;                        // _HUD paths written per census
+constexpr uint64_t kGateLineMs = 5000;                  // a view's census is written at most this often
+constexpr uint64_t kGateStaleMs = 2000;                 // a path that stayed out of its view's walks this long has left them
+constexpr uint64_t kWalkEveryMs = 1000;                 // a view is walked at most this often
 
-// One instruction that wrote the watched place: its writes by place (and those with a HUD camera bit in the value) and the last value,
-// all kept by the handler; the first write's value, place, thread and callers, published once.
+// The gates of a path, in the game's order; the value of "first closed" (0: open).
+enum Gate : int { kGateOpen = 0, kGateGroup, kGateItem, kGatePart, kGateMeshMask, kGateInstances, kGateViewPass, kGatePassOff, kGates };
+inline const char* gateName(int g) {
+    static const char* const names[kGates] = {"open", "group", "item", "part", "mesh mask", "instances", "view pass", "pass off"};
+    return g >= 0 && g < kGates ? names[g] : "?";
+}
+
+// The materials that gave a pass with the _HUD bit, at any time: 64 cells, a material claims one by compare-and-swap, once. The cell holds
+// the material (48 bits) and the view it was seen at, plus one (16 bits): the first view stays.
+class HudMaterials {
+public:
+    static constexpr int kCells = 64;
+    // Any thread. True when the material is in the set after the call.
+    bool add(uint64_t material, uint32_t view) noexcept {
+        const uint64_t key = (material & kAddress) | (static_cast<uint64_t>(view + 1) << 48);
+        for (Cell& c : m_cells) {
+            uint64_t now = c.key.load(std::memory_order_acquire);
+            if (now == 0 && c.key.compare_exchange_strong(now, key, std::memory_order_acq_rel)) return true;
+            if ((now & kAddress) == (material & kAddress)) return true;
+        }
+        m_full.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    bool find(uint64_t material, uint32_t* view) const noexcept {
+        for (const Cell& c : m_cells) {
+            const uint64_t now = c.key.load(std::memory_order_acquire);
+            if (now != 0 && (now & kAddress) == (material & kAddress)) {
+                *view = static_cast<uint32_t>(now >> 48) - 1;
+                return true;
+            }
+        }
+        return false;
+    }
+    int count() const noexcept {
+        int n = 0;
+        for (const Cell& c : m_cells) n += c.key.load(std::memory_order_relaxed) ? 1 : 0;
+        return n;
+    }
+    uint64_t full() const noexcept { return m_full.load(std::memory_order_relaxed); }
+
+private:
+    static constexpr uint64_t kAddress = 0x0000FFFFFFFFFFFFull;
+    struct Cell {
+        std::atomic<uint64_t> key{0};
+    };
+    Cell m_cells[kCells];
+    std::atomic<uint64_t> m_full{0};
+};
+
+// One _HUD path of a walk. Numbers only.
+struct HudPath {
+    uint64_t group, item, part, mesh, material;
+    uint64_t meshMask;                  // m+0x30
+    uint64_t firstMask;                 // the address of the first instance mask of the section (0: the section has no instance)
+    uint64_t pass, bits;                // the pass of the walk's view (0: none), the lists it lists
+    uint64_t rememberedPass, rememberedBits;  // the same at the view the material was first seen with 0x8
+    uint32_t section, instancesPass, instancesAll, rememberedView;
+    int32_t flagGroup, flagItem, flagPart;
+    uint8_t closed, on;                 // the first closed gate (Gate), the pass's byte +0x60
+};
+enum WalkResult : int { kWalkMatched = 0, kWalkAnswerDiffers, kWalkBitNotInAnswer, kWalkNoRecord, kWalkUnbelieved, kWalkUnreadable, kWalkResults };
+// A walk of the record. No initialisers, like ProviderSnap: the walk sets every field the rest reads, and zeroing the paths for each of
+// them is not free.
+struct GateWalk {
+    uint64_t node, provider, record, binding, camera, set;
+    uint64_t bindingMask, recordAnswer, providerAnswer, recomputed;
+    int32_t viewBit, viewSlot;
+    uint32_t place, slot, view, records;  // records: B's number of records
+    int32_t result;                       // WalkResult
+    uint32_t groups, items, parts, meshes, passEntries, instances;
+    uint8_t cutShort;
+    uint32_t skipped;                     // subtrees behind a closed gate (where the game reads nothing) that could not be read
+    uint32_t collectors[kCollectors];     // parts with a non-empty list of collector k
+    uint32_t byGate[kGates];              // _HUD paths by their first closed gate (0: open), all of them
+    uint32_t hudPaths, stored;
+    HudPath path[kMaxHudPaths];
+};
+
+// The walk. Every read goes through `read`; false from any of them (or a count not believed) is a fault and the walk is dropped -- but only
+// where the game itself reads. Behind a closed gate (a flag 0 above, the mesh's mask, a section with no instance that counts) the game
+// reads nothing, so a subtree there that cannot be read is skipped and counted, not a fault: one stale pointer in a closed group must not
+// cost the walk that is to name that gate.
+class HudWalker {
+public:
+    HudWalker(ReadFn read, void* rctx, HudMaterials* mats, GateWalk* w) : m_read(read), m_rctx(rctx), m_mats(mats), m_w(w) {}
+
+    bool groups(uint64_t rec) {
+        uint64_t box = 0, count = 0, array = 0;
+        if (!get(rec + kRecGroups, &box) || !get(box + kGroupsCount, &count) || !get(box + kGroupsArray, &array) || count > kMaxNodes) return false;
+        for (uint64_t i = 0; i < count && !m_stop; ++i) {
+            uint64_t g = 0;
+            if (!get(array + 8 * i, &g) || !group(g)) return false;
+        }
+        return true;
+    }
+
+private:
+    template <typename T>
+    bool get(uint64_t a, T* v) const { return readAs(m_read, m_rctx, a, v); }
+    template <typename T>
+    static T field(const uint8_t* bytes, uintptr_t offset) {
+        T v;
+        std::memcpy(&v, bytes + offset, sizeof(T));
+        return v;
+    }
+    // A read that failed: a fault on the game's own path, a skipped subtree behind a closed gate.
+    bool miss() {
+        if (!m_shadow) return false;
+        ++m_w->skipped;
+        return true;
+    }
+    bool tick() {
+        if (++m_nodes > kWalkNodeBudget) {
+            m_stop = true;
+            m_w->cutShort = 1;
+        }
+        return !m_stop;
+    }
+
+    bool group(uint64_t g) {
+        uint64_t count = 0, array = 0;
+        if (!get(g + 4ull * m_w->slot, &m_flagGroup)) return false;
+        m_shadow = m_flagGroup == 0;
+        if (!get(g + kGroupItemCount, &count) || !get(g + kGroupItems, &array) || count > kMaxNodes) return miss();
+        ++m_w->groups;
+        m_group = g;
+        for (uint64_t i = 0; i < count && !m_stop; ++i) {
+            uint64_t it = 0;
+            if (!tick()) break;
+            m_shadow = m_flagGroup == 0;
+            if (!get(array + 8 * i, &it)) return miss();
+            if (!item(it)) return false;
+        }
+        return true;
+    }
+    bool item(uint64_t it) {
+        uint64_t count = 0, array = 0;
+        const bool above = m_flagGroup == 0;
+        m_shadow = above;
+        if (!get(it + kItemFlags + 4ull * m_w->slot, &m_flagItem)) return miss();
+        m_shadow = above || m_flagItem == 0;
+        if (!get(it + kItemPartCount, &count) || !get(it + kItemParts, &array) || count > kMaxNodes) return miss();
+        ++m_w->items;
+        m_item = it;
+        for (uint64_t i = 0; i < count && !m_stop; ++i) {
+            uint64_t s = 0;
+            if (!tick()) break;
+            m_shadow = above || m_flagItem == 0;
+            if (!get(array + 8 * i, &s)) return miss();
+            if (!part(s)) return false;
+        }
+        return true;
+    }
+    bool part(uint64_t s) {
+        uint64_t count = 0, array = 0;
+        const bool above = m_flagGroup == 0 || m_flagItem == 0;
+        m_shadow = above;
+        if (!get(s + kPartFlags + 4ull * m_w->slot, &m_flagPart)) return miss();
+        m_shadow = above || m_flagPart == 0;
+        if (!get(s + kPartMeshCount, &count) || !get(s + kPartMeshes, &array) || count > kMaxNodes) return miss();
+        ++m_w->parts;
+        m_part = s;
+        uint8_t lists[kPartCollectorStride * (kCollectors - 1) + 8] = {};
+        if (get(s + kPartCollectors, &lists))  // best effort: the game reads them only past the three flags
+            for (int k = 0; k < kCollectors; ++k)
+                if (field<uint64_t>(lists, kPartCollectorStride * k) != 0) ++m_w->collectors[k];
+        for (uint64_t i = 0; i < count && !m_stop; ++i) {
+            if (!tick()) break;
+            if (!mesh(array + kMeshBytes * i, above || m_flagPart == 0)) return false;
+        }
+        return true;
+    }
+
+    // The mesh: its sections, the instances that count in each, then every pass entry of every section is a path.
+    bool mesh(uint64_t at, bool flagsClosed) {
+        uint8_t m[kMeshBytes] = {};
+        m_shadow = flagsClosed;
+        if (!get(at, &m)) return miss();
+        ++m_w->meshes;
+        const uint64_t res = field<uint64_t>(m, kMeshResource), data = field<uint64_t>(m, kMeshData), masks = field<uint64_t>(m, kMeshMasks),
+                       set = field<uint64_t>(m, kMeshMaterials), meshMask = field<uint64_t>(m, kMeshMask);
+        const uint32_t instances = field<uint32_t>(m, kMeshInstances);
+        const uint64_t step = static_cast<uint64_t>(field<uint16_t>(m, kMeshDataStep) >> 2) * 4;  // the game steps a u32 pointer by stride >> 2
+        uint32_t sections = 0;
+        uint64_t table = 0, entries = 0;
+        m_shadow = flagsClosed || (meshMask & m_w->bindingMask) == 0;  // the game reads the resource only past the mesh's mask
+        if (!get(res + kResSections, &sections) || sections > kMaxSections) return miss();
+        if (sections == 0) return true;
+        if (!get(res + kResSectionTable, &table) || !get(res + kResPassEntries, &entries)) return miss();
+        uint32_t range[kMaxSections * 4] = {};
+        if (table < 0x10000 || !m_read(m_rctx, table, range, static_cast<size_t>(sections) * kSectionBytes)) return miss();
+        uint64_t total = 0;
+        for (uint32_t s = 0; s < sections; ++s) {
+            if (range[s * 4 + 1] < range[s * 4]) return miss();
+            total += range[s * 4 + 1] - range[s * 4];
+        }
+        if (total == 0) return true;
+        if (total > kWalkPassBudget || m_w->passEntries + total > kWalkPassBudget) return cut();
+        if (static_cast<uint64_t>(m_w->instances) + instances > kWalkInstanceBudget) return cut();
+        uint32_t passing[kMaxSections] = {}, all[kMaxSections] = {};
+        uint64_t firstMask[kMaxSections] = {};
+        for (uint32_t i = 0; i < instances;) {
+            const uint32_t n = instances - i < kChunk ? instances - i : kChunk;
+            uint64_t chunk[kChunk];
+            if (masks < 0x10000 || !m_read(m_rctx, masks + 8ull * i, chunk, 8ull * n)) return miss();
+            for (uint32_t j = 0; j < n; ++j, ++i) {
+                const bool counts = (chunk[j] & m_w->bindingMask) != 0;
+                uint32_t word = 0;
+                if (!get(data + static_cast<uint64_t>(i) * step, &word)) {
+                    if (counts && !m_shadow) return false;  // the game reads it for an instance that counts
+                    continue;
+                }
+                uint32_t sec = (word >> 18) & 0x3F;
+                if (sec > sections - 1) sec = sections - 1;
+                ++all[sec];
+                if (!firstMask[sec]) firstMask[sec] = masks + 8ull * i;
+                if (counts) ++passing[sec];
+            }
+        }
+        m_w->instances += instances;
+        const bool meshShadow = m_shadow;
+        for (uint32_t s = 0; s < sections; ++s)
+            for (uint32_t e = range[s * 4]; e < range[s * 4 + 1]; ++e) {
+                ++m_w->passEntries;
+                m_shadow = meshShadow || passing[s] == 0;  // the game reads a section's entries only when an instance counts in it
+                uint32_t number = 0;
+                if (!get(entries + kPassEntryBytes * e, &number)) {
+                    if (!miss()) return false;
+                    continue;
+                }
+                if (!path(at, set, meshMask, s, number, passing[s], all[s], firstMask[s])) return false;
+            }
+        return true;
+    }
+    bool cut() {
+        m_stop = true;
+        m_w->cutShort = 1;
+        return true;
+    }
+
+    bool path(uint64_t mesh, uint64_t set, uint64_t meshMask, uint32_t section, uint32_t number, uint32_t passing, uint32_t all, uint64_t firstMask) {
+        uint64_t mat = 0, p = 0;
+        if (!get(set + kMaterialSetArray + 8ull * number, &mat) || !get(mat + kMaterialPasses + 8ull * m_w->view, &p)) return miss();
+        uint8_t on = 0;
+        uint64_t bits = 0;
+        bool bitsRead = false;
+        if (p) {
+            uint64_t feature = 0;
+            if (!get(p + kPassOn, &on)) return miss();
+            bitsRead = get(p + kPassFeature, &feature) && get(feature + kFeatureBits, &bits);
+            if (!bitsRead) bits = 0;
+        }
+        const bool open[kGates] = {true, m_flagGroup != 0, m_flagItem != 0, m_flagPart != 0, (meshMask & m_w->bindingMask) != 0, passing != 0, p != 0,
+                                   p != 0 && on != 0};
+        int closed = kGateOpen;
+        for (int g = kGateGroup; g < kGates && closed == kGateOpen; ++g)
+            if (!open[g]) closed = g;
+        if (closed == kGateOpen) {
+            if (!bitsRead) return false;  // the game reads the lists of a pass that counts
+            m_w->recomputed |= bits;
+        }
+        if (p && bitsRead && (bits & kHudBit)) m_mats->add(mat, m_w->view);
+        uint32_t seenView = 0;
+        if (!m_mats->find(mat, &seenView)) return true;
+        ++m_w->hudPaths;
+        ++m_w->byGate[closed];
+        if (m_w->stored >= static_cast<uint32_t>(kMaxHudPaths)) return true;
+        HudPath& h = m_w->path[m_w->stored++];
+        h.group = m_group;
+        h.item = m_item;
+        h.part = m_part;
+        h.mesh = mesh;
+        h.material = mat;
+        h.meshMask = meshMask;
+        h.firstMask = firstMask;
+        h.pass = p;
+        h.bits = bits;
+        h.section = section;
+        h.instancesPass = passing;
+        h.instancesAll = all;
+        h.rememberedView = seenView;
+        h.flagGroup = m_flagGroup;
+        h.flagItem = m_flagItem;
+        h.flagPart = m_flagPart;
+        h.closed = static_cast<uint8_t>(closed);
+        h.on = on;
+        h.rememberedPass = h.rememberedBits = 0;
+        uint64_t rp = 0;
+        if (seenView <= kViewLimit && get(mat + kMaterialPasses + 8ull * seenView, &rp) && rp) {
+            uint64_t feature = 0, rbits = 0;
+            h.rememberedPass = rp;
+            if (get(rp + kPassFeature, &feature) && get(feature + kFeatureBits, &rbits)) h.rememberedBits = rbits;
+        }
+        return true;
+    }
+
+    static constexpr uint32_t kChunk = 32;
+    ReadFn m_read;
+    void* m_rctx;
+    HudMaterials* m_mats;
+    GateWalk* m_w;
+    uint64_t m_group = 0, m_item = 0, m_part = 0;
+    int32_t m_flagGroup = 0, m_flagItem = 0, m_flagPart = 0;
+    uint32_t m_nodes = 0;
+    bool m_stop = false;
+    bool m_shadow = false;  // the reads at hand are behind a closed gate: the game would not make them
+};
+
+// The record of the _HUD provider for the node's camera and set, and the walk of it. `provider` is B, `providerAnswer` its +0x30 in the
+// snapshot the node's draw gave. Returns the WalkResult and fills `w`: for kWalkNoRecord and kWalkUnbelieved only the header (and the
+// binding for the second), for kWalkUnreadable nothing past what was read.
+inline int walkHudProvider(uint64_t provider, uint64_t node, uint64_t camera, uint64_t set, uint64_t providerAnswer, int32_t viewBit, int viewSlot,
+                           int place, ReadFn read, void* rctx, HudMaterials* mats, GateWalk* w) {
+    w->node = node;
+    w->provider = provider;
+    w->camera = camera;
+    w->set = set;
+    w->providerAnswer = providerAnswer;
+    w->record = w->binding = w->bindingMask = w->recordAnswer = w->recomputed = 0;
+    w->viewBit = viewBit;
+    w->viewSlot = viewSlot;
+    w->place = static_cast<uint32_t>(place);
+    w->slot = w->view = w->records = 0;
+    w->groups = w->items = w->parts = w->meshes = w->passEntries = w->instances = 0;
+    w->cutShort = 0;
+    w->skipped = 0;
+    for (uint32_t& c : w->collectors) c = 0;
+    for (uint32_t& c : w->byGate) c = 0;
+    w->hudPaths = w->stored = 0;
+    w->result = kWalkUnreadable;
+    uint64_t count = 0, array = 0;
+    uint32_t view = 0;
+    if (!readAs(read, rctx, provider + kProvRecordCount, &count) || !readAs(read, rctx, provider + kProvRecords, &array) ||
+        !readAs(read, rctx, set + kSetViewNumber, &view) || count > kMaxRecords)
+        return w->result;
+    w->records = static_cast<uint32_t>(count);
+    w->view = view;
+    uint64_t rec = 0, bnd = 0;
+    bool found = false;
+    for (uint64_t i = 0; i < count && !found; ++i) {
+        uint64_t r = 0, b = 0, key[2] = {};
+        if (!readAs(read, rctx, array + 8 * i, &r) || !readAs(read, rctx, r + kRecBinding, &b) || !readAs(read, rctx, b + kBindCamera, &key))
+            return w->result;
+        if (key[0] == camera && key[1] == set) {
+            rec = r;
+            bnd = b;
+            found = true;
+        }
+    }
+    if (!found) return w->result = kWalkNoRecord;
+    w->record = rec;
+    w->binding = bnd;
+    uint32_t slot = 0;
+    if (!readAs(read, rctx, bnd + kBindMask, &w->bindingMask) || !readAs(read, rctx, bnd + kBindSlot, &slot) ||
+        !readAs(read, rctx, rec + kRecAnswer, &w->recordAnswer))
+        return w->result;
+    w->slot = slot;
+    if (slot > kSlotLimit || view > kViewLimit) return w->result = kWalkUnbelieved;
+    HudWalker walker(read, rctx, mats, w);
+    if (!walker.groups(rec)) return w->result = kWalkUnreadable;
+    w->result = w->recordAnswer != providerAnswer ? kWalkAnswerDiffers : (w->recomputed & ~w->recordAnswer) != 0 ? kWalkBitNotInAnswer : kWalkMatched;
+    return w->result;
+}
+
+// The seven collectors of the table, once: the function and the offset the game adds to the object it calls them with.
+inline bool readCollectors(ReadFn read, void* rctx, uint64_t base, uint64_t fn[kCollectors], int32_t offset[kCollectors]) {
+    uint8_t table[kCollectors * kCollectorStride] = {};
+    if (!readAs(read, rctx, base + kCollectorTableRva, &table)) return false;
+    for (int k = 0; k < kCollectors; ++k) {
+        std::memcpy(&fn[k], table + kCollectorStride * k, 8);
+        std::memcpy(&offset[k], table + kCollectorStride * k + 8, 4);
+    }
+    return true;
+}
+
+// What the hook counts by place and result, the first walk that did not match (once), and the collectors (read once). Lock-free.
+class GateWalks {
+public:
+    void note(int place, int result, bool cutShort) noexcept {
+        const int p = place >= 0 && place < kPlaces ? place : kPlaceShip;
+        const int r = result >= 0 && result < kWalkResults ? result : kWalkUnreadable;
+        m_count[p][r].fetch_add(1, std::memory_order_relaxed);
+        if (cutShort) m_cut[p].fetch_add(1, std::memory_order_relaxed);
+        m_total.fetch_add(1, std::memory_order_relaxed);
+    }
+    // The first walk of a reason that is a misread or a binding not believed, once: the pair of values.
+    void noteBad(int result, uint64_t a, uint64_t b, uint64_t node) noexcept {
+        uint8_t none = 0;
+        if (!m_badClaim.compare_exchange_strong(none, 1, std::memory_order_acq_rel)) return;
+        m_badResult = result;
+        m_badA = a;
+        m_badB = b;
+        m_badNode = node;
+        m_badReady.store(1, std::memory_order_release);
+    }
+    // Frame thread.
+    bool nextBad(int* result, uint64_t* a, uint64_t* b, uint64_t* node) {
+        if (m_badSaid || !m_badReady.load(std::memory_order_acquire)) return false;
+        m_badSaid = true;
+        *result = m_badResult;
+        *a = m_badA;
+        *b = m_badB;
+        *node = m_badNode;
+        return true;
+    }
+    // The collectors are read until one walk got them: the first to claim them publishes.
+    bool collectorsDone() const noexcept { return m_colClaim.load(std::memory_order_acquire) != 0; }
+    bool claimCollectors() noexcept {
+        uint8_t none = 0;
+        return m_colClaim.compare_exchange_strong(none, 1, std::memory_order_acq_rel);
+    }
+    void publishCollectors(const uint64_t fn[kCollectors], const int32_t offset[kCollectors]) noexcept {
+        for (int k = 0; k < kCollectors; ++k) {
+            m_fn[k] = fn[k];
+            m_offset[k] = offset[k];
+        }
+        m_colReady.store(1, std::memory_order_release);
+    }
+    bool nextCollectors(uint64_t fn[kCollectors], int32_t offset[kCollectors]) {
+        if (m_colSaid || !m_colReady.load(std::memory_order_acquire)) return false;
+        m_colSaid = true;
+        for (int k = 0; k < kCollectors; ++k) {
+            fn[k] = m_fn[k];
+            offset[k] = m_offset[k];
+        }
+        return true;
+    }
+    uint64_t count(int place, int result) const noexcept { return m_count[place][result].load(std::memory_order_relaxed); }
+    uint64_t cutShort(int place) const noexcept { return m_cut[place].load(std::memory_order_relaxed); }
+    uint64_t total() const noexcept { return m_total.load(std::memory_order_relaxed); }
+    uint64_t walks(int place) const noexcept {
+        uint64_t n = 0;
+        for (int r = 0; r < kWalkResults; ++r) n += count(place, r);
+        return n;
+    }
+
+private:
+    std::atomic<uint64_t> m_count[kPlaces][kWalkResults]{}, m_cut[kPlaces]{}, m_total{0};
+    std::atomic<uint8_t> m_badClaim{0}, m_badReady{0}, m_colClaim{0}, m_colReady{0};
+    int m_badResult = 0;
+    uint64_t m_badA = 0, m_badB = 0, m_badNode = 0;
+    bool m_badSaid = false, m_colSaid = false;
+    uint64_t m_fn[kCollectors] = {};
+    int32_t m_offset[kCollectors] = {};
+};
+
+// The window of the gates' summary: due every 30 s from its first call, with each place's walks of the window.
+struct GateCounts {
+    uint64_t n[kWalkResults] = {};
+    uint64_t cut = 0;
+    uint64_t sum() const {
+        uint64_t s = 0;
+        for (uint64_t v : n) s += v;
+        return s;
+    }
+};
+class GateSummary {
+public:
+    static constexpr uint64_t kWindowMs = 30000;
+    // 0 not due; 1 due, with walks in the window; 2 due, with none. *seconds the window's length, win[place] its walks.
+    int step(uint64_t nowMs, const GateWalks& t, uint64_t* seconds, GateCounts win[kPlaces]) {
+        if (!m_started) {
+            m_started = true;
+            m_since = nowMs;
+            take(t);
+            return 0;
+        }
+        if (nowMs - m_since < kWindowMs) return 0;
+        *seconds = (nowMs - m_since) / 1000;
+        m_since = nowMs;
+        uint64_t all = 0;
+        for (int p = 0; p < kPlaces; ++p) {
+            for (int r = 0; r < kWalkResults; ++r) win[p].n[r] = t.count(p, r) - m_base[p].n[r];
+            win[p].cut = t.cutShort(p) - m_base[p].cut;
+            all += win[p].sum();
+        }
+        take(t);
+        return all ? 1 : 2;
+    }
+
+private:
+    void take(const GateWalks& t) {
+        for (int p = 0; p < kPlaces; ++p) {
+            for (int r = 0; r < kWalkResults; ++r) m_base[p].n[r] = t.count(p, r);
+            m_base[p].cut = t.cutShort(p);
+        }
+    }
+    bool m_started = false;
+    uint64_t m_since = 0;
+    GateCounts m_base[kPlaces];
+};
+
+// The picture of a walk: what a census says apart from addresses -- the binding's slot, the view, the cameras' mask, the verdict and each
+// _HUD path's identity with its first closed gate. A census is written when it changes.
+inline uint64_t gatePicture(const GateWalk& w) {
+    uint64_t h = 1469598103934665603ull;
+    auto mix = [&h](uint64_t v) { h = (h ^ v) * 1099511628211ull; };
+    mix(w.result);
+    if (w.result == kWalkNoRecord) return h;
+    mix(w.slot);
+    mix(w.view);
+    mix(w.bindingMask);
+    mix(w.stored);
+    mix(w.hudPaths);
+    for (uint32_t i = 0; i < w.stored; ++i) {
+        mix(w.path[i].mesh);
+        mix(w.path[i].section);
+        mix(w.path[i].material);
+        mix(w.path[i].closed);
+    }
+    return h;
+}
+
+// ---- the .20 lines ------------------------------------------------------------------------------------------------------------------
+inline int formatGateHead(const GateWalk& w, char* out, size_t cap) {
+    char verdict[120];
+    if (w.recomputed == w.recordAnswer) std::snprintf(verdict, sizeof(verdict), "matches");
+    else if ((w.recomputed & ~w.recordAnswer) == 0)
+        std::snprintf(verdict, sizeof(verdict), "rest 0x%llX from the other collectors", static_cast<unsigned long long>(w.recordAnswer & ~w.recomputed));
+    else std::snprintf(verdict, sizeof(verdict), "does not match (0x%llX is not in the answer)", static_cast<unsigned long long>(w.recomputed & ~w.recordAnswer));
+    int n = std::snprintf(out, cap,
+                          "on-foot hud probe: _HUD provider gates: view bit %d, %s, node 0x%llX provider 0x%llX record 0x%llX binding 0x%llX camera 0x%llX "
+                          "set 0x%llX; binding mask (bnd+0x28) 0x%llX, slot %u, set view %u; record answer (rec+0x100) 0x%llX, %s the provider's (+0x30) "
+                          "0x%llX; walked %u group(s), %u item(s), %u part(s), %u mesh(es), %u pass entries, %u instance(s), %s; recomputed 0x%llX: %s; "
+                          "%u _HUD path(s) by first closed gate:",
+                          w.viewBit, placeName(static_cast<int>(w.place)), static_cast<unsigned long long>(w.node),
+                          static_cast<unsigned long long>(w.provider), static_cast<unsigned long long>(w.record),
+                          static_cast<unsigned long long>(w.binding), static_cast<unsigned long long>(w.camera), static_cast<unsigned long long>(w.set),
+                          static_cast<unsigned long long>(w.bindingMask), w.slot, w.view, static_cast<unsigned long long>(w.recordAnswer),
+                          w.recordAnswer == w.providerAnswer ? "equals" : "differs from", static_cast<unsigned long long>(w.providerAnswer), w.groups,
+                          w.items, w.parts, w.meshes, w.passEntries, w.instances, w.cutShort ? "cut short" : "whole",
+                          static_cast<unsigned long long>(w.recomputed), verdict, w.hudPaths);
+    for (int g = 0; g < kGates && n > 0 && static_cast<size_t>(n) < cap; ++g)
+        n += std::snprintf(out + n, cap - n, "%s %s %u", g ? "," : "", gateName(g), w.byGate[g]);
+    if (w.skipped && n > 0 && static_cast<size_t>(n) < cap)
+        n += std::snprintf(out + n, cap - n, "; %u subtree(s) behind a closed gate could not be read, skipped", w.skipped);
+    if (n > 0 && static_cast<size_t>(n) < cap) {
+        n += std::snprintf(out + n, cap - n, "; parts with a list of collector 0-%d:", kCollectors - 1);
+        for (int k = 0; k < kCollectors && n > 0 && static_cast<size_t>(n) < cap; ++k) n += std::snprintf(out + n, cap - n, " %u", w.collectors[k]);
+    }
+    return n;
+}
+
+// One _HUD path: where it is, its first closed gate or open, the three flags, the two masks, the instances, the pass of the walk's view
+// and the pass of the view the material was first seen with 0x8.
+inline int formatGatePath(const GateWalk& w, uint32_t index, char* out, size_t cap) {
+    const HudPath& p = w.path[index];
+    char now[120], seen[120];
+    if (p.pass) std::snprintf(now, sizeof(now), "0x%llX on=%u lists 0x%llX", static_cast<unsigned long long>(p.pass), p.on, static_cast<unsigned long long>(p.bits));
+    else std::snprintf(now, sizeof(now), "none");
+    if (p.rememberedPass)
+        std::snprintf(seen, sizeof(seen), "0x%llX lists 0x%llX", static_cast<unsigned long long>(p.rememberedPass), static_cast<unsigned long long>(p.rememberedBits));
+    else std::snprintf(seen, sizeof(seen), "none");
+    char closed[40];
+    if (p.closed == kGateOpen) std::snprintf(closed, sizeof(closed), "open");
+    else std::snprintf(closed, sizeof(closed), "first closed %s", gateName(p.closed));
+    return std::snprintf(out, cap,
+                         "on-foot hud probe:   _HUD path #%u: mesh 0x%llX section %u material 0x%llX (group 0x%llX item 0x%llX part 0x%llX): %s; flags "
+                         "group %d/item %d/part %d; mesh mask 0x%llX vs binding 0x%llX; instances %u/%u; pass for view %u %s; pass for view %u (seen "
+                         "with 0x8) %s",
+                         index, static_cast<unsigned long long>(p.mesh), p.section, static_cast<unsigned long long>(p.material),
+                         static_cast<unsigned long long>(p.group), static_cast<unsigned long long>(p.item), static_cast<unsigned long long>(p.part), closed,
+                         p.flagGroup, p.flagItem, p.flagPart, static_cast<unsigned long long>(p.meshMask), static_cast<unsigned long long>(w.bindingMask),
+                         p.instancesPass, p.instancesAll, w.view, now, p.rememberedView, seen);
+}
+
+inline int formatGateNoRecord(const GateWalk& w, char* out, size_t cap) {
+    return std::snprintf(out, cap,
+                         "on-foot hud probe: no record of the _HUD provider for camera 0x%llX set 0x%llX (view bit %d, %s, node 0x%llX, provider 0x%llX, "
+                         "%u record(s)): the gates were not read",
+                         static_cast<unsigned long long>(w.camera), static_cast<unsigned long long>(w.set), w.viewBit, placeName(static_cast<int>(w.place)),
+                         static_cast<unsigned long long>(w.node), static_cast<unsigned long long>(w.provider), w.records);
+}
+
+// The first walk that did not match, once: which check failed and the pair of values.
+inline int formatGateBad(int result, uint64_t a, uint64_t b, uint64_t node, char* out, size_t cap) {
+    if (result == kWalkAnswerDiffers)
+        return std::snprintf(out, cap,
+                             "on-foot hud probe: first _HUD provider walk that did not match: the record's answer (rec+0x100) is 0x%llX but the provider's "
+                             "(+0x30) of node 0x%llX is 0x%llX; later ones are only counted",
+                             static_cast<unsigned long long>(a), static_cast<unsigned long long>(node), static_cast<unsigned long long>(b));
+    if (result == kWalkBitNotInAnswer)
+        return std::snprintf(out, cap,
+                             "on-foot hud probe: first _HUD provider walk that did not match: the open paths give 0x%llX, with a bit the record's answer "
+                             "0x%llX of node 0x%llX does not have; later ones are only counted",
+                             static_cast<unsigned long long>(a), static_cast<unsigned long long>(b), static_cast<unsigned long long>(node));
+    return std::snprintf(out, cap,
+                         "on-foot hud probe: first _HUD provider walk that was not made: the record's binding is not believed (slot %llu, limit %u; set "
+                         "view %llu, limit %u) for node 0x%llX; later ones are only counted",
+                         static_cast<unsigned long long>(a), kSlotLimit, static_cast<unsigned long long>(b), kViewLimit, static_cast<unsigned long long>(node));
+}
+
+// The seven collectors, once per run: each function as an offset into the game and the offset it is called with.
+inline int formatGateCollectors(const uint64_t fn[kCollectors], const int32_t offset[kCollectors], uint64_t base, uint64_t imageSize, char* out, size_t cap) {
+    int n = std::snprintf(out, cap, "on-foot hud probe: collectors of the _HUD provider (table EliteDangerous64.exe+0x%llX):",
+                          static_cast<unsigned long long>(kCollectorTableRva));
+    for (int k = 0; k < kCollectors && n > 0 && static_cast<size_t>(n) < cap; ++k) {
+        char at[100];
+        formatImageAddress(fn[k], base, imageSize, at, sizeof(at));
+        n += std::snprintf(out + n, cap - n, "%s #%d %s offset 0x%X", k ? ";" : "", k, at, static_cast<unsigned>(offset[k]));
+    }
+    return n;
+}
+
+// The 30-second lines: the window's walks (or none), then each place that had walks, then each view's last matched walk by gate.
+inline int formatGateSummaryHead(uint64_t seconds, uint64_t walks, uint64_t ringLost, char* out, size_t cap) {
+    if (!walks)
+        return std::snprintf(out, cap,
+                             "on-foot hud probe: %llu s gates of the _HUD provider: no walks of the _HUD provider in these seconds (the HUD node was not drawn "
+                             "with it in its list, or no walk could be made): not the same as the gates being open",
+                             static_cast<unsigned long long>(seconds));
+    return std::snprintf(out, cap, "on-foot hud probe: %llu s gates of the _HUD provider: %llu walk(s) in these seconds; ring full %llu time(s) since recording began",
+                         static_cast<unsigned long long>(seconds), static_cast<unsigned long long>(walks), static_cast<unsigned long long>(ringLost));
+}
+inline int formatGateSummaryPlace(int place, const GateCounts& c, char* out, size_t cap) {
+    return std::snprintf(out, cap,
+                         "on-foot hud probe:   %s: %llu walk(s): %llu matched, %llu not matched (%llu the record's answer is not the provider's, %llu "
+                         "a bit the paths give is not in the answer), %llu no record, %llu binding not believed, %llu unreadable; %llu cut short",
+                         placeName(place), static_cast<unsigned long long>(c.sum()), static_cast<unsigned long long>(c.n[kWalkMatched]),
+                         static_cast<unsigned long long>(c.n[kWalkAnswerDiffers] + c.n[kWalkBitNotInAnswer]),
+                         static_cast<unsigned long long>(c.n[kWalkAnswerDiffers]), static_cast<unsigned long long>(c.n[kWalkBitNotInAnswer]),
+                         static_cast<unsigned long long>(c.n[kWalkNoRecord]), static_cast<unsigned long long>(c.n[kWalkUnbelieved]),
+                         static_cast<unsigned long long>(c.n[kWalkUnreadable]), static_cast<unsigned long long>(c.cut));
+}
+inline int formatGateSummaryView(const GateWalk& w, char* out, size_t cap) {
+    int n = std::snprintf(out, cap, "on-foot hud probe:   last matched walk of view bit %d, %s: %u _HUD path(s) by first closed gate:", w.viewBit,
+                          placeName(static_cast<int>(w.place)), w.hudPaths);
+    for (int g = 0; g < kGates && n > 0 && static_cast<size_t>(n) < cap; ++g)
+        n += std::snprintf(out + n, cap - n, "%s %s %u", g ? "," : "", gateName(g), w.byGate[g]);
+    return n;
+}
+
+// ---- the gate watch (.20; the .19 subscription watch is gone: flight .19 answered it) --------------------------------------------------
+// Debug register slot 2 watches the word of the first closed gate of the first _HUD path that was open in cinema and is closed in a
+// matched stereo walk -- write, 1, 4 or 8 bytes by the gate, every thread (slot 0 is the flat camera producer probe's, slot 1
+// native_vr_probe's, slot 3 is free). The CPU reports a data breakpoint AFTER the write: the handler records each distinct instruction
+// once (the address after it, the value it wrote, where the commander was, the callers) and counts the rest by place, and how many of the
+// writes opened the gate.
+//   G1-G3 the flag of the binding's slot at the group, item or part (4 bytes); G4 the mesh's mask m+0x30 when its value changed against
+//   cinema, else the binding's mask bnd+0x28 (8); G5 the first instance mask of the section (8); G6 mat+0xB8+view*8 of the walk's view (8);
+//   G7 the byte p+0x60 (1).
+// A write opens a flag, a pass and a byte when the value is not 0; a mask when it meets the other mask (published by the frame thread).
+enum Watch : int { kWatchGate = 0, kWatchCount = 1 };
+constexpr unsigned kWatchSlot[kWatchCount] = {2};
+inline const char* watchName(int gate) {
+    static const char* const names[kGates] = {"hud gate", "hud gate group", "hud gate item", "hud gate part", "hud gate mesh mask", "hud gate instances",
+                                              "hud gate view pass", "hud gate pass off"};
+    return gate > 0 && gate < kGates ? names[gate] : names[0];
+}
+constexpr int kSites = 8;
+// Dr7's LEN field for a length of 1, 2, 4 or 8 bytes (debug_register_core.h has the register's layout).
+inline uint32_t drLengthCode(unsigned length) { return length == 8 ? 2u : length == 4 ? 3u : length == 2 ? 1u : 0u; }
+inline bool gateOpens(bool mask, uint64_t value, uint64_t other) { return mask ? (value & other) != 0 : value != 0; }
+
+// A watch's target: where, how long, which gate, whether it is a mask and the mask it is met against, and why this one.
+struct GateTarget {
+    uint64_t address;
+    uint64_t object;   // the structure it is a field of, for the lines
+    uint64_t other;
+    unsigned length;
+    int gate;
+    bool mask;
+    char note[200];
+};
+// The address of the word, not aligned to its length: 4 or 1 bytes at an address inside it that is.
+inline void alignWatch(uint64_t address, unsigned length, uint64_t* at, unsigned* len) {
+    *at = address;
+    *len = length;
+    if (address % length != 0) *len = length > 4 && address % 4 == 0 ? 4 : 1;
+}
+// The target of a path closed in a stereo walk (`closed` is the path's first closed gate), by the table of the design: 0 a target, 1 the
+// path is open, 2 nothing to watch (G5 of a section without an instance). `cinemaMask` the mesh's mask at the path's last cinema walk.
+inline int gateWatchTarget(const GateWalk& w, const HudPath& p, uint64_t cinemaMask, GateTarget* t) {
+    t->note[0] = 0;
+    t->mask = false;
+    t->other = 0;
+    t->gate = p.closed;
+    uint64_t at = 0;
+    unsigned length = 4;
+    switch (p.closed) {
+        case kGateGroup: at = p.group + 4ull * w.slot; t->object = p.group; std::snprintf(t->note, sizeof(t->note), "the group's flag of slot %u", w.slot); break;
+        case kGateItem: at = p.item + kItemFlags + 4ull * w.slot; t->object = p.item; std::snprintf(t->note, sizeof(t->note), "the item's flag of slot %u", w.slot); break;
+        case kGatePart: at = p.part + kPartFlags + 4ull * w.slot; t->object = p.part; std::snprintf(t->note, sizeof(t->note), "the part's flag of slot %u", w.slot); break;
+        case kGateMeshMask:
+            length = 8;
+            t->mask = true;
+            if (cinemaMask != p.meshMask) {
+                at = p.mesh + kMeshMask;
+                t->object = p.mesh;
+                t->other = w.bindingMask;
+                std::snprintf(t->note, sizeof(t->note), "the mesh's mask, changed against cinema (0x%llX -> 0x%llX)", static_cast<unsigned long long>(cinemaMask),
+                              static_cast<unsigned long long>(p.meshMask));
+            } else {
+                at = w.binding + kBindMask;
+                t->object = w.binding;
+                t->other = p.meshMask;
+                std::snprintf(t->note, sizeof(t->note), "the binding's mask, the mesh's mask did not change against cinema (0x%llX)",
+                              static_cast<unsigned long long>(cinemaMask));
+            }
+            break;
+        case kGateInstances:
+            if (!p.firstMask) return 2;
+            at = p.firstMask;
+            length = 8;
+            t->mask = true;
+            t->object = p.mesh;
+            t->other = w.bindingMask;
+            std::snprintf(t->note, sizeof(t->note), "the first instance mask of the section");
+            break;
+        case kGateViewPass:
+            at = p.material + kMaterialPasses + 8ull * w.view;
+            length = 8;
+            t->object = p.material;
+            std::snprintf(t->note, sizeof(t->note), "the material's pass of view %u", w.view);
+            break;
+        case kGatePassOff:
+            at = p.pass + kPassOn;
+            length = 1;
+            t->object = p.pass;
+            std::snprintf(t->note, sizeof(t->note), "the pass's on byte");
+            break;
+        default: return 1;
+    }
+    unsigned len = 0;
+    alignWatch(at, length, &t->address, &len);
+    t->length = len;
+    return 0;
+}
+
+// One instruction that wrote the watched place: its writes by place (and those that opened the gate) and the last value, all kept by the
+// handler; the first write's value, place, thread and callers, published once.
 struct Site {
     std::atomic<uint64_t> rip{0};
     std::atomic<uint64_t> hits{0};
-    std::atomic<uint64_t> at[kPlaces]{}, camBit[kPlaces]{};
+    std::atomic<uint64_t> at[kPlaces]{}, opens[kPlaces]{};
     std::atomic<uint64_t> last{0};
     std::atomic<uint8_t> ready{0};
-    uint8_t place = 0, frames = 0, camFirst = 0;  // camFirst: the first value carried a bit of the HUD nodes' cameras
+    uint8_t place = 0, frames = 0, opensFirst = 0;  // opensFirst: the first value opened the gate
     uint32_t thread = 0;
     uint64_t value = 0;
     uint64_t stack[kStackFrames] = {};
@@ -1506,7 +2278,7 @@ struct Site {
 // Lock-free, as nvp::WriterTable: a new site claims a free row by compare-and-swap, the handler fills it and only then sets `ready`.
 class SiteTable {
 public:
-    int record(uint64_t rip, int place, uint64_t value, bool withCamBit, bool* fresh) noexcept {
+    int record(uint64_t rip, int place, uint64_t value, bool opens, bool* fresh) noexcept {
         *fresh = false;
         m_hits.fetch_add(1, std::memory_order_relaxed);
         const int p = place >= 0 && place < kPlaces ? place : kPlaceShip;
@@ -1515,26 +2287,26 @@ public:
             if (seen == 0) {
                 uint64_t expected = 0;
                 if (m_sites[i].rip.compare_exchange_strong(expected, rip, std::memory_order_acq_rel)) {
-                    count(m_sites[i], p, value, withCamBit);
+                    count(m_sites[i], p, value, opens);
                     *fresh = true;
                     return i;
                 }
                 seen = expected;
             }
             if (seen == rip) {
-                count(m_sites[i], p, value, withCamBit);
+                count(m_sites[i], p, value, opens);
                 return i;
             }
         }
         m_overflow.fetch_add(1, std::memory_order_relaxed);
         return -1;
     }
-    void publish(int row, uint32_t thread, int place, uint64_t value, bool withCamBit, const uint64_t* stack, int frames) noexcept {
+    void publish(int row, uint32_t thread, int place, uint64_t value, bool opens, const uint64_t* stack, int frames) noexcept {
         Site& s = m_sites[row];
         s.thread = thread;
         s.place = static_cast<uint8_t>(place >= 0 && place < kPlaces ? place : kPlaceShip);
         s.value = value;
-        s.camFirst = withCamBit ? 1 : 0;
+        s.opensFirst = opens ? 1 : 0;
         s.frames = static_cast<uint8_t>(frames < 0 ? 0 : (frames > kStackFrames ? kStackFrames : frames));
         for (int i = 0; i < s.frames; ++i) s.stack[i] = stack[i];
         s.ready.store(1, std::memory_order_release);
@@ -1559,10 +2331,10 @@ public:
     uint64_t overflow() const { return m_overflow.load(std::memory_order_relaxed); }
 
 private:
-    static void count(Site& s, int p, uint64_t value, bool withCamBit) noexcept {
+    static void count(Site& s, int p, uint64_t value, bool opens) noexcept {
         s.hits.fetch_add(1, std::memory_order_relaxed);
         s.at[p].fetch_add(1, std::memory_order_relaxed);
-        if (withCamBit) s.camBit[p].fetch_add(1, std::memory_order_relaxed);
+        if (opens) s.opens[p].fetch_add(1, std::memory_order_relaxed);
         s.last.store(value, std::memory_order_relaxed);
     }
     Site m_sites[kSites];
@@ -1570,60 +2342,58 @@ private:
     std::atomic<uint64_t> m_hits{0}, m_overflow{0};
 };
 
-// The value a watch saw written: the subscription's eight bytes.
+// The value a watch saw written: up to eight bytes.
 inline int formatWatchValue(uint64_t v, char* out, size_t cap) { return std::snprintf(out, cap, "0x%llX", static_cast<unsigned long long>(v)); }
 
-// Which provider the watch took and why this one: the view it is of and whether that is the pass's view 0 (`pass`: 1 it is, 0 it is
-// another view because view 0 had none with 0x8, -1 the pass's view 0 is not known yet).
-inline int formatWatchTarget(int viewBit, int pass, char* out, size_t cap) {
-    return std::snprintf(out, cap, "the first provider with 0x8, of view bit %d%s", viewBit,
-                         pass > 0 ? ", the pass's view 0" : pass == 0 ? " (view 0 has none with 0x8)" : " (the pass's view 0 is not known yet)");
-}
-
-inline int formatWatchOn(int w, uint64_t address, uint64_t object, uint32_t armed, uint32_t skipped, uint32_t failed, const char* note, char* out,
-                         size_t cap) {
+inline int formatWatchOn(const char* name, uint64_t address, uint64_t object, unsigned length, unsigned slot, uint32_t armed, uint32_t skipped,
+                         uint32_t failed, const char* note, char* out, size_t cap) {
     return std::snprintf(out, cap,
-                         "on-foot hud probe: watch on: %s 0x%llX (0x%llX+0x%llX) on debug slot %u, write, 4 bytes: %u thread(s), %u skipped "
+                         "on-foot hud probe: watch on: %s 0x%llX (0x%llX+0x%llX) on debug slot %u, write, %u bytes: %u thread(s), %u skipped "
                          "(slot taken), %u could not be set%s%s",
-                         watchName(w), static_cast<unsigned long long>(address), static_cast<unsigned long long>(object),
-                         static_cast<unsigned long long>(watchOffset(w)), kWatchSlot[w], armed, skipped, failed, note ? "; " : "", note ? note : "");
+                         name, static_cast<unsigned long long>(address), static_cast<unsigned long long>(object),
+                         static_cast<unsigned long long>(address - object), slot, length, armed, skipped, failed, note ? "; " : "", note ? note : "");
 }
-inline int formatWatchNotOn(int w, uint64_t address, const char* why, char* out, size_t cap) {
-    return std::snprintf(out, cap, "on-foot hud probe: watch NOT on: %s 0x%llX: %s; the provider, pose, state and graph lines go on", watchName(w),
+inline int formatWatchNotOn(const char* name, uint64_t address, const char* why, char* out, size_t cap) {
+    return std::snprintf(out, cap, "on-foot hud probe: watch NOT on: %s 0x%llX: %s; the walk, provider, pose, state and graph lines go on", name,
                          static_cast<unsigned long long>(address), why);
 }
-inline int formatWatchOff(int w, uint64_t address, const char* why, const SiteTable& t, char* out, size_t cap) {
-    return std::snprintf(out, cap, "on-foot hud probe: watch off: %s 0x%llX: %s; %d site(s), %llu hit(s), %llu from sites that did not fit",
-                         watchName(w), static_cast<unsigned long long>(address), why, t.sites(), static_cast<unsigned long long>(t.hits()),
+inline int formatWatchOff(const char* name, uint64_t address, const char* why, const SiteTable& t, char* out, size_t cap) {
+    return std::snprintf(out, cap, "on-foot hud probe: watch off: %s 0x%llX: %s; %d site(s), %llu hit(s), %llu from sites that did not fit", name,
+                         static_cast<unsigned long long>(address), why, t.sites(), static_cast<unsigned long long>(t.hits()),
                          static_cast<unsigned long long>(t.overflow()));
 }
-inline int formatWatchMoves(int w, uint64_t from, uint64_t to, char* out, size_t cap) {
+inline int formatWatchMoves(const char* name, uint64_t from, uint64_t to, char* out, size_t cap) {
     return std::snprintf(out, cap,
-                         "on-foot hud probe: watch moves: %s 0x%llX -> 0x%llX (the watched provider left its view's list for 2 s; this one "
-                         "answered with 0x8)",
-                         watchName(w), static_cast<unsigned long long>(from), static_cast<unsigned long long>(to));
+                         "on-foot hud probe: watch moves: %s 0x%llX -> 0x%llX (the watched path left its view's walks for 2 s; this one is open in "
+                         "cinema and closed in stereo)",
+                         name, static_cast<unsigned long long>(from), static_cast<unsigned long long>(to));
+}
+// No path was open in cinema and closed in stereo yet, said in the 30-second summary: why no watch is armed.
+inline int formatNoGateDifference(char* out, size_t cap) {
+    return std::snprintf(out, cap,
+                         "on-foot hud probe: no _HUD path has been open in cinema and closed in a matched stereo walk yet: the gate watch is not armed");
 }
 
-// One line per site: the instruction after the write, the value it wrote first and where, whether that value carried a bit of the HUD
-// nodes' cameras (the handler's test against the bits the frame thread publishes), the callers (unwound from the writer's own context).
-inline int formatWriter(int w, int row, const Site& s, uint64_t object, uint64_t base, uint64_t imageSize, char* out, size_t cap) {
+// One line per site: the instruction after the write, the value it wrote first and where, whether that value opened the gate, the callers
+// (unwound from the writer's own context).
+inline int formatWriter(const char* name, int row, const Site& s, uint64_t object, uint64_t base, uint64_t imageSize, char* out, size_t cap) {
     char at[100], callers[400], value[40];
     const uint64_t rip = s.rip.load(std::memory_order_acquire);
     formatCallers(&rip, 1, base, imageSize, at, sizeof(at));
     formatCallers(s.stack, s.frames, base, imageSize, callers, sizeof(callers));
     formatWatchValue(s.value, value, sizeof(value));
     return std::snprintf(out, cap, "on-foot hud probe: writer #%d of the %s of 0x%llX: at %s (after the write), value %s%s, %s, thread %u, from %s",
-                         row + 1, watchName(w), static_cast<unsigned long long>(object), at, value,
-                         s.camFirst ? " (with the HUD camera bit)" : " (without the HUD camera bit)", placeName(s.place), s.thread, callers);
+                         row + 1, name, static_cast<unsigned long long>(object), at, value, s.opensFirst ? " (opens the gate)" : " (keeps it closed)",
+                         placeName(s.place), s.thread, callers);
 }
 
 // The watch's 30-second line while it is on: the window's writes, then each site that wrote in it -- its writes in the ship, on foot in
-// stereo, on foot in cinema, how many of them carried the HUD camera bit, and the last value it wrote. "0 write(s)" when the watch stood
-// quiet: a watch that is not on has no line at all.
+// stereo, on foot in cinema, how many of them opened the gate, and the last value it wrote. "0 write(s)" when the watch stood quiet: a
+// watch that is not on has no line at all.
 class WatchSummary {
 public:
     static constexpr uint64_t kWindowMs = 30000;
-    int step(uint64_t nowMs, int w, uint64_t address, const SiteTable& t, char* out, size_t cap) {
+    int step(uint64_t nowMs, const char* name, uint64_t address, const SiteTable& t, char* out, size_t cap) {
         if (!m_started) {
             m_started = true;
             m_since = nowMs;
@@ -1634,16 +2404,15 @@ public:
         const uint64_t seconds = (nowMs - m_since) / 1000;
         m_since = nowMs;
         const uint64_t hits = t.hits() - m_hits, overflow = t.overflow() - m_overflow;
-        int len = std::snprintf(out, cap, "on-foot hud probe: %llu s watch %s 0x%llX: %llu write(s)%s", static_cast<unsigned long long>(seconds),
-                                watchName(w), static_cast<unsigned long long>(address), static_cast<unsigned long long>(hits),
-                                hits ? "" : ": it is on and stood quiet");
+        int len = std::snprintf(out, cap, "on-foot hud probe: %llu s watch %s 0x%llX: %llu write(s)%s", static_cast<unsigned long long>(seconds), name,
+                                static_cast<unsigned long long>(address), static_cast<unsigned long long>(hits), hits ? "" : ": it is on and stood quiet");
         for (int i = 0; i < kSites && len > 0 && static_cast<size_t>(len) < cap; ++i) {
             const Site& s = t.site(i);
             if (!s.rip.load(std::memory_order_acquire)) continue;
             uint64_t n[kPlaces], h[kPlaces], any = 0;
             for (int p = 0; p < kPlaces; ++p) {
                 n[p] = s.at[p].load(std::memory_order_relaxed) - m_at[i][p];
-                h[p] = s.camBit[p].load(std::memory_order_relaxed) - m_camBit[i][p];
+                h[p] = s.opens[p].load(std::memory_order_relaxed) - m_opens[i][p];
                 any += n[p];
             }
             if (!any) continue;
@@ -1654,7 +2423,7 @@ public:
                                  static_cast<unsigned long long>(n[kPlaceStereo]), placeShort(kPlaceCinema),
                                  static_cast<unsigned long long>(n[kPlaceCinema]));
             if (len > 0 && static_cast<size_t>(len) < cap)
-                len += std::snprintf(out + len, cap - len, " (with the camera bit %llu, %llu, %llu)", static_cast<unsigned long long>(h[kPlaceShip]),
+                len += std::snprintf(out + len, cap - len, " (opening the gate %llu, %llu, %llu)", static_cast<unsigned long long>(h[kPlaceShip]),
                                      static_cast<unsigned long long>(h[kPlaceStereo]), static_cast<unsigned long long>(h[kPlaceCinema]));
             if (len > 0 && static_cast<size_t>(len) < cap) len += std::snprintf(out + len, cap - len, ", last %s", value);
         }
@@ -1671,12 +2440,12 @@ private:
         for (int i = 0; i < kSites; ++i)
             for (int p = 0; p < kPlaces; ++p) {
                 m_at[i][p] = t.site(i).at[p].load(std::memory_order_relaxed);
-                m_camBit[i][p] = t.site(i).camBit[p].load(std::memory_order_relaxed);
+                m_opens[i][p] = t.site(i).opens[p].load(std::memory_order_relaxed);
             }
     }
     bool m_started = false;
     uint64_t m_since = 0, m_hits = 0, m_overflow = 0;
-    uint64_t m_at[kSites][kPlaces] = {}, m_camBit[kSites][kPlaces] = {};
+    uint64_t m_at[kSites][kPlaces] = {}, m_opens[kSites][kPlaces] = {};
 };
 
 }  // namespace ohp
