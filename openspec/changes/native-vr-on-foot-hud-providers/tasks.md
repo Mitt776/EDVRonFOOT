@@ -49,13 +49,13 @@
 - [x] 3.1 Исследование `docs/research/native-vr-on-foot.md`: раздел «Зонд `.19`: поставщики узла HUD». В нём строки лога,
   как их читать и таблица исходов P1–P5 из design. В `## Status` — следующий шаг «прогулка `.19`». Проверка:
   `## Status` не длиннее 60 строк.
-- [ ] 3.2 Полная сборка. В PowerShell: PATH начинается с `C:\Users\user\AppData\Local\Programs\Python\Python312`,
+- [x] 3.2 Полная сборка. В PowerShell: PATH начинается с `C:\Users\user\AppData\Local\Programs\Python\Python312`,
   `TEMP`/`TMP` = `D:\Project VSC\EDVRonFOOT\edvr\build\tmp`, затем `cmd /c '"D:\Project VSC\EDVRonFOOT\edvr\build.bat"
   --jobs 8'`. Проверка:
   - «all gates passed», квитанция `full-pass`;
   - коммит, тег `v0.19.1-edvronfoot.19`;
   - `build.bat --dll-only` проходит.
-- [ ] 3.3 Установка при закрытой игре: `py -3.12 edvr\tools\install_edvr.py --target "C:\Steam\steamapps\common\Elite
+- [x] 3.3 Установка при закрытой игре: `py -3.12 edvr\tools\install_edvr.py --target "C:\Steam\steamapps\common\Elite
   Dangerous\Products\elite-dangerous-odyssey-64" --all --tag edvronfoot --dry-run`, затем без `--dry-run`. В живом
   `edvr.ini` через Edit — `on_foot_hud_probe = 1` (строка 1717). Проверка:
   - `edvronfoot_game.ps1 -Action Status` показывает `.19`;
@@ -72,7 +72,7 @@
   5. В корабль, выход через меню.
 
   Проверка: Дима подтвердил шаги и сказал, были ли тормоза и стоят ли метки на предметах.
-- [ ] 4.2 Разбор лога. Сначала `edvr_log.py --expect-build v0.19.1-edvronfoot.19` не 2. Дальше:
+- [x] 4.2 Разбор лога. Сначала `edvr_log.py --expect-build v0.19.1-edvronfoot.19` не 2. Дальше:
   - доля сошедшихся снимков;
   - перепись в кинотеатре и стерео;
   - кто давал `0x8` и что с ним в стерео;
@@ -80,7 +80,7 @@
 
   Определить исход P1–P5. Вывод — в исследование («Прогулка `.19`»), `ruled out:` для отпавшего. Вернуть
   `on_foot_hud_probe = 0` в живом `edvr.ini` через Edit. Проверка: исход назван с номерами строк лога.
-- [ ] 4.3 Статика (design, решение 7). Скопировать `g.ps1` и `gs\DecompRva.java` из
+- [x] 4.3 Статика (design, решение 7). Скопировать `g.ps1` и `gs\DecompRva.java` из
   `C:\Users\user\AppData\Local\Temp\claude\D--Project-VSC-EDVRonFOOT\2a965640-1f8d-4f0f-9a59-59496ab83715\scratchpad\re\`
   в scratchpad сессии. Ghidra — только чтение, игра закрыта. Дальше по исходу:
   - P1/P2 — декомпилировать `vt+0x68` поставщика и его вызовы на 1–2 уровня;
