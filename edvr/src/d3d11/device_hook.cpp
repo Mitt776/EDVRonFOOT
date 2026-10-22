@@ -45,6 +45,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "native_vr_probe.h"   // EDVRonFOOT: nativeVrProbeFrameBoundary (the frame tick: config, install, drain)
 #include "on_foot_hud.h"       // EDVRonFOOT: onFootHudFrameBoundary
 #include "on_foot_hud_probe.h" // EDVRonFOOT: onFootHudProbeFrameBoundary
+#include "on_foot_markers.h"   // EDVRonFOOT: onFootMarkersFrameBoundary
 #include "ui_surfaces.h"   // the glyph atlas and sizing chain instruments
 #include "ui_panel_scale.h" // uiPanelScaleShutdown: the panel operands put back
 #include "ui_sizing_math.h" // uiDisplaySizeFromXml: DisplaySettings.xml, for the panel budget
@@ -1218,6 +1219,7 @@ EDVR_BOUNDARY_TICK(tkExplorerCam, "explorer_cam");
 EDVR_BOUNDARY_TICK(tkNativeVrProbe, "native_vr_probe");
 EDVR_BOUNDARY_TICK(tkOnFootHud, "on_foot_hud");
 EDVR_BOUNDARY_TICK(tkOnFootHudProbe, "on_foot_hud_probe");
+EDVR_BOUNDARY_TICK(tkOnFootMarkers, "on_foot_markers");
 EDVR_BOUNDARY_TICK(tkFssModeLatch, "fss_mode_latch");
 EDVR_BOUNDARY_TICK(tkMenu, "menu");
 EDVR_BOUNDARY_TICK(tkBindingBoundary, "binding_boundary");
@@ -1566,6 +1568,9 @@ void presentFrameBoundary() {
     tkNativeVrProbe.run([] { nativeVrProbeFrameBoundary(); });
     // EDVRonFOOT: the on-foot HUD probe (on_foot_hud_probe.h): its key, its hook, the PostGUI nodes' lines and summary.
     tkOnFootHudProbe.run([] { onFootHudProbeFrameBoundary(); });
+    // EDVRonFOOT: the on-foot markers (on_foot_markers.h): its keys, the journal, the mode the writer hooks act on, the install, the
+    // on and off lines, the end-of-frame check and the summary.
+    tkOnFootMarkers.run([] { onFootMarkersFrameBoundary(); });
     // EDVRonFOOT: the on-foot HUD (on_foot_hud.h): its keys, the journal, the draw flag, the frame's panels, the panel key and the summary;
     // before vScreenFrameBoundary below, which samples the draw gate the flag feeds.
     tkOnFootHud.run([] { onFootHudFrameBoundary(); });

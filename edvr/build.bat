@@ -535,6 +535,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\native_vr_probe.cpp" ^
     "src\d3d11\on_foot_hud.cpp" ^
     "src\d3d11\on_foot_hud_probe.cpp" ^
+    "src\d3d11\on_foot_markers.cpp" ^
     "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" "src\d3d11\vscreen_footprint.cpp" ^
     "src\d3d11\binding_shadow.cpp" ^
     "src\d3d11\vr_runtime.cpp" ^
@@ -3068,6 +3069,27 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: on-foot hud probe test build failed & exit /b 1 )
 "%BUILD%\on_foot_hud_probe_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_on_foot_markers_test
+echo [edvr] === on_foot_markers_test.exe ===
+REM EDVRonFOOT: build gate for the on-foot markers (src\d3d11\on_foot_markers.h, experimental.native_vr_on_foot_markers). Part A drives
+REM on_foot_markers_core.h: the key (no line, stereo, flat, off, garbage), the decision over native_vr_on_foot, the key and the journal,
+REM the corrected pose (stereo keeps the eyes' distance and stands still through a +/-60 degree turn and a 20 degree tilt, flat at 0,
+REM both a fixed point), the chain to both PostGUI cameras with each refusal, the toggle, the 30-second window and every line's text,
+REM "0 writer calls" among them. Part B compiles the REAL glue with the real CodeHook on synthetic writers with the game's 16 bytes:
+REM another build and a wrong byte at any point refused with one line and nothing patched, forward only while off, both eyes the
+REM identity with flags |= 0xF and the commit called with (cam, size, cam+0x20), a nested writer one step, a mismatched camera and a
+REM wrong view id skipped, the frame step's key, on and off lines, end-of-frame check and summary, three commit faults turning it off.
+if not exist "%OBJ%\onfootmarkers" mkdir "%OBJ%\onfootmarkers"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^
+    /Fo"%OBJ%\onfootmarkers"\ /Fe"%BUILD%\on_foot_markers_test.exe" ^
+    "tools\on_foot_markers_test\on_foot_markers_test.cpp" "src\d3d11\on_foot_markers.cpp" ^
+    "src\common\code_hook.cpp" "src\common\guard.cpp" "src\common\log.cpp" "src\common\config.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: on-foot markers test build failed & exit /b 1 )
+"%BUILD%\on_foot_markers_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_explorer_cam_fade_test
