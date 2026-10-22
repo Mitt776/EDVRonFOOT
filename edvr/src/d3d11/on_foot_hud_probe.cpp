@@ -65,6 +65,13 @@ std::atomic<uint64_t> g_graphPostGui{0}, g_graphOther{0};
 // camera (the frame thread's, from the node snapshots).
 ohp::PassTable g_passes;
 ohp::MaskByCamera g_masks;
+// .19: the HUD node's providers. The node draw hook reads the list after the original and keeps the answers by provider, view and place
+// in the table; a list of a new shape (or in a new place) goes to the ring for the frame thread. g_place is the frame thread's, for the
+// hook and the write watch's handler; g_hudCamBits the OR of the HUD nodes' camera bits of both views, for the handler.
+ohp::ProviderTable g_providers;
+ohp::Ring<4, ohp::ProviderSnap> g_providerRing;
+std::atomic<int> g_place{ohp::kPlaceShip};
+std::atomic<uint64_t> g_hudCamBits{0};
 
 // ---- the hook side: no lock, no allocation, no log -------------------------------------------------------------------------------
 
@@ -111,6 +118,15 @@ void remember(int kind, int32_t viewBit, uint64_t node) {
     g_cellsFull.fetch_add(1, std::memory_order_relaxed);
 }
 
+// .19, the HUD node only, after its draw: its context is still prepared for it, so the providers' answers are this node's. The snapshot
+// (a few KB on the stack, filled by the reader) goes in the table when it matches; only a list of a new shape or a new place is copied
+// into the ring.
+__declspec(noinline) void providersOfHudNode(void* node) {
+    ohp::ProviderSnap s;
+    const int result = ohp::readProviders(reinterpret_cast<uint64_t>(node), &sehRead, nullptr, &s);
+    if (g_providers.take(result, s, g_place.load(std::memory_order_relaxed))) g_providerRing.push(s);
+}
+
 // After the original: a list's models may be handed in during the draw itself (0x594EF0's first loop), so before it would read empty.
 __declspec(noinline) void nodeDrawHook(void* node) {
     reinterpret_cast<Fn1>(g_points[ohp::kPointNodeDraw].original.load(std::memory_order_acquire))(node);
@@ -126,6 +142,7 @@ __declspec(noinline) void nodeDrawHook(void* node) {
         return;
     }
     g_calls.fetch_add(1, std::memory_order_relaxed);
+    if (ohp::kindOf(first) == ohp::kKindHud) providersOfHudNode(node);
     ohp::Snapshot s;
     if (!ohp::capture(reinterpret_cast<uint64_t>(node), &sehRead, nullptr, &s)) {
         g_faults.fetch_add(1, std::memory_order_relaxed);
@@ -214,14 +231,13 @@ const void* hookFor(int point) {
 }
 
 // ---- the write watches: the handler side (any thread; no lock, no allocation, no log) ----------------------------------------------
-// .16: slot 2 view 0's PostGUI camera, slot 3 its HUD node's frame mask (ohp::kWatchSlot): the same technique as native_vr_probe.cpp's
-// writer watch (slot 1).
+// .19: slot 2 the subscription (+0x28) of the first HUD provider (ohp::kWatchSlot): the same technique as native_vr_probe.cpp's writer
+// watch (slot 1). Slot 3 is free again.
 
 std::atomic<uintptr_t> g_watchAddress[ohp::kWatchCount];
 std::atomic<uintptr_t> g_watchPrevious[ohp::kWatchCount];
 std::atomic<bool> g_watchActive[ohp::kWatchCount];
 ohp::SiteTable g_sites[ohp::kWatchCount];
-std::atomic<int> g_place{ohp::kPlaceShip};  // where the commander is (ohp::Place), the frame thread's, for the handler
 
 DWORD64& slotRegister(CONTEXT* c, unsigned slot) { return slot == 2 ? c->Dr2 : c->Dr3; }
 
@@ -260,7 +276,7 @@ LONG CALLBACK watchHandler(EXCEPTION_POINTERS* ep) {
         const uintptr_t previous = g_watchPrevious[f].load(std::memory_order_acquire);
         DWORD64& dr = slotRegister(c, slot);
         const DWORD64 hitBit = DWORD64(1) << slot;
-        // Slots 2 and 3 are this probe's alone in EDVR. A context that reports no slot is ours only at an address we watched, and never
+        // Slot 2 is this probe's alone in EDVR. A context that reports no slot is ours only at an address we watched, and never
         // when it is a trap-flag step (Dr6.BS): vtable_hook.cpp's write watch single-steps with it.
         const bool slotHit = (c->Dr6 & hitBit) != 0;
         const bool known = dr && (dr == address || dr == previous);
@@ -272,16 +288,18 @@ LONG CALLBACK watchHandler(EXCEPTION_POINTERS* ep) {
             dr = 0;
             return EXCEPTION_CONTINUE_EXECUTION;
         }
-        // The camera's first float; the whole mask (the watch covers its low half, the _HUD bit among them).
+        // The whole subscription (the watch covers its low half, the bits of both PostGUI cameras among them), and whether it carries a
+        // bit of the HUD nodes' cameras.
         uint64_t value = 0;
-        sehRead(nullptr, address, &value, f == ohp::kWatchMask ? 8 : 4);
+        sehRead(nullptr, address, &value, 8);
         const int place = g_place.load(std::memory_order_relaxed);
+        const bool camBit = (value & g_hudCamBits.load(std::memory_order_relaxed)) != 0;
         bool fresh = false;
-        const int row = g_sites[f].record(static_cast<uint64_t>(c->Rip), place, value, f == ohp::kWatchMask && (value & ohp::kHudBit) != 0, &fresh);
+        const int row = g_sites[f].record(static_cast<uint64_t>(c->Rip), place, value, camBit, &fresh);
         if (fresh) {
             uint64_t stack[ohp::kStackFrames] = {};
             const int frames = sehUnwind(c, stack);
-            g_sites[f].publish(row, GetCurrentThreadId(), place, value, stack, frames);
+            g_sites[f].publish(row, GetCurrentThreadId(), place, value, camBit, stack, frames);
         }
         return EXCEPTION_CONTINUE_EXECUTION;
     }
@@ -355,7 +373,7 @@ int setThreadWatchSafe(DWORD tid, unsigned slot, uintptr_t address, bool arm) no
 constexpr size_t kWatchThreads = 1024;
 DWORD g_watchTids[ohp::kWatchCount][kWatchThreads];
 size_t g_watchTidCount[ohp::kWatchCount] = {};
-uint64_t g_watchObject[ohp::kWatchCount] = {};  // the camera or draw context of the watched place, for the lines
+uint64_t g_watchObject[ohp::kWatchCount] = {};  // the watched provider, for the lines
 PVOID g_watchHandler = nullptr;
 
 void say(OnFootHudProbeSink sink, void* ctx, int n, const char* line) {
@@ -520,7 +538,7 @@ void onFootHudProbeSetRecording(bool on) { g_recording.store(on, std::memory_ord
 uint64_t onFootHudProbeCalls() { return g_calls.load(std::memory_order_relaxed); }
 uint64_t onFootHudProbeFaults() { return g_faults.load(std::memory_order_relaxed); }
 
-int onFootHudProbeWatchArm(int watch, uintptr_t address, uint64_t object, OnFootHudProbeSink sink, void* ctx) {
+int onFootHudProbeWatchArm(int watch, uintptr_t address, uint64_t object, const char* note, OnFootHudProbeSink sink, void* ctx) {
     char line[400];
     if (watch < 0 || watch >= ohp::kWatchCount || g_watchTidCount[watch] || !address) return 0;
     if (address & 3) {
@@ -572,7 +590,7 @@ int onFootHudProbeWatchArm(int watch, uintptr_t address, uint64_t object, OnFoot
         say(sink, ctx, ohp::formatWatchNotOn(watch, address, why, line, sizeof(line)), line);
         return 0;
     }
-    say(sink, ctx, ohp::formatWatchOn(watch, address, object, armed, skipped, failed, line, sizeof(line)), line);
+    say(sink, ctx, ohp::formatWatchOn(watch, address, object, armed, skipped, failed, note, line, sizeof(line)), line);
     return static_cast<int>(armed);
 }
 
@@ -611,8 +629,8 @@ void onFootHudProbeStopWatches(const char* why, OnFootHudProbeSink sink, void* c
 
 namespace {
 
-// The frame thread's side of the graph: the cells' new nodes and graphs, each cell's state, the events (the watches are .16's,
-// drainWatches below).
+// The frame thread's side of the graph: the cells' new nodes and graphs, each cell's state, the events (the providers and the watch are
+// .19's, drainProviders below).
 void drainGraph(uint64_t nowMs, int onFoot, OnFootHudProbeSink sink, void* ctx) {
     static ohp::StateLog stateLog;
     static ohp::GraphSummary summary;
@@ -675,56 +693,141 @@ void drainGraph(uint64_t nowMs, int onFoot, OnFootHudProbeSink sink, void* ctx) 
     const ohp::GraphCounts total{g_walks.load(std::memory_order_relaxed), g_idleWalks.load(std::memory_order_relaxed),
                                  g_walkFaults.load(std::memory_order_relaxed), g_graphPostGui.load(std::memory_order_relaxed),
                                  g_graphOther.load(std::memory_order_relaxed), g_events.dropped(),
-                                 g_sites[ohp::kWatchCamera].hits() + g_sites[ohp::kWatchMask].hits(), stateLog.held()};
+                                 g_sites[ohp::kWatchSubscription].hits(), stateLog.held()};
     say(sink, ctx, summary.step(nowMs, total, views, nViews, line, sizeof(line)), line);
 }
 
-// .16, from the camera drain: the watches follow view 0's PostGUI camera (pass0+0x50) and the draw context of the HUD node drawn with
-// it; a new target moves its watch with a line. Every frame: the place for the handler, the new writers' lines, each watch's 30-second
-// line while it is on, and the fuse. They are re-armed when the journal's on-foot changes (threads started since).
-void drainWatches(uint64_t nowMs, int onFoot, int stereo, uint64_t pass0, OnFootHudProbeSink sink, void* ctx) {
+// .19, from the camera drain: the HUD node's providers and the subscription watch. Every frame: the place and the HUD nodes' camera
+// bits for the hook and the handler, the lists the ring brought (a view's at most every 5 s, the latest kept), the first snapshot that
+// did not match, the new writers' lines, the watch's 30-second line while it is on, the fuse. Every 30 s: the providers' summary. The
+// watch takes the subscription of the first provider that answered with 0x8 (view 0's, the pass's, when it has one); it comes off, with
+// a line, when that provider stays out of its view's list for 2 s, and is re-armed when the journal's on-foot changes (threads started
+// since).
+void drainProviders(uint64_t nowMs, int onFoot, int stereo, uint64_t pass0, OnFootHudProbeSink sink, void* ctx) {
     static ohp::Fuse fuse;
-    static ohp::WatchSummary summaries[ohp::kWatchCount];
-    static uint64_t want[ohp::kWatchCount] = {}, object[ohp::kWatchCount] = {}, refused[ohp::kWatchCount] = {};
-    static uint64_t nextCheckMs = 0;
+    static ohp::WatchSummary watchSummary;
+    static ohp::ProviderSummary summary;
+    static ohp::ProviderSnap pending[ohp::kProvViews];
+    static bool hasPending[ohp::kProvViews] = {}, saidView[ohp::kProvViews] = {};
+    static uint64_t saidMs[ohp::kProvViews] = {};
+    // Per row: its frames when last looked at, when they last grew (or its view was last not read), and its view's snapshots then.
+    static uint64_t seenFrames[ohp::kProvRows] = {}, seenMs[ohp::kProvRows] = {}, seenViewSnaps[ohp::kProvRows] = {};
+    static int targetRow = -1;
+    static uint64_t refused = 0;
     static bool fused = false;
     static int lastOnFoot = -2;
     char line[1600];
+    const uintptr_t base = g_base.load(std::memory_order_relaxed);
+    const uint64_t imageSize = g_imageSize.load(std::memory_order_relaxed);
+    const int w = ohp::kWatchSubscription;
     g_place.store(ohp::placeOf(onFoot, stereo), std::memory_order_relaxed);
+    g_hudCamBits.store(g_providers.camBits(), std::memory_order_relaxed);
 
-    // The targets, every 2 s once view 0's pass is known (every frame until then): a target not found now keeps the watch where it is.
-    if (pass0 && nowMs >= nextCheckMs) {
-        nextCheckMs = nowMs + ohp::kWatchCheckMs;
-        uint64_t cam = 0, mask = 0, hudCtx = 0;
-        if (sehRead(nullptr, pass0 + ohp::kPassPostGuiCamera, &cam, sizeof(cam)) && cam) {
-            want[ohp::kWatchCamera] = cam + ohp::watchOffset(ohp::kWatchCamera);
-            object[ohp::kWatchCamera] = cam;
-            if (g_masks.find(cam, nowMs, &mask, &hudCtx) && hudCtx) {
-                want[ohp::kWatchMask] = hudCtx + ohp::watchOffset(ohp::kWatchMask);
-                object[ohp::kWatchMask] = hudCtx;
-            }
+    // The lists: a view's latest waits for its 5 seconds.
+    ohp::ProviderSnap rec;
+    while (g_providerRing.pop(&rec))
+        if (rec.viewSlot >= 0 && rec.viewSlot < ohp::kProvViews) {
+            pending[rec.viewSlot] = rec;
+            hasPending[rec.viewSlot] = true;
+        }
+    for (int v = 0; v < ohp::kProvViews; ++v) {
+        if (!hasPending[v] || (saidView[v] && nowMs - saidMs[v] < ohp::kProvLineMs)) continue;
+        hasPending[v] = false;
+        saidView[v] = true;
+        saidMs[v] = nowMs;
+        say(sink, ctx, ohp::formatProviderHead(pending[v], line, sizeof(line)), line);
+        for (uint32_t i = 0; i < pending[v].stored; ++i) say(sink, ctx, ohp::formatProviderLine(pending[v], i, base, imageSize, line, sizeof(line)), line);
+    }
+    int reason = 0;
+    uint64_t badA = 0, badB = 0, badNode = 0;
+    if (g_providers.nextBad(&reason, &badA, &badB, &badNode)) say(sink, ctx, ohp::formatBadPair(reason, badA, badB, badNode, line, sizeof(line)), line);
+
+    // The summary: the window's snapshots (or none), the totals, the providers that were ever subscribed or answered, and, when none ever
+    // answered with 0x8, that.
+    uint64_t seconds = 0, snaps = 0;
+    const int due = summary.step(nowMs, g_providers.attempts(), &seconds, &snaps);
+    if (due) {
+        say(sink, ctx, ohp::formatProviderSummary(seconds, snaps, g_providers, g_providerRing.dropped(), line, sizeof(line)), line);
+        for (int i = 0; due == 1 && i < ohp::kProvRows; ++i) {
+            const auto& r = g_providers.rowAt(i);
+            if (ohp::providerWorthALine(r))
+                say(sink, ctx, ohp::formatProviderRow(r, g_providers.viewBitOf(ohp::ProviderTable::rowView(r)), base, imageSize, line, sizeof(line)), line);
+        }
+        if (g_providers.matched() > 0 && !g_providers.hudSeen()) say(sink, ctx, ohp::formatNoHudProvider(line, sizeof(line)), line);
+    }
+
+    // The rows still in their view's list: a row whose frames grew is seen now. A row is out of its list only while its view's HUD node
+    // keeps being read without it: while the node is not read at all (a loading screen, the very moment a subscription may be rewritten)
+    // nothing goes stale.
+    const uint64_t stamp = nowMs ? nowMs : 1;
+    for (int i = 0; i < ohp::kProvRows; ++i) {
+        const auto& r = g_providers.rowAt(i);
+        if (!r.key.load(std::memory_order_acquire)) continue;
+        const int v = ohp::ProviderTable::rowView(r);
+        const uint64_t viewSnaps = v >= 0 && v < ohp::kProvViews ? g_providers.view(v).snaps.load(std::memory_order_relaxed) : 0;
+        uint64_t total = 0;
+        for (int p = 0; p < ohp::kPlaces; ++p) total += r.frames[p].load(std::memory_order_relaxed);
+        if (!seenMs[i] || total != seenFrames[i] || viewSnaps == seenViewSnaps[i]) {
+            seenFrames[i] = total;
+            seenMs[i] = stamp;  // grew, or its view was not read since the last frame: absence is not measured
+        }
+        seenViewSnaps[i] = viewSnaps;
+    }
+    const auto inList = [&](int i) { return seenMs[i] != 0 && nowMs - seenMs[i] < ohp::kProvStaleMs; };
+
+    // The first provider with 0x8 still in its list: view 0's (the view whose HUD node was drawn with the pass's PostGUI camera) first,
+    // else any view's.
+    uint64_t postCam = 0;
+    const bool passKnown = pass0 && sehRead(nullptr, pass0 + ohp::kPassPostGuiCamera, &postCam, sizeof(postCam)) && postCam;
+    int best = -1, bestPass = -1;
+    uint64_t bestSeq = 0, bestPassSeq = 0;
+    for (int i = 0; i < ohp::kProvRows; ++i) {
+        const auto& r = g_providers.rowAt(i);
+        const uint64_t seq = r.hudSeq.load(std::memory_order_relaxed);
+        if (!r.key.load(std::memory_order_acquire) || !seq || !inList(i)) continue;
+        const int v = ohp::ProviderTable::rowView(r);
+        if (passKnown && v >= 0 && v < ohp::kProvViews && g_providers.view(v).cam.load(std::memory_order_relaxed) == postCam &&
+            (bestPass < 0 || seq < bestPassSeq)) {
+            bestPass = i;
+            bestPassSeq = seq;
+        }
+        if (best < 0 || seq < bestSeq) {
+            best = i;
+            bestSeq = seq;
         }
     }
+    const int pick = bestPass >= 0 ? bestPass : best;
+    const uintptr_t pickAt = pick >= 0 ? static_cast<uintptr_t>(ohp::ProviderTable::rowAddress(g_providers.rowAt(pick)) + ohp::watchOffset(w)) : 0;
 
     const bool rearm = lastOnFoot != -2 && onFoot != lastOnFoot;
     lastOnFoot = onFoot;
-    for (int w = 0; w < ohp::kWatchCount; ++w) {
+    if (onFootHudProbeWatchOn(w)) {
         const uintptr_t at = onFootHudProbeWatchAddress(w);
-        if (at && at != want[w]) {
-            say(sink, ctx, ohp::formatWatchMoves(w, at, want[w], line, sizeof(line)), line);
-            onFootHudProbeWatchDisarm(w, "its target moved", sink, ctx);
+        if (targetRow < 0 || !inList(targetRow)) {
+            if (pickAt && pickAt != at) {
+                say(sink, ctx, ohp::formatWatchMoves(w, at, pickAt, line, sizeof(line)), line);
+                onFootHudProbeWatchDisarm(w, "its provider left its view's list", sink, ctx);
+            } else {
+                onFootHudProbeWatchDisarm(w, "the provider has been out of its view's list for 2 s", sink, ctx);
+            }
+            targetRow = -1;
+        } else if (rearm) {
+            onFootHudProbeWatchDisarm(w, "on foot changed: re-armed for threads started since", sink, ctx);
         }
-        if (onFootHudProbeWatchOn(w) && rearm) onFootHudProbeWatchDisarm(w, "on foot changed: re-armed for threads started since", sink, ctx);
-        if (!fused && !onFootHudProbeWatchOn(w) && want[w] && (want[w] != refused[w] || rearm)) {
-            if (!onFootHudProbeWatchArm(w, static_cast<uintptr_t>(want[w]), object[w], sink, ctx)) refused[w] = want[w];
-        }
-        onFootHudProbeWatchDrain(w, sink, ctx);
-        if (onFootHudProbeWatchOn(w))
-            say(sink, ctx, summaries[w].step(nowMs, w, onFootHudProbeWatchAddress(w), g_sites[w], line, sizeof(line)), line);
     }
-    if (!fused && fuse.step(nowMs, g_sites[ohp::kWatchCamera].hits() + g_sites[ohp::kWatchMask].hits())) {
+    if (!fused && !onFootHudProbeWatchOn(w) && pickAt && (pickAt != refused || rearm)) {
+        char note[200];
+        ohp::formatWatchTarget(g_providers.viewBitOf(ohp::ProviderTable::rowView(g_providers.rowAt(pick))), bestPass >= 0 ? 1 : passKnown ? 0 : -1, note,
+                               sizeof(note));
+        if (onFootHudProbeWatchArm(w, pickAt, pickAt - ohp::watchOffset(w), note, sink, ctx)) targetRow = pick;
+        else refused = pickAt;
+    }
+    onFootHudProbeWatchDrain(w, sink, ctx);
+    if (onFootHudProbeWatchOn(w))
+        say(sink, ctx, watchSummary.step(nowMs, w, onFootHudProbeWatchAddress(w), g_sites[w], line, sizeof(line)), line);
+    if (!fused && fuse.step(nowMs, g_sites[w].hits())) {
         fused = true;
-        onFootHudProbeStopWatches("over 100000 hits in 30 s: the place is written all the time; the watches stay off", sink, ctx);
+        onFootHudProbeStopWatches("over 100000 hits in 30 s: the place is written all the time; the watch stays off", sink, ctx);
     }
 }
 
@@ -882,7 +985,7 @@ void onFootHudProbeCameraDrain(uint64_t nowMs, int onFoot, int stereo, const flo
         window = ohp::SwitchWindow{};
     }
 
-    // .16: the watches, on view 0's pass called within the last second.
+    // .19: the providers and the watch, on view 0's pass called within the last second.
     uint64_t pass0 = 0;
     for (const Track& t : track) {
         int32_t view = -1;
@@ -890,10 +993,11 @@ void onFootHudProbeCameraDrain(uint64_t nowMs, int onFoot, int stereo, const flo
         pass0 = t.pass;
         break;
     }
-    drainWatches(nowMs, onFoot, stereo, pass0, sink, ctx);
+    drainProviders(nowMs, onFoot, stereo, pass0, sink, ctx);
 }
 
 void onFootHudProbeSetPlace(int place) { g_place.store(place, std::memory_order_relaxed); }
+void onFootHudProbeSetCameraBits(uint64_t bits) { g_hudCamBits.store(bits, std::memory_order_relaxed); }
 
 void onFootHudProbeFrameBoundary() {
     static uint32_t generation = ~0u;

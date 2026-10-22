@@ -27,7 +27,7 @@
 //   - The graph add and remove hooks (+0x6BFC60, +0x6BFE60), after the original, put a PostGUI node's event with the game's callers in
 //     a ring; the frame thread writes a line per event.
 //   - Hardware write watches on the HUD node's flag (debug slot 2) and its graph's flag +0x14 (slot 3) found the one writer (H1);
-//     .16 gave both slots to new targets (below).
+//     .16 gave both slots to new targets, .19 slot 2 to the provider subscription and left slot 3 free (below).
 // Each point checks its own 16 bytes: wrong bytes refuse that one hook with one line and leave the others.
 //
 // .15 (flight .14: the lists 36-39 node is drawn on foot in stereo, but only the crosshair and the prompts, sliding off their objects
@@ -38,13 +38,28 @@
 // (experimental.native_vr_on_foot). Every 30 s, per view and mode: how the PostGUI camera's yaw followed the main camera's, and the
 // main camera's the head's; and the switch's own line (its calls: none means the hook never ran).
 //
-// .16 (flight .15: on foot in stereo the PostGUI camera holds the head's pose, and the frame never asks for list 39 _HUD; the static
-// reading found the camera's writer but not the mask's): the camera drain puts hardware write watches on view 0's PostGUI camera's
-// first float, cam+0x20 (debug slot 2), and on the frame mask ctx+0x270 of the HUD node drawn with that camera (slot 3), on every
-// thread, and moves them, with a line, when the game makes new ones. Each distinct writing instruction gives one line: the value it
-// wrote, where the commander was (in the ship, on foot in stereo, on foot in cinema), its callers. Every 30 s a watch that is on gives
-// its writes per site and place -- for the mask, with the _HUD bit -- or that it stood quiet. The watches are re-armed when the
-// journal's on-foot changes (threads started since), come off with the key, and come off for good after 100 000 hits in 30 s.
+// .16 (flight .15: on foot in stereo the PostGUI camera holds the head's pose, and the frame never asks for list 39 _HUD) put hardware
+// write watches on view 0's PostGUI camera and on the frame mask; flight .16 answered both (the camera's writer is 0x59F300 from
+// 0x287D660, the mask's is the node's prepare 0x58F940) and the two watches are gone.
+//
+// .19 (flight .16: the prepare asks the scene's providers, and the mask is the OR of their answers with the camera's constant lists --
+// which provider gives _HUD in cinema, and what does it do in stereo?): two things on the HUD node (lists 36-39) only.
+//   - The node draw hook reads, after the original, the provider list the node's prepare walked (ctx+0x108: per provider the vtable,
+//     the answering method vt+0x68, the subscription +0x28, the answer +0x30). A snapshot counts only when the draw context is the
+//     node's (ctx+0x150) and the answers' OR with cam+0x8F0 gives the frame mask ctx+0x270; the others are counted by reason and the
+//     first pair that did not match is written once. A matching one updates a lock-free table by provider and view: per place (ship,
+//     on foot in stereo, in cinema) its frames, the frames it was subscribed to the camera, the frames it answered with _HUD (0x8). A
+//     list whose shape (providers, vtables, who is subscribed) or place is new goes to a four-slot ring.
+//   - The frame thread writes each view's list from the ring (a head line, a line per provider with the vtable and the answering
+//     method as EliteDangerous64.exe+0x... offsets), at most every 5 s per view, and every 30 s a summary: the snapshots that matched
+//     and did not, or that there were none (the node not drawn -- not the providers silent), and per provider that was ever subscribed
+//     or answered its three counts by place and its last subscription and answer.
+//   - One hardware write watch, debug slot 2, on the low four bytes of the subscription (+0x28) of the first provider that answered with
+//     0x8 (view 0's when it has one), on every thread. Each distinct writing instruction gives one line: the value, whether it carries a
+//     bit of the HUD nodes' cameras, where the commander was, the callers. Every 30 s the watch gives its writes per site and place or
+//     that it stood quiet. It is re-armed when the journal's on-foot changes (threads started since), comes off with a line when its
+//     provider stays out of its view's list for 2 s, comes off with the key, and for good after 100 000 hits in 30 s. When no provider
+//     ever answered with 0x8 the 30-second summary says so and no watch is armed. Slot 3 is not used.
 #include <cstddef>
 #include <cstdint>
 
@@ -64,17 +79,20 @@ bool onFootHudProbeInstall(uintptr_t base, uintptr_t targetOverride, bool checkI
 // Hook one of the other points (ohp::kPointWalk, kPointAdd, kPointRemove, kPointPass) at base + its RVA, or at `targetOverride`. No identity check:
 // the frame boundary calls it only once onFootHudProbeInstall passed it. One line either way; true once hooked. Frame thread.
 bool onFootHudProbeInstallPoint(int point, uintptr_t base, uintptr_t targetOverride, OnFootHudProbeSink sink, void* ctx);
-// The write watches (watch: ohp::kWatchCamera on debug slot 2, ohp::kWatchMask on slot 3), exposed for the rig. Arm puts the slot on
-// every thread of the process that does not hold it already and says one line; returns the threads armed. Drain writes the new
-// writers' lines; Disarm takes the slot off them, drains and says why with the totals. Frame thread. SetPlace: where the commander is
-// (ohp::Place) for the writes that come next; the camera drain sets it every frame. Any thread.
-int onFootHudProbeWatchArm(int watch, uintptr_t address, uint64_t object, OnFootHudProbeSink sink, void* ctx);
+// The write watch (watch: ohp::kWatchSubscription on debug slot 2), exposed for the rig. Arm puts the slot on every thread of the
+// process that does not hold it already and says one line, with `note` (or null) at its end; returns the threads armed. Drain writes the
+// new writers' lines; Disarm takes the slot off them, drains and says why with the totals. Frame thread. SetPlace: where the commander
+// is (ohp::Place) for the writes and the provider snapshots that come next; the camera drain sets it every frame. Any thread.
+int onFootHudProbeWatchArm(int watch, uintptr_t address, uint64_t object, const char* note, OnFootHudProbeSink sink, void* ctx);
 bool onFootHudProbeWatchOn(int watch);
 uintptr_t onFootHudProbeWatchAddress(int watch);
 void onFootHudProbeWatchDrain(int watch, OnFootHudProbeSink sink, void* ctx);
 void onFootHudProbeWatchDisarm(int watch, const char* why, OnFootHudProbeSink sink, void* ctx);
 void onFootHudProbeStopWatches(const char* why, OnFootHudProbeSink sink, void* ctx);
 void onFootHudProbeSetPlace(int place);
+// The OR of the HUD nodes' camera bits (cam+0x8E0) the watch's handler tests the written subscription against; the camera drain sets it
+// every frame from the provider table. Any thread.
+void onFootHudProbeSetCameraBits(uint64_t bits);
 // While false the hook only forwards. Any thread.
 void onFootHudProbeSetRecording(bool on);
 // Calls of PostGUI nodes the hook saw while recording, and snapshots dropped because a field could not be read.
@@ -85,8 +103,9 @@ uint64_t onFootHudProbeFaults();
 // `onFoot` is the journal's answer (-1 unknown, 0, 1). Frame thread.
 void onFootHudProbeDrain(uint64_t nowMs, int onFoot, OnFootHudProbeSink sink, void* ctx);
 // .15, after onFootHudProbeDrain (which notes each HUD node's frame mask and draw context by its camera): the passes the switch hook
-// noted -- a new one's line, a retired one, the pose lines when due, the follow lines and the switch's line every 30 s; then .16's
-// watches on view 0's pass (the place, the targets, the writers, the 30-second lines, the fuse). `stereo` is
+// noted -- a new one's line, a retired one, the pose lines when due, the follow lines and the switch's line every 30 s; then .19's
+// providers and watch (the place, the HUD nodes' lists from the ring, the 30-second summary, the watch's target on view 0's pass, the
+// writers, the watch's 30-second line, the fuse). `stereo` is
 // experimental.native_vr_on_foot (1, 0); `head12` the head pose in headPose's layout, or null. Frame thread.
 void onFootHudProbeCameraDrain(uint64_t nowMs, int onFoot, int stereo, const float* head12, OnFootHudProbeSink sink, void* ctx);
 

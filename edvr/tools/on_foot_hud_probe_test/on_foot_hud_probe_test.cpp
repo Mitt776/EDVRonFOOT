@@ -12,11 +12,17 @@
 // slopes 1, 0 and -1, too little turn, a jump left out, the pass table, every line's text with "none" for what could not be read);
 // Part B15 hooks a synthetic function that begins with the PostGUI pass switch's bytes and drives the camera drain over two
 // 30-second windows on passes and cameras in the rig's memory.
-// .16: Part A16 drives the watches' half of the core (the place, the sites by place with the _HUD bit, the ninth site counted, every
-// line's text, the 30-second line and a quiet one, the fuse, the draw context by camera); Part C arms both watches for real on this
-// rig's threads (the taken slot skipped, one line per writer with its value and place, off with the totals, an unaligned address
-// refused); Part B15 sees the camera drain watch view 0's PostGUI camera at once and the frame mask once the HUD node is drawn with
-// it, write each one's 30-second line, move the camera's watch to a new camera and take both off with the key.
+// .19: Part A16 drives the subscription watch's half of the core (the place, the sites by place with the camera bit, the ninth site
+// counted, every line's text, the 30-second line and a quiet one, the fuse, the draw context by camera); Part A19 drives the provider
+// list on fake providers (a list of three, one giving _HUD, the unsubscribed one answering 0, the context of another node and an OR
+// that is not the mask dropped with their own reasons and the first pair kept once, the 65th provider only a number, more providers
+// than rows, a third view, an unreadable address skipping the snapshot, a changed answer not changing the shape and a changed
+// subscription or place changing it, the ring's overflow, every line's text, the summary's window); Part C arms the watch for real on
+// this rig's threads (the taken slot skipped, one line per writer with its value, camera bit and place, the repeats only counted, off
+// with the totals, an unaligned address refused); Part B15 sees the camera drain write the HUD node's lists and the 30-second summary
+// (no provider gives 0x8 in stereo: no watch, said in one line), arm the watch on the first provider that gives it (view 0's) in
+// cinema, write its 30-second line, move it to another provider when its own leaves the list for 2 s, take it off when none is left,
+// arm it again, take it off with the key and trip the fuse with 100 001 real writes.
 #include "../../src/d3d11/on_foot_hud_probe.h"
 #include "../../src/d3d11/on_foot_hud_probe_core.h"
 #include "../../src/d3d11/debug_register_core.h"
@@ -24,6 +30,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
 #include <string>
 #include <vector>
 
@@ -77,8 +84,45 @@ struct FakeGame {
     uint8_t cam[0x900] = {};
     uint8_t view[0x40] = {};
     uint8_t name[0x40] = {};
+    // .19: the provider list L (ctx+0x108: *L the array, u32 at L+8 the number), 80 providers of which the list holds some, three
+    // vtables whose slot 0x68 holds the answering method. u64 cells: the subscription (+0x28) is watched in B15, 4-aligned.
+    uint8_t provList[0x10] = {};
+    uint64_t provArray[80] = {};
+    uint64_t providers[80][8] = {};
+    uint64_t vts[3][0x10] = {};
 
     uintptr_t base() const { return addr(vtable) - ohp::kNodeVtableRva; }
+    uint64_t method(int k) const { return base() + 0x4E2B10 + 0x40 * k; }
+    // The list holds these providers, in this order (an index of `providers`, or -1 for an empty slot).
+    void setList(std::initializer_list<int> which) {
+        uint32_t n = 0;
+        for (int i : which) provArray[n++] = i < 0 ? 0 : addr(providers[i]);
+        put(provList, 0, addr(provArray));
+        put<uint32_t>(provList, ohp::kListNumber, n);
+    }
+    void setProvider(int i, uint64_t sub, uint64_t answer) {
+        auto* p = reinterpret_cast<uint8_t*>(providers[i]);
+        put(p, 0, addr(vts[i % 3]));
+        vts[i % 3][ohp::kVtAnswer / 8] = method(i % 3);
+        put(p, ohp::kProvSub, sub);
+        put(p, ohp::kProvAnswer, answer);
+    }
+    uint64_t* subOf(int i) { return &providers[i][ohp::kProvSub / 8]; }
+    // The frame mask the game's prepare would have made of the list now: the OR of the answers with the camera's constant lists.
+    void sync() {
+        uint64_t mask = 0, cam8F0 = 0;
+        std::memcpy(&cam8F0, cam + ohp::kCam8F0, 8);
+        mask = cam8F0;
+        uint32_t n = 0;
+        std::memcpy(&n, provList + ohp::kListNumber, 4);
+        for (uint32_t i = 0; i < n; ++i)
+            if (provArray[i]) {
+                uint64_t answer = 0;
+                std::memcpy(&answer, reinterpret_cast<const uint8_t*>(provArray[i]) + ohp::kProvAnswer, 8);
+                mask |= answer;
+            }
+        put(ctx, ohp::kCtxMask, mask);
+    }
     uint8_t* list(uint32_t index) { return lists[index - 36]; }
     void setName(const char* text) {
         const uint64_t n = std::strlen(text);
@@ -103,6 +147,11 @@ struct FakeGame {
         }
         put(ctx, ohp::kCtxCamera, addr(cam));
         put<uint64_t>(ctx, ohp::kCtxMask, 0x4);
+        // .19: prepared for this node, an empty provider list, the camera's constant lists 0x4: the mask 0x4 is the OR of nothing with them.
+        put(ctx, ohp::kCtxNode, addr(node));
+        put(ctx, ohp::kCtxProviders, addr(provList));
+        put<uint64_t>(cam, ohp::kCam8F0, 0x4);
+        setList({});
         put<uint32_t>(cam, ohp::kCamFlags18, 0x10000);
         put<uint32_t>(cam, ohp::kCamFlags250, 0xF);
         put<uint32_t>(cam, ohp::kCamPocket, 3);
@@ -608,7 +657,7 @@ void partA15() {
           "text: the switch hooked");
 }
 
-// ---- Part A, .16: the watches' sites, places and lines ------------------------------------------------------------------------------
+// ---- Part A, .19: the subscription watch's sites, places and lines ------------------------------------------------------------------
 
 void partA16() {
     const uint64_t base = 0x140000000ull, size = 0x640C000ull;
@@ -619,85 +668,97 @@ void partA16() {
     check(ohp::placeOf(1, 1) == ohp::kPlaceStereo && ohp::placeOf(1, 0) == ohp::kPlaceCinema && ohp::placeOf(0, 1) == ohp::kPlaceShip &&
               ohp::placeOf(-1, 0) == ohp::kPlaceShip,
           "place: stereo, cinema, the ship, unknown counts as the ship");
-    check(ohp::kHudBit == 0x8 && ohp::kWatchSlot[ohp::kWatchCamera] == 2 && ohp::kWatchSlot[ohp::kWatchMask] == 3 &&
-              ohp::watchOffset(ohp::kWatchCamera) == 0x20 && ohp::watchOffset(ohp::kWatchMask) == 0x270,
-          "watches: list 39's bit, the slots, the offsets");
+    check(ohp::kHudBit == 0x8 && ohp::kWatchCount == 1 && ohp::kWatchSlot[ohp::kWatchSubscription] == 2 &&
+              ohp::watchOffset(ohp::kWatchSubscription) == 0x28 && std::strcmp(ohp::watchName(ohp::kWatchSubscription), "hud provider subscription") == 0,
+          "watch: list 39's bit, one watch on slot 2 at the subscription, slot 3 not used");
 
-    // The camera's sites: by place, the last value kept, the first one published.
-    static ohp::SiteTable cams;
+    // The subscription's sites: by place, with the camera bit as the handler tells it, the last value kept, the first one published.
+    static ohp::SiteTable subs;
     bool fresh = false;
-    const int row = cams.record(base + 0x59F313, ohp::kPlaceStereo, 0x3F5DB3D7, false, &fresh);  // 0.866: cos 30 deg
+    const int row = subs.record(base + 0x59F313, ohp::kPlaceStereo, 0x4, true, &fresh);
     check(row == 0 && fresh, "sites: a new site");
-    cams.publish(row, 9, ohp::kPlaceStereo, 0x3F5DB3D7, stack, 2);
-    check(cams.record(base + 0x59F313, ohp::kPlaceCinema, 0x3F800000, false, &fresh) == 0 && !fresh && cams.site(0).hits.load() == 2 &&
-              cams.site(0).at[ohp::kPlaceStereo].load() == 1 && cams.site(0).at[ohp::kPlaceCinema].load() == 1 &&
-              cams.site(0).at[ohp::kPlaceShip].load() == 0 && cams.site(0).last.load() == 0x3F800000,
-          "sites: a repeat only counted, by place, its value the last");
+    subs.publish(row, 9, ohp::kPlaceStereo, 0x4, true, stack, 2);
+    check(subs.record(base + 0x59F313, ohp::kPlaceCinema, 0x0, false, &fresh) == 0 && !fresh && subs.site(0).hits.load() == 2 &&
+              subs.site(0).at[ohp::kPlaceStereo].load() == 1 && subs.site(0).at[ohp::kPlaceCinema].load() == 1 &&
+              subs.site(0).at[ohp::kPlaceShip].load() == 0 && subs.site(0).camBit[ohp::kPlaceStereo].load() == 1 &&
+              subs.site(0).camBit[ohp::kPlaceCinema].load() == 0 && subs.site(0).last.load() == 0,
+          "sites: a repeat only counted, by place and camera bit, its value the last");
     int r = -1;
-    check(cams.nextUnsaid(&r) && r == 0 && !cams.nextUnsaid(&r), "sites: said once");
-    check(ohp::formatWriter(ohp::kWatchCamera, 0, cams.site(0), 0xCA0, base, size, line, sizeof(line)) > 0 &&
-              std::strcmp(line, "on-foot hud probe: writer #1 of the postgui camera of 0xCA0: at EliteDangerous64.exe+0x59F313 (after the "
-                                "write), value 0.866, on foot in stereo, thread 9, from EliteDangerous64.exe+0x28ADA4D < +0x28575C0") == 0,
-          "text: a camera writer, its value and place, no _HUD bit");
+    check(subs.nextUnsaid(&r) && r == 0 && !subs.nextUnsaid(&r), "sites: said once");
+    check(ohp::formatWriter(ohp::kWatchSubscription, 0, subs.site(0), 0xCA0, base, size, line, sizeof(line)) > 0 &&
+              std::strcmp(line, "on-foot hud probe: writer #1 of the hud provider subscription of 0xCA0: at EliteDangerous64.exe+0x59F313 (after "
+                                "the write), value 0x4 (with the HUD camera bit), on foot in stereo, thread 9, from EliteDangerous64.exe+0x28ADA4D "
+                                "< +0x28575C0") == 0,
+          "text: a writer, its value and place, the camera bit on");
 
-    // The mask's sites: the _HUD bit counted by place, as the handler tells it.
+    // A second site whose first value has no camera bit, and no callers.
     static ohp::SiteTable masks;
-    masks.record(base + 0x588A75, ohp::kPlaceCinema, 0x20C, true, &fresh);
-    masks.publish(0, 9, ohp::kPlaceCinema, 0x20C, stack, 2);
-    masks.record(base + 0x588A75, ohp::kPlaceStereo, 0x204, false, &fresh);
-    check(masks.site(0).hud[ohp::kPlaceCinema].load() == 1 && masks.site(0).hud[ohp::kPlaceStereo].load() == 0 &&
+    masks.record(base + 0x588A75, ohp::kPlaceCinema, 0x800000, true, &fresh);
+    masks.publish(0, 9, ohp::kPlaceCinema, 0x800000, true, stack, 2);
+    masks.record(base + 0x588A75, ohp::kPlaceStereo, 0x0, false, &fresh);
+    check(masks.site(0).camBit[ohp::kPlaceCinema].load() == 1 && masks.site(0).camBit[ohp::kPlaceStereo].load() == 0 &&
               masks.site(0).at[ohp::kPlaceStereo].load() == 1,
-          "sites: the mask's _HUD bit by place");
-    check(ohp::formatWriter(ohp::kWatchMask, 0, masks.site(0), 0xC00, base, size, line, sizeof(line)) > 0 &&
-              std::strcmp(line, "on-foot hud probe: writer #1 of the frame mask of 0xC00: at EliteDangerous64.exe+0x588A75 (after the write), "
-                                "value 0x20C (the _HUD bit on), on foot in cinema, thread 9, from EliteDangerous64.exe+0x28ADA4D < +0x28575C0") == 0,
-          "text: a mask writer, the _HUD bit on");
-    masks.publish(0, 9, ohp::kPlaceShip, 0x204, stack, 0);
-    check(ohp::formatWriter(ohp::kWatchMask, 0, masks.site(0), 0xC00, base, size, line, sizeof(line)) > 0 &&
-              std::strstr(line, "value 0x204 (the _HUD bit off), in the ship, thread 9, from ?"),
-          "text: a mask writer, the _HUD bit off, no callers");
+          "sites: the camera bit by place");
+    masks.publish(0, 9, ohp::kPlaceShip, 0x0, false, stack, 0);
+    check(ohp::formatWriter(ohp::kWatchSubscription, 0, masks.site(0), 0xC00, base, size, line, sizeof(line)) > 0 &&
+              std::strstr(line, "value 0x0 (without the HUD camera bit), in the ship, thread 9, from ?"),
+          "text: a writer, the camera bit off, no callers");
 
     // The 30-second line: the window's writes per site and place; a quiet watch says so.
     ohp::WatchSummary ws;
-    check(ws.step(0, ohp::kWatchMask, 0xE70, masks, line, sizeof(line)) == 0, "watch summary: the first call starts the window");
-    for (int i = 0; i < 3; ++i) masks.record(base + 0x588A75, ohp::kPlaceCinema, 0x20C, true, &fresh);
-    masks.record(base + 0x588A75, ohp::kPlaceStereo, 0x204, false, &fresh);
-    masks.record(base + 0x588B00, ohp::kPlaceStereo, 0x200, false, &fresh);
-    check(ws.step(29999, ohp::kWatchMask, 0xE70, masks, line, sizeof(line)) == 0, "watch summary: not before 30 s");
-    check(ws.step(30000, ohp::kWatchMask, 0xE70, masks, line, sizeof(line)) > 0 &&
-              std::strcmp(line, "on-foot hud probe: 30 s watch frame mask 0xE70: 5 write(s); #1 ship 0, stereo 1, cinema 3 (with _HUD 0, 0, 3), "
-                                "last 0x204; #2 ship 0, stereo 1, cinema 0 (with _HUD 0, 0, 0), last 0x200; 0 from sites that did not fit") == 0,
-          "watch summary: the mask's window by site and place, with the _HUD bit");
-    check(ws.step(60000, ohp::kWatchMask, 0xE70, masks, line, sizeof(line)) > 0 &&
-              std::strcmp(line, "on-foot hud probe: 30 s watch frame mask 0xE70: 0 write(s): it is on and stood quiet; 0 from sites that did not "
-                                "fit") == 0,
+    check(ws.step(0, ohp::kWatchSubscription, 0xE70, masks, line, sizeof(line)) == 0, "watch summary: the first call starts the window");
+    for (int i = 0; i < 3; ++i) masks.record(base + 0x588A75, ohp::kPlaceCinema, 0x4, true, &fresh);
+    masks.record(base + 0x588A75, ohp::kPlaceStereo, 0x0, false, &fresh);
+    masks.record(base + 0x588B00, ohp::kPlaceStereo, 0x0, false, &fresh);
+    check(ws.step(29999, ohp::kWatchSubscription, 0xE70, masks, line, sizeof(line)) == 0, "watch summary: not before 30 s");
+    check(ws.step(30000, ohp::kWatchSubscription, 0xE70, masks, line, sizeof(line)) > 0 &&
+              std::strcmp(line, "on-foot hud probe: 30 s watch hud provider subscription 0xE70: 5 write(s); #1 ship 0, stereo 1, cinema 3 (with the "
+                                "camera bit 0, 0, 3), last 0x0; #2 ship 0, stereo 1, cinema 0 (with the camera bit 0, 0, 0), last 0x0; 0 from sites "
+                                "that did not fit") == 0,
+          "watch summary: the window by site and place, with the camera bit");
+    check(ws.step(60000, ohp::kWatchSubscription, 0xE70, masks, line, sizeof(line)) > 0 &&
+              std::strcmp(line, "on-foot hud probe: 30 s watch hud provider subscription 0xE70: 0 write(s): it is on and stood quiet; 0 from sites "
+                                "that did not fit") == 0,
           "watch summary: a quiet watch says so");
 
-    // The ninth site is only counted, in the table and in the line; the camera's line has no _HUD part.
-    for (uint64_t i = 1; i < 10; ++i) cams.record(base + 0x2000 + i, ohp::kPlaceShip, 0, false, &fresh);
-    check(cams.sites() == ohp::kSites && cams.overflow() == 2 && cams.hits() == 11, "sites: the ninth site is overflow");
+    // The ninth site is only counted, in the table and in the line.
+    static ohp::SiteTable many;
+    many.record(base + 0x59F313, ohp::kPlaceStereo, 0x4, true, &fresh);
+    for (uint64_t i = 1; i < 10; ++i) many.record(base + 0x2000 + i, ohp::kPlaceShip, 0, false, &fresh);
+    check(many.sites() == ohp::kSites && many.overflow() == 2 && many.hits() == 10, "sites: the ninth site is overflow");
     ohp::WatchSummary wc;
-    wc.step(0, ohp::kWatchCamera, 0xCC0, cams, line, sizeof(line));
-    cams.record(base + 0x59F313, ohp::kPlaceStereo, 0x3F800000, false, &fresh);
-    cams.record(base + 0x59F313, ohp::kPlaceStereo, 0x3F800000, false, &fresh);
-    cams.record(base + 0x3000, ohp::kPlaceStereo, 0, false, &fresh);
-    check(wc.step(30000, ohp::kWatchCamera, 0xCC0, cams, line, sizeof(line)) > 0 &&
-              std::strcmp(line, "on-foot hud probe: 30 s watch postgui camera 0xCC0: 3 write(s); #1 ship 0, stereo 2, cinema 0, last 1.000; 1 from "
-                                "sites that did not fit") == 0,
-          "watch summary: the camera's window, the site that did not fit counted");
+    wc.step(0, ohp::kWatchSubscription, 0xCC0, many, line, sizeof(line));
+    many.record(base + 0x59F313, ohp::kPlaceStereo, 0x4, true, &fresh);
+    many.record(base + 0x59F313, ohp::kPlaceStereo, 0x4, true, &fresh);
+    many.record(base + 0x3000, ohp::kPlaceStereo, 0, false, &fresh);
+    check(wc.step(30000, ohp::kWatchSubscription, 0xCC0, many, line, sizeof(line)) > 0 &&
+              std::strcmp(line, "on-foot hud probe: 30 s watch hud provider subscription 0xCC0: 3 write(s); #1 ship 0, stereo 2, cinema 0 (with the "
+                                "camera bit 0, 2, 0), last 0x4; 1 from sites that did not fit") == 0,
+          "watch summary: the window, the site that did not fit counted");
 
     // The watch lines.
-    check(ohp::formatWatchOff(ohp::kWatchCamera, 0xCC0, "the key is off", cams, line, sizeof(line)) > 0 &&
-              std::strstr(line, "watch off: postgui camera 0xCC0: the key is off; 8 site(s), 14 hit(s), 3 from sites that did not fit"),
+    check(ohp::formatWatchOff(ohp::kWatchSubscription, 0xCC0, "the key is off", many, line, sizeof(line)) > 0 &&
+              std::strstr(line, "watch off: hud provider subscription 0xCC0: the key is off; 8 site(s), 13 hit(s), 3 from sites that did not fit"),
           "text: watch off");
-    check(ohp::formatWatchOn(ohp::kWatchMask, 0xE70, 0xC00, 40, 1, 2, line, sizeof(line)) > 0 &&
-              std::strstr(line, "watch on: frame mask 0xE70 (0xC00+0x270) on debug slot 3, write, 4 bytes: 40 thread(s), 1 skipped"),
+    check(ohp::formatWatchOn(ohp::kWatchSubscription, 0xE70, 0xE48, 40, 1, 2, nullptr, line, sizeof(line)) > 0 &&
+              std::strcmp(line, "on-foot hud probe: watch on: hud provider subscription 0xE70 (0xE48+0x28) on debug slot 2, write, 4 bytes: 40 "
+                                "thread(s), 1 skipped (slot taken), 2 could not be set") == 0,
           "text: watch on");
-    check(ohp::formatWatchNotOn(ohp::kWatchCamera, 0xCC0, "no thread took it", line, sizeof(line)) > 0 &&
-              std::strstr(line, "watch NOT on: postgui camera 0xCC0: no thread took it; the pose, state and graph lines go on"),
+    char note[200];
+    ohp::formatWatchTarget(1, 1, note, sizeof(note));
+    check(ohp::formatWatchOn(ohp::kWatchSubscription, 0xE70, 0xE48, 40, 1, 2, note, line, sizeof(line)) > 0 &&
+              std::strstr(line, "2 could not be set; the first provider with 0x8, of view bit 1, the pass's view 0"),
+          "text: watch on, the target's note: view 0");
+    ohp::formatWatchTarget(2, 0, note, sizeof(note));
+    check(std::strcmp(note, "the first provider with 0x8, of view bit 2 (view 0 has none with 0x8)") == 0, "text: the note, another view");
+    ohp::formatWatchTarget(2, -1, note, sizeof(note));
+    check(std::strcmp(note, "the first provider with 0x8, of view bit 2 (the pass's view 0 is not known yet)") == 0, "text: the note, no pass yet");
+    check(ohp::formatWatchNotOn(ohp::kWatchSubscription, 0xCC0, "no thread took it", line, sizeof(line)) > 0 &&
+              std::strstr(line, "watch NOT on: hud provider subscription 0xCC0: no thread took it; the provider, pose, state and graph lines go on"),
           "text: watch not on");
-    check(ohp::formatWatchMoves(ohp::kWatchMask, 0xE70, 0xF70, line, sizeof(line)) > 0 &&
-              std::strcmp(line, "on-foot hud probe: watch moves: frame mask 0xE70 -> 0xF70 (view 0's HUD node's draw context is another now)") == 0,
+    check(ohp::formatWatchMoves(ohp::kWatchSubscription, 0xE70, 0xF70, line, sizeof(line)) > 0 &&
+              std::strcmp(line, "on-foot hud probe: watch moves: hud provider subscription 0xE70 -> 0xF70 (the watched provider left its view's list "
+                                "for 2 s; this one answered with 0x8)") == 0,
           "text: a watch moves");
 
     // The fuse.
@@ -706,12 +767,263 @@ void partA16() {
     check(fuse.step(2000, 100001), "fuse: one more trips it");
     check(!fuse.step(31000, 150000) && !fuse.step(32000, 160000), "fuse: a new window starts over");
 
-    // The draw context by camera, for the mask's watch.
+    // The draw context by camera, for the pose lines' mask.
     ohp::MaskByCamera byCam;
     byCam.note(0xCA0, 0xC00, 0x20C, 1000);
     uint64_t mask = 0, ctx = 0;
     check(byCam.find(0xCA0, 1500, &mask, &ctx) && mask == 0x20C && ctx == 0xC00 && !byCam.find(0xCA0, 2001, &mask, &ctx),
           "mask by camera: the draw context with the mask, not when stale");
+}
+
+// ---- Part A, .19: the HUD node's providers ---------------------------------------------------------------------------------------
+
+const ohp::ProviderTable::Row* findRow(const ohp::ProviderTable& t, uint64_t provider, int view = 0) {
+    for (int i = 0; i < ohp::kProvRows; ++i) {
+        const auto& r = t.rowAt(i);
+        if (r.key.load() && ohp::ProviderTable::rowAddress(r) == provider && ohp::ProviderTable::rowView(r) == view) return &r;
+    }
+    return nullptr;
+}
+
+// A reader that cannot read one range, as the unreadable address in the list.
+struct Blocked {
+    uint64_t lo, hi;
+};
+bool blockedRead(void* ctx, uint64_t a, void* out, size_t n) {
+    const auto* b = static_cast<const Blocked*>(ctx);
+    if (a < b->hi && a + n > b->lo) return false;
+    std::memcpy(out, reinterpret_cast<const void*>(a), n);
+    return true;
+}
+
+void partA19() {
+    static FakeGame g;
+    static ohp::ProviderTable t;
+    g.build();
+    const uint64_t base = g.base(), size = 0x10000000ull, node = addr(g.node);
+    char line[1600], want[1600];
+    // The camera is on bit 0x4 and asks for list 38 (0x4) always. Three providers: one subscribed and giving _HUD, one subscribed
+    // and silent, one not subscribed.
+    put<uint64_t>(g.cam, ohp::kCamMask8E0, 0x4);
+    g.setProvider(0, 0x4, 0x8);
+    g.setProvider(1, 0x4, 0x0);
+    g.setProvider(2, 0x0, 0x0);
+    g.setList({0, 1, 2});
+    g.sync();
+
+    // The list as the game's prepare read it, and the check that it is the node's and gives the mask.
+    ohp::ProviderSnap s;
+    check(ohp::readProviders(node, &plainRead, nullptr, &s) == ohp::kSnapOk && s.number == 3 && s.stored == 3 && s.extras == 0 && s.mask == 0xC &&
+              s.cam8E0 == 0x4 && s.cam8F0 == 0x4 && s.viewBit == 1 && s.cam == addr(g.cam) && s.ctx == addr(g.ctx) && s.shape != 0,
+          "providers: the list read, the node's, the answers' OR with the constant lists is the mask");
+    check(s.p[0].addr == addr(g.providers[0]) && s.p[0].vtable == addr(g.vts[0]) && s.p[0].answerFn == g.method(0) && s.p[0].sub == 0x4 &&
+              s.p[0].answer == 0x8 && ohp::subscribed(s.p[0], s.cam8E0) && !ohp::subscribed(s.p[2], s.cam8E0) && s.p[2].answerFn == g.method(2),
+          "providers: address, vtable, answering method, subscription, answer; subscribed or not");
+
+    // Into the table: one gives _HUD, one is subscribed and silent, the unsubscribed one has an answer 0; counts by place.
+    check(t.take(ohp::kSnapOk, s, ohp::kPlaceCinema) && s.viewSlot == 0 && t.matched() == 1, "table: the first matched snapshot is new");
+    ohp::ProviderSnap again;
+    ohp::readProviders(node, &plainRead, nullptr, &again);
+    check(!t.take(ohp::kSnapOk, again, ohp::kPlaceCinema) && t.matched() == 2, "table: the same list in the same place is not new");
+    const auto *p0 = findRow(t, addr(g.providers[0])), *p1 = findRow(t, addr(g.providers[1])), *p2 = findRow(t, addr(g.providers[2]));
+    check(p0 && p1 && p2 && p0->frames[ohp::kPlaceCinema].load() == 2 && p0->subscribed[ohp::kPlaceCinema].load() == 2 &&
+              p0->hud[ohp::kPlaceCinema].load() == 2 && p0->hud[ohp::kPlaceStereo].load() == 0 && p0->hudSeq.load() == 1 && p0->answer.load() == 8 &&
+              p1->frames[ohp::kPlaceCinema].load() == 2 && p1->subscribed[ohp::kPlaceCinema].load() == 2 && p1->hud[ohp::kPlaceCinema].load() == 0 &&
+              p1->hudSeq.load() == 0 && p2->frames[ohp::kPlaceCinema].load() == 2 && p2->subscribed[ohp::kPlaceCinema].load() == 0 &&
+              p2->answer.load() == 0 && t.hudSeen() && t.camBits() == 0x4 && t.viewBitOf(0) == 1 && t.viewBitOf(1) == -1,
+          "table: frames, frames subscribed, frames with 0x8 by place; the unsubscribed one answers 0");
+    check(ohp::providerWorthALine(*p0) && ohp::providerWorthALine(*p1) && !ohp::providerWorthALine(*p2),
+          "table: a provider never subscribed and never answering has no summary line");
+
+    // The lines of the list.
+    std::snprintf(want, sizeof(want),
+                  "on-foot hud probe: providers of the HUD node: view bit 1, on foot in cinema, node 0x%llX camera 0x%llX: camera bit (cam+0x8E0) "
+                  "0x4, constant lists (cam+0x8F0) 0x4, frame mask (ctx+0x270) 0xC; 3 provider(s), 3 listed, 0 extra not listed",
+                  static_cast<unsigned long long>(node), static_cast<unsigned long long>(addr(g.cam)));
+    check(ohp::formatProviderHead(s, line, sizeof(line)) > 0 && std::strcmp(line, want) == 0, "text: the list's head");
+    std::snprintf(want, sizeof(want),
+                  "on-foot hud probe:   provider #0 0x%llX vtable EliteDangerous64.exe+0x%llX answer method EliteDangerous64.exe+0x%llX +0x28=0x4 "
+                  "subscribed=yes +0x30=0x8 _HUD=yes",
+                  static_cast<unsigned long long>(addr(g.providers[0])), static_cast<unsigned long long>(addr(g.vts[0]) - base),
+                  static_cast<unsigned long long>(g.method(0) - base));
+    check(ohp::formatProviderLine(s, 0, base, size, line, sizeof(line)) > 0 && std::strcmp(line, want) == 0, "text: the provider that gives _HUD");
+    check(ohp::formatProviderLine(s, 2, base, size, line, sizeof(line)) > 0 && std::strstr(line, " +0x28=0x0 subscribed=no +0x30=0x0 _HUD=no"),
+          "text: the unsubscribed provider says not subscribed, answer 0");
+    char out[120];
+    ohp::formatImageAddress(0x1234, base, size, out, sizeof(out));
+    check(std::strcmp(out, "0x1234 (outside the image)") == 0, "text: an address outside the image is absolute, marked");
+    ohp::formatImageAddress(0, base, size, out, sizeof(out));
+    check(std::strcmp(out, "none") == 0, "text: no address");
+    g.setList({0, -1, 2});
+    ohp::ProviderSnap holes;
+    check(ohp::readProviders(node, &plainRead, nullptr, &holes) == ohp::kSnapOk && holes.stored == 3 && holes.p[1].addr == 0 &&
+              ohp::formatProviderLine(holes, 1, base, size, line, sizeof(line)) > 0 && std::strstr(line, "provider #1: empty slot"),
+          "providers: an empty slot of the list is listed as empty");
+    g.setList({0, 1, 2});
+
+    // The context is another node's: dropped, counted by its reason, the pair kept for one line, no row touched.
+    put(g.ctx, ohp::kCtxNode, node + 0x1000);
+    ohp::ProviderSnap other;
+    check(ohp::readProviders(node, &plainRead, nullptr, &other) == ohp::kSnapOtherNode && other.badA == node + 0x1000 && other.badB == node,
+          "providers: the context prepared for another node is told");
+    check(!t.take(ohp::kSnapOtherNode, other, ohp::kPlaceCinema) && t.otherNode() == 1 && t.matched() == 2 &&
+              p0->frames[ohp::kPlaceCinema].load() == 2,
+          "table: another node's context is only counted, no row");
+    put(g.ctx, ohp::kCtxNode, node);
+    int reason = 0;
+    uint64_t a = 0, b = 0, badNode = 0;
+    check(t.nextBad(&reason, &a, &b, &badNode) && reason == ohp::kSnapOtherNode && a == node + 0x1000 && b == node && !t.nextBad(&reason, &a, &b, &badNode),
+          "table: the first pair that did not match, once");
+    std::snprintf(want, sizeof(want),
+                  "on-foot hud probe: first provider snapshot that did not match: the draw context was prepared for another node (ctx+0x150 = 0x%llX, the "
+                  "node drawn 0x%llX); later ones are only counted",
+                  static_cast<unsigned long long>(node + 0x1000), static_cast<unsigned long long>(node));
+    check(ohp::formatBadPair(reason, a, b, node, line, sizeof(line)) > 0 && std::strcmp(line, want) == 0, "text: the other-node pair");
+
+    // The OR of the answers is not the frame mask: another reason, counted, no row touched; the pair is not said again.
+    put<uint64_t>(g.ctx, ohp::kCtxMask, 0x4);
+    ohp::ProviderSnap wrongMask;
+    check(ohp::readProviders(node, &plainRead, nullptr, &wrongMask) == ohp::kSnapOrMismatch && wrongMask.badA == 0xC && wrongMask.badB == 0x4,
+          "providers: the OR that is not the mask is told");
+    check(!t.take(ohp::kSnapOrMismatch, wrongMask, ohp::kPlaceCinema) && t.orMismatch() == 1 && t.otherNode() == 1 && t.matched() == 2 &&
+              p0->frames[ohp::kPlaceCinema].load() == 2 && !t.nextBad(&reason, &a, &b, &badNode),
+          "table: the other reason is counted apart, nothing else changes");
+    static ohp::ProviderTable t2;
+    t2.take(ohp::kSnapOrMismatch, wrongMask, ohp::kPlaceShip);
+    check(t2.nextBad(&reason, &a, &b, &badNode) && reason == ohp::kSnapOrMismatch, "table: the OR pair is kept as well");
+    std::snprintf(want, sizeof(want),
+                  "on-foot hud probe: first provider snapshot that did not match: the answers' OR with cam+0x8F0 is 0xC but the frame mask ctx+0x270 of "
+                  "node 0x%llX is 0x4; later ones are only counted",
+                  static_cast<unsigned long long>(node));
+    check(ohp::formatBadPair(reason, a, b, node, line, sizeof(line)) > 0 && std::strcmp(line, want) == 0, "text: the OR pair");
+    g.sync();
+
+    // An unreadable provider, and an unreadable list: the snapshot is skipped, the fault counted, nothing else changes.
+    Blocked block{addr(g.providers[1]), addr(g.providers[1]) + 0x40};
+    ohp::ProviderSnap fault;
+    check(ohp::readProviders(node, &blockedRead, &block, &fault) == ohp::kSnapFault && !t.take(ohp::kSnapFault, fault, ohp::kPlaceCinema) &&
+              t.faults() == 1 && p1->frames[ohp::kPlaceCinema].load() == 2,
+          "providers: an unreadable provider skips the snapshot, the fault is counted");
+    block = Blocked{addr(g.provList), addr(g.provList) + 0x10};
+    check(ohp::readProviders(node, &blockedRead, &block, &fault) == ohp::kSnapFault, "providers: an unreadable list skips the snapshot");
+    block = Blocked{addr(g.vts[1]), addr(g.vts[1]) + sizeof(g.vts[1])};
+    check(ohp::readProviders(node, &blockedRead, &block, &fault) == ohp::kSnapOk && fault.p[1].vtable == addr(g.vts[1]) && fault.p[1].answerFn == 0,
+          "providers: an unreadable answering method is 0 and does not skip the snapshot");
+    g.setList({0, 1, 2});
+    g.setProvider(0, 0x4, 0x8);
+
+    // The shape: the answer changes, the make-up does not -- not new; the subscription changes -- new; the place changes -- new.
+    g.setProvider(1, 0x4, 0x2);
+    g.sync();
+    ohp::ProviderSnap answered;
+    ohp::readProviders(node, &plainRead, nullptr, &answered);
+    check(answered.shape == s.shape && !t.take(ohp::kSnapOk, answered, ohp::kPlaceCinema) && p1->nonzero.load() == 1 && p1->answer.load() == 2,
+          "shape: a changed answer is the same shape, only counted");
+    g.setProvider(2, 0x4, 0x0);
+    g.sync();
+    ohp::ProviderSnap subscribedNow;
+    ohp::readProviders(node, &plainRead, nullptr, &subscribedNow);
+    check(subscribedNow.shape != s.shape && t.take(ohp::kSnapOk, subscribedNow, ohp::kPlaceCinema) && p2->subscribed[ohp::kPlaceCinema].load() == 1 &&
+              ohp::providerWorthALine(*p2),
+          "shape: a changed subscription is a new shape; the provider now has a line");
+    check(t.take(ohp::kSnapOk, subscribedNow, ohp::kPlaceStereo) && p0->frames[ohp::kPlaceStereo].load() == 1 && p0->hud[ohp::kPlaceStereo].load() == 1,
+          "shape: the same list in another place is new");
+    std::snprintf(want, sizeof(want),
+                  "on-foot hud probe:   provider 0x%llX view bit 1 vtable EliteDangerous64.exe+0x%llX answer method EliteDangerous64.exe+0x%llX: "
+                  "frames/subscribed/_HUD ship 0/0/0, stereo 1/1/1, cinema 4/4/4; last +0x28 0x4, last +0x30 0x8",
+                  static_cast<unsigned long long>(addr(g.providers[0])), static_cast<unsigned long long>(addr(g.vts[0]) - base),
+                  static_cast<unsigned long long>(g.method(0) - base));
+    check(ohp::formatProviderRow(*p0, 1, base, size, line, sizeof(line)) > 0 && std::strcmp(line, want) == 0, "text: a provider's three counts and its last values");
+
+    // The totals line: matched, not matched by reason, unreadable, the ring, the extras.
+    check(ohp::formatProviderSummary(30, 5, t, 2, line, sizeof(line)) > 0 &&
+              std::strcmp(line,
+                          "on-foot hud probe: 30 s providers of the HUD node: 5 snapshot(s) of the HUD node in these seconds; since recording began 5 "
+                          "matched, 2 not matched (1 another node's context, 1 OR of the answers != frame mask), 1 unreadable; ring full 2 time(s); 0 "
+                          "extra provider(s) not listed, 0 did not fit the table, 0 view(s) did not fit") == 0,
+          "text: the 30-second totals, matched against not matched by reason");
+    check(ohp::formatProviderSummary(30, 0, t, 0, line, sizeof(line)) > 0 &&
+              std::strstr(line, "30 s providers of the HUD node: no snapshots of the HUD node in these seconds (the node was not drawn, or none could be "
+                                "read): the providers are not silent, they were not asked; since recording began 5 matched"),
+          "text: no snapshots is said, and is not 'providers silent'");
+    check(ohp::formatNoHudProvider(line, sizeof(line)) > 0 &&
+              std::strcmp(line, "on-foot hud probe: no provider of the HUD node has answered with the _HUD bit 0x8 in a matched snapshot yet: the "
+                                "subscription watch is not armed") == 0,
+          "text: no provider ever gave 0x8");
+
+    // The summary's window: due 30 s after its first call; with snapshots or without.
+    ohp::ProviderSummary ps;
+    uint64_t seconds = 0, snaps = 0;
+    check(ps.step(1000, 10, &seconds, &snaps) == 0 && ps.step(30999, 20, &seconds, &snaps) == 0, "summary: the first call starts the window, not due before 30 s");
+    check(ps.step(31000, 25, &seconds, &snaps) == 1 && seconds == 30 && snaps == 15, "summary: due, with the window's snapshots");
+    check(ps.step(61000, 25, &seconds, &snaps) == 2 && seconds == 30 && snaps == 0, "summary: due, the node was not read at all");
+
+    // A 65th provider is only a number: 64 listed, one extra; the table and the count agree.
+    static ohp::ProviderTable t65;
+    for (int i = 0; i < 80; ++i) g.setProvider(i, 0x4, 0x0);
+    std::initializer_list<int> none = {};
+    g.setList(none);
+    {
+        // The 65-entry list, built by hand: setList takes an initializer list, the array is filled directly.
+        for (int i = 0; i < 65; ++i) g.provArray[i] = addr(g.providers[i]);
+        put(g.provList, 0, addr(g.provArray));
+        put<uint32_t>(g.provList, ohp::kListNumber, 65);
+    }
+    g.sync();
+    ohp::ProviderSnap big;
+    check(ohp::readProviders(node, &plainRead, nullptr, &big) == ohp::kSnapOk && big.number == 65 && big.stored == 64 && big.extras == 1,
+          "providers: the 65th is not listed, it is counted");
+    check(t65.take(ohp::kSnapOk, big, ohp::kPlaceStereo) && t65.extras() == 1 && findRow(t65, addr(g.providers[63])) && !findRow(t65, addr(g.providers[64])),
+          "table: the 65th provider has no row");
+    std::snprintf(want, sizeof(want), "; 65 provider(s), 64 listed, 1 extra not listed");
+    check(ohp::formatProviderHead(big, line, sizeof(line)) > 0 && std::strstr(line, want), "text: the head says how many were not listed");
+    // Mask for the 65th: its answer counts in the OR (read, not listed): a 65th that answers 0x8 makes the mask 0xC, and the snapshot matches.
+    g.setProvider(64, 0x4, 0x8);
+    g.sync();
+    ohp::ProviderSnap bigHud;
+    check(ohp::readProviders(node, &plainRead, nullptr, &bigHud) == ohp::kSnapOk && bigHud.mask == 0xC && bigHud.extras == 1,
+          "providers: the answers of the extra providers count in the OR");
+
+    // More providers than the table has rows, and a third view: counted, not stored.
+    static ohp::ProviderTable full;
+    for (int i = 0; i < 80; ++i) g.setProvider(i, 0x4, 0x0);
+    g.setList(none);
+    for (int i = 0; i < 64; ++i) g.provArray[i] = addr(g.providers[i]);
+    put<uint32_t>(g.provList, ohp::kListNumber, 64);
+    g.sync();
+    ohp::ProviderSnap one;
+    ohp::readProviders(node, &plainRead, nullptr, &one);
+    put<int32_t>(g.view, ohp::kViewBitIndex, 1);
+    ohp::readProviders(node, &plainRead, nullptr, &one);
+    full.take(ohp::kSnapOk, one, ohp::kPlaceStereo);
+    put<int32_t>(g.view, ohp::kViewBitIndex, 2);
+    ohp::readProviders(node, &plainRead, nullptr, &one);
+    full.take(ohp::kSnapOk, one, ohp::kPlaceStereo);
+    check(full.rowsFull() == 0 && full.viewBitOf(1) == 2 && findRow(full, addr(g.providers[5]), 0) && findRow(full, addr(g.providers[5]), 1),
+          "table: 64 providers in each of two views fill the rows, the same provider has a row per view");
+    for (int i = 0; i < 64; ++i) g.provArray[i] = addr(g.providers[16 + i]);  // 16 new providers (64-79)
+    g.sync();
+    ohp::readProviders(node, &plainRead, nullptr, &one);
+    full.take(ohp::kSnapOk, one, ohp::kPlaceStereo);
+    check(full.rowsFull() == 16, "table: providers past the rows are counted, not stored");
+    put<int32_t>(g.view, ohp::kViewBitIndex, 3);
+    ohp::readProviders(node, &plainRead, nullptr, &one);
+    check(!full.take(ohp::kSnapOk, one, ohp::kPlaceStereo) && full.viewsFull() == 1, "table: a third view is counted, not stored");
+    put<int32_t>(g.view, ohp::kViewBitIndex, 1);
+
+    // The ring to the frame thread: four records, the fifth is lost and counted.
+    static ohp::Ring<4, ohp::ProviderSnap> ring;
+    ohp::ProviderSnap rec;
+    for (int i = 0; i < 5; ++i) {
+        rec = s;
+        rec.number = static_cast<uint32_t>(i);
+        ring.push(rec);
+    }
+    ohp::ProviderSnap got;
+    int popped = 0;
+    bool inOrder = true;
+    while (ring.pop(&got)) inOrder = inOrder && got.number == static_cast<uint32_t>(popped++) && got.p[0].addr == s.p[0].addr;
+    check(popped == 4 && inOrder && ring.dropped() == 1, "ring: four records in order, the overflow counted");
 }
 
 // ---- Part B: the real glue on a synthetic function -------------------------------------------------------------------------------
@@ -1086,10 +1398,21 @@ void setCamera(uint8_t* cam, float yawDeg, float x = 0.f, float y = 0.f, float z
     cameraBlock(m, yawDeg, 0.f, 0.f, x, y, z);
     std::memcpy(cam + ohp::kCamPose, m, sizeof(m));
 }
-// .16: one store each, through volatile, from one place in the rig (Part C's watch and Part B15's see the same instruction).
-__declspec(noinline) void writeFloat(volatile float* p, float v) { *p = v; }
-__declspec(noinline) void writeMask(volatile uint64_t* p, uint64_t v) { *p = v; }
-volatile uint64_t* gameMask() { return reinterpret_cast<volatile uint64_t*>(g_game.ctx + ohp::kCtxMask); }
+// .19: the stores that change a subscription, each from its own place in the rig (a site is an instruction): Part C's two and Part B15's.
+// Each leaves its own mark after the store: the linker folds identical functions into one, and a site is an instruction.
+volatile int g_mark = 0;
+__declspec(noinline) void writeSub(volatile uint64_t* p, uint64_t v) {
+    *p = v;
+    g_mark = 1;
+}
+__declspec(noinline) void writeSubAlt(volatile uint64_t* p, uint64_t v) {
+    *p = v;
+    g_mark = 2;
+}
+__declspec(noinline) void writeSubGame(volatile uint64_t* p, uint64_t v) {
+    *p = v;
+    g_mark = 3;
+}
 // Yaw steps of 10 deg: three up, three down, over and over.
 float triangle(int i) {
     const int k = i % 6;
@@ -1139,7 +1462,11 @@ void partB15() {
     const uint64_t t0 = 200000;
     g_lines.clear();
     onFootHudProbeCameraDrain(t0, 1, 1, head, &sink, nullptr);
-    check(g_lines.empty(), "pass glue: a call while off is not noted");
+    check(countLines("new pass") == 0 && countLines("pose view") == 0, "pass glue: a call while off is not noted");
+    // .19: Part B's draws of the HUD node read an empty provider list, and a matched one: its first list is written now.
+    check(g_lines.size() == 1 && anyLine("providers of the HUD node: view bit 1, in the ship, node 0x") &&
+              anyLine("camera bit (cam+0x8E0) 0x0, constant lists (cam+0x8F0) 0x4, frame mask (ctx+0x270) 0x4; 0 provider(s), 0 listed, 0 extra not listed"),
+          "pass glue .19: the first list of the HUD node, empty, the mask the camera's constant lists");
 
     // On: each pass noted and said once; the pose lines wait for the half second.
     sw(a.pass, 1);
@@ -1152,12 +1479,17 @@ void partB15() {
                   static_cast<unsigned long long>(addr(g_game.cam)));
     check(anyLine(want) && countLines("new pass") == 2 && countLines("pose view") == 0 && g_switchCalls == 3 && g_switchOn == 1,
           "pass glue: on, both passes noted, said and forwarded");
-    std::snprintf(want, sizeof(want), "watch on: postgui camera 0x%llX (0x%llX+0x20) on debug slot 2, write, 4 bytes",
-                  static_cast<unsigned long long>(addr(g_game.cam) + 0x20), static_cast<unsigned long long>(addr(g_game.cam)));
-    check(anyLine(want) && !anyLine("watch on: frame mask"),
-          "pass glue .16: view 0's PostGUI camera watched at once; no HUD node drawn with it lately, no mask watch yet");
+    check(!anyLine("watch on"), "pass glue .19: no provider has answered with 0x8, so no watch yet");
 
-    // The half second: a pose line a pass. View 0's HUD node, drawn with its PostGUI camera, gives the mask.
+    // The half second: a pose line a pass. View 0's HUD node, drawn with its PostGUI camera, gives the mask. .19: its providers, as the
+    // hypothesis has them in stereo: the one that gives _HUD in cinema (0) is not subscribed to the camera (bit 0x4), the others are
+    // subscribed and silent.
+    put<uint64_t>(g_game.cam, ohp::kCamMask8E0, 0x4);
+    g_game.setProvider(0, 0x0, 0x0);
+    g_game.setProvider(1, 0x4, 0x0);
+    g_game.setProvider(2, 0x4, 0x0);
+    g_game.setList({0, 1, 2});
+    g_game.sync();
     g_draw(g_game.node);
     onFootHudProbeDrain(t0 + 500, 1, &sink, nullptr);
     sw(a.pass, 1);
@@ -1175,11 +1507,12 @@ void partB15() {
     check(countLines("pose view") == 2 && anyLine("pose view 1 stereo on-foot=yes") && anyLine(want),
           "pass glue: view 1's PostGUI camera cannot be read: none, and no mask");
 
-    // Thirty seconds on foot in stereo, the head turning and both cameras with it: both slopes 1; view 1 has no steps. .16: the HUD
-    // node drawn with view 0's PostGUI camera every step, so the next check (2 s on) watches its frame mask; the game writes the
-    // camera each step and the mask, without the _HUD bit, after the drain.
+    // Thirty seconds on foot in stereo, the head turning and both cameras with it: both slopes 1; view 1 has no steps. .19: the HUD node
+    // is drawn with view 0's PostGUI camera every step, and its providers give no _HUD (the one that does in cinema is not subscribed):
+    // the list is written once (at its 5 seconds), the 30-second summary says so, and says that no provider ever gave 0x8; no watch.
     uint64_t t = t0 + 500;
     int i = 0;
+    auto provider = [&](int k) { return addr(g_game.providers[k]); };
     while (t < t0 + 30000) {
         ++i;
         t += 500;
@@ -1192,16 +1525,21 @@ void partB15() {
         g_draw(g_game.node);
         onFootHudProbeDrain(t, 1, &sink, nullptr);
         if (t == t0 + 30000) {
-            std::snprintf(want, sizeof(want), "watch on: frame mask 0x%llX (0x%llX+0x270) on debug slot 3",
-                          static_cast<unsigned long long>(addr(g_game.ctx) + 0x270), static_cast<unsigned long long>(addr(g_game.ctx)));
-            check(anyLine(want), "pass glue .16: the frame mask of the HUD node drawn with view 0's PostGUI camera watched");
-            std::snprintf(want, sizeof(want), "of the postgui camera of 0x%llX: at ", static_cast<unsigned long long>(addr(g_game.cam)));
-            check(anyLine(want) && anyLine("(after the write), value ") && anyLine(", on foot in stereo, thread "),
-                  "pass glue .16: the camera's writer, its value and place");
+            std::snprintf(want, sizeof(want),
+                          "providers of the HUD node: view bit 1, on foot in stereo, node 0x%llX camera 0x%llX: camera bit (cam+0x8E0) 0x4, constant "
+                          "lists (cam+0x8F0) 0x4, frame mask (ctx+0x270) 0x4; 3 provider(s), 3 listed, 0 extra not listed",
+                          static_cast<unsigned long long>(addr(g_game.node)), static_cast<unsigned long long>(addr(g_game.cam)));
+            check(countLines(want) == 1, "pass glue .19: the list in stereo, written once");
+            std::snprintf(want, sizeof(want),
+                          "provider #0 0x%llX vtable EliteDangerous64.exe+0x%llX answer method EliteDangerous64.exe+0x%llX +0x28=0x0 subscribed=no "
+                          "+0x30=0x0 _HUD=no",
+                          static_cast<unsigned long long>(provider(0)), static_cast<unsigned long long>(addr(g_game.vts[0]) - base),
+                          static_cast<unsigned long long>(g_game.method(0) - base));
+            check(anyLine(want) && anyLine("provider #1 0x") && anyLine("+0x28=0x4 subscribed=yes +0x30=0x0 _HUD=no"),
+                  "pass glue .19: the provider that gives _HUD in cinema is not subscribed in stereo");
             g_lines.clear();
         }
         onFootHudProbeCameraDrain(t, 1, 1, head, &sink, nullptr);
-        writeMask(gameMask(), 0x204);
     }
     check(anyLine("30 s follow view 0 stereo: postgui/main k=1.00 (main turned 590 deg); main/head k=1.00 (head turned 590 deg); 59 step(s), 0 left "
                   "out") &&
@@ -1210,10 +1548,26 @@ void partB15() {
     check(anyLine("30 s pass switch: 120 call(s); 2 pass(es) now: view 0 0x") && anyLine(", view 1 0x") &&
               anyLine("2 new, 0 retired, 0 did not fit; 120 pose line(s)"),
           "pass glue: the switch's 30-second line");
+    check(anyLine("30 s providers of the HUD node: 60 snapshot(s) of the HUD node in these seconds; since recording began ") &&
+              anyLine(" matched, 0 not matched (0 another node's context, 0 OR of the answers != frame mask), 2 unreadable; ring full 0 time(s); 0 "
+                      "extra provider(s) not listed, 0 did not fit the table, 0 view(s) did not fit"),
+          "pass glue .19: the 30-second summary, matched against not, the two unreadable draws of Part B");
+    std::snprintf(want, sizeof(want),
+                  "provider 0x%llX view bit 1 vtable EliteDangerous64.exe+0x%llX answer method EliteDangerous64.exe+0x%llX: frames/subscribed/_HUD ship "
+                  "0/0/0, stereo 60/60/0, cinema 0/0/0; last +0x28 0x4, last +0x30 0x0",
+                  static_cast<unsigned long long>(provider(1)), static_cast<unsigned long long>(addr(g_game.vts[1]) - base),
+                  static_cast<unsigned long long>(g_game.method(1) - base));
+    check(anyLine(want) && countLines("provider 0x") == 2 && anyLine("no provider of the HUD node has answered with the _HUD bit 0x8") &&
+              !anyLine("watch on"),
+          "pass glue .19: the summary's rows are the subscribed providers, and says no provider ever gave 0x8; no watch armed");
 
-    // Thirty seconds in cinema, the PostGUI camera still, no head pose, view 1's pass no longer called: 0, and that pass retired. .16:
-    // the mask now with the _HUD bit; each watch's 30-second line (the camera's window began at its arming, t0 + 100, the mask's at
-    // t0 + 2500): the camera written 59 times on foot in stereo; the mask 56 times there without the bit and 4 in cinema with it.
+    // Thirty seconds in cinema, the PostGUI camera still, no head pose, view 1's pass no longer called: 0, and that pass retired. .19:
+    // the provider that gives _HUD is subscribed now: the frame mask has 0x8, the first matched snapshot with it arms the watch on its
+    // subscription (view 0's, the pass's), and the game rewrites the subscription at every step, with the camera's bit.
+    onFootHudProbeSetPlace(ohp::kPlaceCinema);
+    g_game.setProvider(0, 0x4, 0x8);
+    g_game.sync();
+    const uint64_t sub0 = provider(0) + ohp::kProvSub;
     for (int n = 0; n < 60; ++n) {
         ++i;
         t += 500;
@@ -1222,59 +1576,130 @@ void partB15() {
         g_draw(g_game.node);
         onFootHudProbeDrain(t, 1, &sink, nullptr);
         if (t == t0 + 60000) {
-            std::snprintf(want, sizeof(want), "30 s watch postgui camera 0x%llX: 59 write(s); ",
-                          static_cast<unsigned long long>(addr(g_game.cam) + 0x20));
-            check(anyLine(want) && anyLine(" ship 0, stereo 59, cinema 0, last 0.985; 0 from sites that did not fit"),
-                  "pass glue .16: the camera's 30-second line");
-            std::snprintf(want, sizeof(want), "30 s watch frame mask 0x%llX: 60 write(s); #1 ship 0, stereo 56, cinema 4 (with _HUD 0, 0, 4), last 0x20C",
-                          static_cast<unsigned long long>(addr(g_game.ctx) + 0x270));
-            check(anyLine(want), "pass glue .16: the mask's 30-second line, the _HUD bit only in cinema");
+            std::snprintf(want, sizeof(want),
+                          "providers of the HUD node: view bit 1, on foot in cinema, node 0x%llX camera 0x%llX: camera bit (cam+0x8E0) 0x4, constant "
+                          "lists (cam+0x8F0) 0x4, frame mask (ctx+0x270) 0xC; 3 provider(s), 3 listed, 0 extra not listed",
+                          static_cast<unsigned long long>(addr(g_game.node)), static_cast<unsigned long long>(addr(g_game.cam)));
+            check(countLines(want) == 1 && anyLine("+0x28=0x4 subscribed=yes +0x30=0x8 _HUD=yes"), "pass glue .19: the list in cinema, the provider subscribed");
+            std::snprintf(want, sizeof(want), "watch on: hud provider subscription 0x%llX (0x%llX+0x28) on debug slot 2, write, 4 bytes: ",
+                          static_cast<unsigned long long>(sub0), static_cast<unsigned long long>(provider(0)));
+            check(anyLine(want) && anyLine("; the first provider with 0x8, of view bit 1, the pass's view 0") && countLines("watch on") == 1,
+                  "pass glue .19: the first provider with 0x8 watched on its subscription, view 0's");
+            std::snprintf(want, sizeof(want), "writer #3 of the hud provider subscription of 0x%llX: at ", static_cast<unsigned long long>(provider(0)));
+            check(countLines(want) == 1 && anyLine("(after the write), value 0x4 (with the HUD camera bit), on foot in cinema, thread "),
+                  "pass glue .19: one writer line, its value, the camera bit and the place");
             g_lines.clear();
         }
         onFootHudProbeCameraDrain(t, 1, 0, nullptr, &sink, nullptr);
-        writeMask(gameMask(), 0x20C);
+        writeSubGame(g_game.subOf(0), 0x4);
     }
     check(anyLine("30 s follow view 0 cinema: postgui/main k=0.00 (main turned 590 deg); main/head no head pose; 59 step(s)") &&
               countLines("follow view 0 stereo") == 0 && anyLine("pose view 0 cinema") && anyLine("head none"),
           "pass glue: 30 s in cinema, the PostGUI camera still: 0; the mode change makes no step");
     check(anyLine("30 s pass switch: 60 call(s); 1 pass(es) now: view 0 0x") && anyLine("0 new, 1 retired, 0 did not fit; 62 pose line(s)"),
           "pass glue: a pass not called for 2 s is retired");
+    std::snprintf(want, sizeof(want),
+                  "provider 0x%llX view bit 1 vtable EliteDangerous64.exe+0x%llX answer method EliteDangerous64.exe+0x%llX: frames/subscribed/_HUD ship "
+                  "0/0/0, stereo 60/0/0, cinema 60/60/60; last +0x28 0x4, last +0x30 0x8",
+                  static_cast<unsigned long long>(provider(0)), static_cast<unsigned long long>(addr(g_game.vts[0]) - base),
+                  static_cast<unsigned long long>(g_game.method(0) - base));
+    check(anyLine("30 s providers of the HUD node: 60 snapshot(s) of the HUD node in these seconds") && anyLine(want) &&
+              !anyLine("no provider of the HUD node has answered"),
+          "pass glue .19: the summary after cinema: the provider is subscribed and gives _HUD there and is not subscribed in stereo");
     sw(b.pass, 1);
     g_lines.clear();
     onFootHudProbeCameraDrain(t + 100, 1, 0, nullptr, &sink, nullptr);
     std::snprintf(want, sizeof(want), "new pass 0x%llX, view 1", static_cast<unsigned long long>(addr(b.pass)));
     check(anyLine(want), "pass glue: a retired pass called again is new again");
 
-    // .16: view 0's PostGUI camera is another now: at the next check its watch moves with a line; the mask's stays.
-    static uint8_t cam2[0x900];
-    setCamera(cam2, 0.f);
-    put(a.pass, ohp::kPassPostGuiCamera, addr(cam2));
-    sw(a.pass, 1);
+    // The watch's own 30 seconds (armed at the first cinema step, t0 + 30500): 60 writes of one instruction, all in cinema, all with the
+    // camera's bit; the sites of Part C came before it, so this one is the third.
     g_lines.clear();
-    onFootHudProbeCameraDrain(t + 2200, 1, 0, nullptr, &sink, nullptr);
-    std::snprintf(want, sizeof(want), "watch moves: postgui camera 0x%llX -> 0x%llX (view 0's PostGUI camera is another now)",
-                  static_cast<unsigned long long>(addr(g_game.cam) + 0x20), static_cast<unsigned long long>(addr(cam2) + 0x20));
-    check(anyLine(want) && anyLine("watch off: postgui camera") && anyLine("its target moved") &&
-              onFootHudProbeWatchAddress(ohp::kWatchCamera) == addr(cam2) + 0x20 &&
-              onFootHudProbeWatchAddress(ohp::kWatchMask) == addr(g_game.ctx) + 0x270,
-          "pass glue .16: a new PostGUI camera moves its watch, the mask's stays");
+    onFootHudProbeCameraDrain(t + 500, 1, 0, nullptr, &sink, nullptr);
+    std::snprintf(want, sizeof(want),
+                  "30 s watch hud provider subscription 0x%llX: 60 write(s); #3 ship 0, stereo 0, cinema 60 (with the camera bit 0, 0, 60), last 0x4; 0 "
+                  "from sites that did not fit",
+                  static_cast<unsigned long long>(sub0));
+    check(anyLine(want), "pass glue .19: the watch's 30-second line, the writes by place with the camera bit");
 
-    // The key off: both watches come off with their totals, and a write after it is not seen.
+    // The watched provider leaves its view's list (a rebuilt scene) and another that gives _HUD is in it: after 2 s the watch moves.
+    t += 500;
+    g_game.setProvider(3, 0x4, 0x8);
+    g_game.setList({1, 2, 3});
+    g_game.sync();
+    g_draw(g_game.node);
+    onFootHudProbeCameraDrain(t + 500, 1, 0, nullptr, &sink, nullptr);
+    check(onFootHudProbeWatchOn(ohp::kWatchSubscription) && onFootHudProbeWatchAddress(ohp::kWatchSubscription) == sub0,
+          "pass glue .19: the provider is out of the list for 0.5 s: the watch stays");
+    const uint64_t sub3 = provider(3) + ohp::kProvSub;
+    g_lines.clear();
+    g_draw(g_game.node);  // the node keeps being read without it: that is what measures its absence
+    onFootHudProbeCameraDrain(t + 2200, 1, 0, nullptr, &sink, nullptr);
+    std::snprintf(want, sizeof(want), "watch moves: hud provider subscription 0x%llX -> 0x%llX (the watched provider left its view's list for 2 s; ",
+                  static_cast<unsigned long long>(sub0), static_cast<unsigned long long>(sub3));
+    check(anyLine(want) && anyLine("its provider left its view's list") && anyLine("watch on: hud provider subscription") &&
+              onFootHudProbeWatchAddress(ohp::kWatchSubscription) == sub3,
+          "pass glue .19: a provider that left its list moves the watch to the next one with 0x8");
+
+    // No provider with 0x8 is left in the list: after 2 s the watch comes off with a line.
+    t += 3000;
+    g_game.setList({1, 2});
+    g_game.sync();
+    g_draw(g_game.node);
+    onFootHudProbeCameraDrain(t, 1, 0, nullptr, &sink, nullptr);
+    check(onFootHudProbeWatchOn(ohp::kWatchSubscription), "pass glue .19: the provider is out of the list for 0.8 s: the watch stays");
+    // A loading screen: the node is not drawn for 5 s, so nothing is measured and the watch stays.
+    onFootHudProbeCameraDrain(t + 5000, 1, 0, nullptr, &sink, nullptr);
+    check(onFootHudProbeWatchOn(ohp::kWatchSubscription) && onFootHudProbeWatchAddress(ohp::kWatchSubscription) == sub3,
+          "pass glue .19: the HUD node not drawn for 5 s (a loading screen): the watch stays");
+    g_draw(g_game.node);
+    onFootHudProbeCameraDrain(t + 5500, 1, 0, nullptr, &sink, nullptr);
+    g_lines.clear();
+    g_draw(g_game.node);
+    onFootHudProbeCameraDrain(t + 7600, 1, 0, nullptr, &sink, nullptr);
+    std::snprintf(want, sizeof(want), "watch off: hud provider subscription 0x%llX: the provider has been out of its view's list for 2 s", static_cast<unsigned long long>(sub3));
+    check(anyLine(want) && !onFootHudProbeWatchOn(ohp::kWatchSubscription), "pass glue .19: the provider gone for 2 s of draws takes the watch off with a line");
+
+    // It is back: the watch is armed again on the first provider with 0x8, and the key off takes it off with the totals.
+    t += 8000;
+    g_game.setList({0, 1, 2});
+    g_game.sync();
+    g_draw(g_game.node);
+    g_lines.clear();
+    onFootHudProbeCameraDrain(t, 1, 0, nullptr, &sink, nullptr);
+    check(onFootHudProbeWatchAddress(ohp::kWatchSubscription) == sub0 && countLines("watch on: hud provider subscription") == 1,
+          "pass glue .19: the first provider with 0x8 is back and watched again");
     onFootHudProbeSetRecording(false);
     g_lines.clear();
     onFootHudProbeStopWatches("the key is off", &sink, nullptr);
-    check(anyLine("watch off: postgui camera") && anyLine("watch off: frame mask") && countLines("the key is off") == 2 &&
-              !onFootHudProbeWatchOn(ohp::kWatchCamera) && !onFootHudProbeWatchOn(ohp::kWatchMask),
-          "pass glue .16: the key off takes both watches off");
-    setCamera(cam2, 5.f);
-    writeMask(gameMask(), 0x204);
+    check(anyLine("watch off: hud provider subscription") && countLines("the key is off") == 1 && !onFootHudProbeWatchOn(ohp::kWatchSubscription),
+          "pass glue .19: the key off takes the watch off");
+    writeSubGame(g_game.subOf(0), 0x0);
     g_lines.clear();
-    onFootHudProbeWatchDrain(ohp::kWatchCamera, &sink, nullptr);
-    onFootHudProbeWatchDrain(ohp::kWatchMask, &sink, nullptr);
-    check(g_lines.empty(), "pass glue .16: no writer after the watches are off");
+    onFootHudProbeWatchDrain(ohp::kWatchSubscription, &sink, nullptr);
+    check(g_lines.empty(), "pass glue .19: no writer after the watch is off");
+
+    // The fuse: recording again, armed again, then more than 100 000 writes in the window: the watch is off for good, with a line.
+    onFootHudProbeSetRecording(true);
+    t += 500;
+    g_draw(g_game.node);
+    g_lines.clear();
+    onFootHudProbeCameraDrain(t, 1, 0, nullptr, &sink, nullptr);
+    check(onFootHudProbeWatchOn(ohp::kWatchSubscription), "pass glue .19: recording again, the watch is armed again");
+    for (int k = 0; k < 100001; ++k) writeSubGame(g_game.subOf(0), 0x4);
+    g_lines.clear();
+    onFootHudProbeCameraDrain(t + 500, 1, 0, nullptr, &sink, nullptr);
+    check(anyLine("over 100000 hits in 30 s: the place is written all the time; the watch stays off") && !onFootHudProbeWatchOn(ohp::kWatchSubscription),
+          "pass glue .19: the fuse takes the watch off after 100 000 writes");
+    t += 1000;
+    g_draw(g_game.node);
+    g_lines.clear();
+    onFootHudProbeCameraDrain(t + 500, 1, 0, nullptr, &sink, nullptr);
+    check(!anyLine("watch on") && !onFootHudProbeWatchOn(ohp::kWatchSubscription), "pass glue .19: a tripped fuse is not re-armed");
+    onFootHudProbeSetRecording(false);
 }
 
-// ---- Part C: the write watches, real, on this rig's threads -----------------------------------------------------------------------
+// ---- Part C: the write watch, real, on this rig's threads ---------------------------------------------------------------------------
 
 HANDLE g_busyGo = nullptr;
 DWORD WINAPI busyThread(void*) {
@@ -1283,10 +1708,9 @@ DWORD WINAPI busyThread(void*) {
 }
 
 void partC() {
-    alignas(16) static float camera[16] = {1.f};     // a pose block: its first float is the watched place
-    alignas(16) static uint64_t mask[2] = {0x204};  // a frame mask
+    alignas(16) static uint64_t sub[2] = {0x4};  // a provider's subscription: the watched place is its low four bytes
     alignas(16) static uint8_t other[16] = {};
-    const uint64_t camAt = addr(camera), maskAt = addr(mask);
+    const uint64_t subAt = addr(sub);
     // A thread that already holds slot 2 for someone else.
     g_busyGo = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     HANDLE busy = CreateThread(nullptr, 0, &busyThread, nullptr, 0, nullptr);
@@ -1304,9 +1728,10 @@ void partC() {
     check(held, "watch: a thread with slot 2 taken");
 
     g_lines.clear();
-    const int armed = onFootHudProbeWatchArm(ohp::kWatchCamera, camAt, camAt - 0x20, &sink, nullptr);
-    check(armed > 0 && onFootHudProbeWatchOn(ohp::kWatchCamera) && anyLine("watch on: postgui camera") && !anyLine(" 0 skipped"),
-          "watch: the camera's armed on the rig's threads, the taken one skipped");
+    const int armed = onFootHudProbeWatchArm(ohp::kWatchSubscription, subAt, subAt - ohp::kProvSub, "the rig's provider", &sink, nullptr);
+    check(armed > 0 && onFootHudProbeWatchOn(ohp::kWatchSubscription) && anyLine("watch on: hud provider subscription") && anyLine("on debug slot 2") &&
+              anyLine("; the rig's provider") && !anyLine(" 0 skipped"),
+          "watch: the subscription's armed on the rig's threads, the taken one skipped");
     if (busy) {
         CONTEXT c{};
         c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
@@ -1314,45 +1739,46 @@ void partC() {
         check(GetThreadContext(busy, &c) && c.Dr2 == addr(other), "watch: the taken slot is left as it was");
         ResumeThread(busy);
     }
-    check(onFootHudProbeWatchArm(ohp::kWatchMask, maskAt, maskAt - 0x270, &sink, nullptr) > 0 && onFootHudProbeWatchOn(ohp::kWatchMask) &&
-              anyLine("watch on: frame mask") && anyLine("on debug slot 3"),
-          "watch: the mask's armed on slot 3");
-    // The camera written on foot in stereo; the mask, twice, in cinema with the _HUD bit; once more in the ship without it.
+    g_lines.clear();
+    check(onFootHudProbeWatchArm(ohp::kWatchSubscription, subAt, 0, nullptr, &sink, nullptr) == 0 && onFootHudProbeWatchArm(1, subAt, 0, nullptr, &sink, nullptr) == 0 &&
+              g_lines.empty(),
+          "watch: armed again or another watch: nothing");
+    // The HUD nodes' camera bit is 0x4. On foot in stereo the subscription is written twice by one instruction with the bit; in cinema once
+    // more by it; in the ship without the bit; then another instruction writes it in stereo without the bit.
+    onFootHudProbeSetCameraBits(0x4);
     onFootHudProbeSetPlace(ohp::kPlaceStereo);
-    writeFloat(camera, 0.5f);
-    writeFloat(camera, 0.5f);
+    writeSub(sub, 0x4);
+    writeSub(sub, 0x4);
     onFootHudProbeSetPlace(ohp::kPlaceCinema);
-    writeMask(mask, 0x20C);
-    writeMask(mask, 0x20C);
+    writeSub(sub, 0x4);
     onFootHudProbeSetPlace(ohp::kPlaceShip);
-    writeMask(mask, 0x204);
+    writeSub(sub, 0x0);
+    onFootHudProbeSetPlace(ohp::kPlaceStereo);
+    writeSubAlt(sub, 0x0);
     g_lines.clear();
-    onFootHudProbeWatchDrain(ohp::kWatchCamera, &sink, nullptr);
-    onFootHudProbeWatchDrain(ohp::kWatchMask, &sink, nullptr);
-    check(g_lines.size() == 2 && anyLine("writer #1 of the postgui camera of") && anyLine("value 0.500, on foot in stereo") &&
-              anyLine("writer #1 of the frame mask of") && anyLine("value 0x20C (the _HUD bit on), on foot in cinema"),
-          "watch: one line per writer, with the value it wrote and where; the repeats only counted");
+    onFootHudProbeWatchDrain(ohp::kWatchSubscription, &sink, nullptr);
+    check(g_lines.size() == 2 && anyLine("writer #1 of the hud provider subscription of") && anyLine("value 0x4 (with the HUD camera bit), on foot in stereo") &&
+              anyLine("writer #2 of the hud provider subscription of") && anyLine("value 0x0 (without the HUD camera bit), on foot in stereo"),
+          "watch: one line per writer, with the value it wrote, the camera bit and where; the repeats only counted");
     g_lines.clear();
-    onFootHudProbeWatchDisarm(ohp::kWatchCamera, "the rig is done", &sink, nullptr);
-    onFootHudProbeWatchDisarm(ohp::kWatchMask, "the rig is done", &sink, nullptr);
-    check(anyLine("watch off: postgui camera") && anyLine("watch off: frame mask") && countLines("the rig is done; 1 site(s), 2 hit(s)") == 1 &&
-              countLines("the rig is done; 1 site(s), 3 hit(s)") == 1 && !onFootHudProbeWatchOn(ohp::kWatchCamera) &&
-              !onFootHudProbeWatchOn(ohp::kWatchMask),
-          "watch: off, with their totals");
-    writeFloat(camera, 1.f);
-    writeMask(mask, 0x20C);
+    onFootHudProbeWatchDisarm(ohp::kWatchSubscription, "the rig is done", &sink, nullptr);
+    check(anyLine("watch off: hud provider subscription") && countLines("the rig is done; 2 site(s), 5 hit(s)") == 1 &&
+              !onFootHudProbeWatchOn(ohp::kWatchSubscription),
+          "watch: off, with its totals");
+    writeSub(sub, 0x4);
     g_lines.clear();
-    onFootHudProbeWatchDrain(ohp::kWatchCamera, &sink, nullptr);
-    onFootHudProbeWatchDrain(ohp::kWatchMask, &sink, nullptr);
+    onFootHudProbeWatchDrain(ohp::kWatchSubscription, &sink, nullptr);
     check(g_lines.empty(), "watch: off, no trap");
     g_lines.clear();
-    check(onFootHudProbeWatchArm(ohp::kWatchMask, maskAt + 1, 0, &sink, nullptr) == 0 && anyLine("not 4-aligned"),
+    check(onFootHudProbeWatchArm(ohp::kWatchSubscription, subAt + 1, 0, nullptr, &sink, nullptr) == 0 && anyLine("not 4-aligned"),
           "watch: an unaligned address is refused with a line");
     SetEvent(g_busyGo);
     if (busy) {
         WaitForSingleObject(busy, 5000);
         CloseHandle(busy);
     }
+    onFootHudProbeSetPlace(ohp::kPlaceShip);  // as the process began: Part B's draws are read in the ship
+    onFootHudProbeSetCameraBits(0);
 }
 }  // namespace
 
@@ -1365,6 +1791,7 @@ int main(int argc, char** argv) {
     partA13();
     partA15();
     partA16();
+    partA19();
     partC();  // before Part B: its writer tables start empty
     partB();
     partB13();

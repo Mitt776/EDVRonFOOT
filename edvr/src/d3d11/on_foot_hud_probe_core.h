@@ -3,7 +3,9 @@
 // "Разведка: где игра рисует пеший HUD"). on_foot_hud_probe.h has the hook. Everything here is plain C++ the rig drives directly: the
 // build-334473 identity and prologue, the fields of the game's objects, which node is ours, the snapshot taken through a reader the
 // caller supplies, the ring from the game's threads to the frame thread, the filter that writes a node only when it changed, the
-// 30-second summary and the text of every line.
+// 30-second summary and the text of every line. .19 adds the HUD node's provider list (read the way the node's prepare reads it,
+// checked against the frame mask, kept in a lock-free table by provider, view and place) and the write watch on one provider's
+// subscription (".19: the HUD node's providers and the subscription watch" below).
 //
 // What it answers: in headset stereo on foot the game builds its PostGUI pass (render lists 36-39 PostGui_FirstPerson_*, the HUD, and
 // 40-46) but the HUD never reaches the headset. Either the lists hold nothing, or they hold models the view's camera does not draw.
@@ -498,7 +500,7 @@ inline int formatFault(uint64_t node, char* out, size_t cap) {
 //   0x6BFC60 (G, N) appends N to G's nodes; 0x6BFE60 (G, N) takes it out.
 // So on foot the node is off (H1), out of every graph (H2) or in a graph that is off (H3). The walk hook reads which, before the
 // original; the add and remove hooks say who moved a PostGUI node. Two hardware write watches said who wrote N+0x30 and G+0x14 (flight
-// .13: H1, one writer); .16 gave their debug slots to the PostGUI camera and the frame mask (".16: the write watches" below).
+// .13: H1, one writer); .16 gave their debug slots to the PostGUI camera and the frame mask, .19 slot 2 to the provider subscription (".19" below).
 // .15 adds the PostGUI pass switch (kPointPass; "the PostGUI pass's cameras" below).
 enum Point : int { kPointNodeDraw = 0, kPointWalk, kPointAdd, kPointRemove, kPointPass, kPointCount };
 constexpr uintptr_t kPointRva[kPointCount] = {kNodeDrawRva, 0x6BF980u, 0x6BFC60u, 0x6BFE60u, 0x28AD4A0u};
@@ -706,8 +708,8 @@ inline int formatGraphEvent(const GraphEvent& e, int onFoot, uint64_t base, uint
                          onFoot < 0 ? "?" : onFoot ? "yes" : "no", e.thread, callers);
 }
 
-// The write watches' fuse (".16: the write watches" below): more than 100 000 traps in 30 s (a place the game writes all the time)
-// and the watches come off for good, the rest of the probe goes on.
+// The write watch's fuse (".19: the subscription watch" below): more than 100 000 traps in 30 s (a place the game writes all the time)
+// and the watch comes off for good, the rest of the probe goes on.
 class Fuse {
 public:
     static constexpr uint64_t kWindowMs = 30000, kMaxHits = 100000;
@@ -984,7 +986,7 @@ inline void readPass(uint64_t pass, ReadFn read, void* rctx, PassPose* p) {
 }
 
 // The frame mask of the HUD node drawn with a camera (the node snapshots' ctx+0x250 and ctx+0x270) and the draw context it is in
-// (.16's mask watch), the last per camera, eight cameras; one not drawn for a second is not found.
+// (.16's mask watch chose its target by it; now the pose lines' mask), the last per camera, eight cameras; one not drawn for a second is not found.
 class MaskByCamera {
 public:
     static constexpr int kCameras = 8;
@@ -1098,42 +1100,405 @@ inline int formatSwitchSummary(uint64_t seconds, const SwitchWindow& w, const ui
     return len;
 }
 
-// ---- .16: the write watches (docs: "Статика: кто пишет позу камеры PostGUI", "Статика: кто ставит бит _HUD") ---------------------
-// Flight .15: on foot in stereo the PostGUI camera holds the head's pose (in cinema the identity), and the frame mask never asks for
-// list 39 _HUD. The static reading after it:
-//   - 0x287D660 (in cinema 0x28457F0) writes the PostGUI camera's pose every frame through the pose copy 0x59F300, whose first store is
-//     the camera's +0x20 (a watch there reports the address after it, +0x59F313);
-//   - the frame mask ctx+0x270 is the fifth argument of the draw context's "begin view" 0x588A60 (its store reports +0x588A75), whose
-//     callers are virtual and were not found.
-// Debug register slot 2 watches the first float of view 0's PostGUI camera (cam+0x20), slot 3 the low four bytes of the frame mask of
-// view 0's HUD node (ctx+0x270: the PostGUI lists' bits 0-10 are all there) -- write, 4 bytes, every thread (slot 0 is the flat camera
-// producer probe's, slot 1 native_vr_probe's). The CPU reports a data breakpoint AFTER the write: the handler records each distinct
-// instruction once (the address after it, the value it wrote, where the commander was, the callers) and counts the rest by place;
-// for the mask, also how many of them carried the _HUD bit.
-enum Watch : int { kWatchCamera = 0, kWatchMask = 1, kWatchCount = 2 };
-constexpr unsigned kWatchSlot[kWatchCount] = {2, 3};
-inline const char* watchName(int w) { return w == kWatchCamera ? "postgui camera" : "frame mask"; }
-inline uintptr_t watchOffset(int w) { return w == kWatchCamera ? kCamPose : kCtxMask; }
-constexpr uint64_t kHudBit = 1ull << (kHudFirst + kHudCount - 1);  // list 39 _HUD: bit 3 of the PostGUI set, 0x8
-constexpr uint64_t kWatchCheckMs = 2000;  // how often the frame thread checks that the watches are on their targets
-constexpr int kSites = 8;
+// ---- .19: the HUD node's providers and the subscription watch (docs: "Зонд .19: поставщики узла HUD") -----------------------------
+// Flight .15 and .16: on foot in stereo the frame mask never asks for list 39 _HUD, in cinema it does; the mask is written by the node's
+// prepare 0x58F940 and by nothing else. What decides it is the scene providers that prepare asks. The static reading of 0x58F940
+// (node, ctx = *(*(node+0x108)+0x60), cam the node's camera, L = *(ctx+0x108) the provider list):
+//   ctx+0x150 = node and ctx+0x158 = cam, always (the node's end 0x58F7D0 clears them);
+//   for each provider p of L (the array *L, (u32)L[1] of them, a slot may be null):
+//     p+0x30 = (p+0x28 & cam+0x8E0) ? p->vtable[0x68](...) : 0         -- the subscription, then the answer
+//   ctx+0x270 = OR of the answers | cam+0x8F0                          -- the frame mask the probe already reads.
+// The hook reads that list after the node's draw (the context is still the node's: ctx+0x150 says so) and keeps the answers in a table
+// by provider, view and place; a snapshot counts only when the node is the context's and the answers' OR gives the mask, otherwise it
+// is counted by reason. The frame thread writes the list when its shape or the place changes, and a summary every 30 s.
+constexpr uintptr_t kCtxProviders = 0x108;  // the provider list L: *L the array, u32 at L+8 the number
+constexpr uintptr_t kCtxNode = 0x150;       // u64: the node the context was prepared for
+constexpr uintptr_t kListNumber = 0x8;
+constexpr uintptr_t kCam8F0 = 0x8F0;        // u64: the lists the camera always asks for
+constexpr uintptr_t kProvSub = 0x28;        // u64: the subscription, ANDed with cam+0x8E0
+constexpr uintptr_t kProvAnswer = 0x30;     // u64: the answer, a mask of lists
+constexpr uintptr_t kVtAnswer = 0x68;       // the vtable's slot of the method that answers
+constexpr int kMaxProviders = 64;           // a snapshot lists this many, the rest is a number
+constexpr uint32_t kMaxListed = 1024;       // a list longer than this is not read: its length is not believed
+constexpr int kProvViews = 2;               // HUD nodes tracked, by view bit
+constexpr int kProvRows = kMaxProviders * kProvViews;  // the table: a provider in a view is a row
+constexpr uint64_t kProvLineMs = 5000;      // a view's list is written at most this often
+constexpr uint64_t kProvStaleMs = 2000;     // a provider that stayed out of its view's list this long has left it
 
 // Where the commander was at a write: in the ship (or the journal does not say), on foot in stereo, on foot in cinema
-// (experimental.native_vr_on_foot). The frame thread publishes it every frame; the handler reads it.
+// (experimental.native_vr_on_foot). The frame thread publishes it every frame; the hooks and the handler read it.
 enum Place : int { kPlaceShip = 0, kPlaceStereo = 1, kPlaceCinema = 2, kPlaces = 3 };
 inline int placeOf(int onFoot, int stereo) { return onFoot != 1 ? kPlaceShip : stereo == 0 ? kPlaceCinema : kPlaceStereo; }
 inline const char* placeName(int p) { return p == kPlaceStereo ? "on foot in stereo" : p == kPlaceCinema ? "on foot in cinema" : "in the ship"; }
 inline const char* placeShort(int p) { return p == kPlaceStereo ? "stereo" : p == kPlaceCinema ? "cinema" : "ship"; }
+constexpr uint64_t kHudBit = 1ull << (kHudFirst + kHudCount - 1);  // list 39 _HUD: bit 3 of the PostGUI set, 0x8
 
-// One instruction that wrote the watched place: its writes by place (for the mask, with the _HUD bit by place) and the last value, all
-// kept by the handler; the first write's value, place, thread and callers, published once.
+struct Provider {
+    uint64_t addr, vtable, answerFn, sub, answer;  // addr 0: an empty slot of the list
+};
+// Numbers only. No initialisers: the hook fills it on the stack at every HUD draw, and zeroing 64 rows each time is not free;
+// readProviders sets every field the rest reads.
+struct ProviderSnap {
+    uint64_t node, ctx, cam, cam8E0, cam8F0, mask;
+    uint64_t shape;       // a hash of the list's length, the providers' addresses and vtables and who is subscribed
+    uint64_t badA, badB;  // the pair that did not match
+    int32_t viewBit;
+    int32_t viewSlot;     // the table's cell of the view (set by ProviderTable::take)
+    uint32_t number;      // the list's length
+    uint32_t stored;      // slots in p (at most kMaxProviders)
+    uint32_t extras;      // slots past that: read for the mask's OR, not listed
+    uint32_t place;
+    Provider p[kMaxProviders];
+};
+enum SnapResult : int { kSnapOk = 0, kSnapFault, kSnapOtherNode, kSnapOrMismatch };
+
+inline bool subscribed(const Provider& p, uint64_t cam8E0) { return (p.sub & cam8E0) != 0; }
+
+// The HUD node's provider list, the way the game's prepare reads it, from the node after its draw. kSnapFault when a field on the way
+// (or a provider's) could not be read -- the snapshot is dropped; kSnapOtherNode when the context is another node's; kSnapOrMismatch
+// when the answers' OR with cam+0x8F0 is not the frame mask. The vtable's answer method is best effort (0 when unreadable).
+inline int readProviders(uint64_t node, ReadFn read, void* rctx, ProviderSnap* s) {
+    s->node = node;
+    s->ctx = s->cam = s->cam8E0 = s->cam8F0 = s->mask = s->shape = s->badA = s->badB = 0;
+    s->viewBit = -1;
+    s->viewSlot = -1;
+    s->number = s->stored = s->extras = s->place = 0;
+    uint64_t set = 0, view = 0, list = 0, array = 0, ctxNode = 0;
+    uint32_t number = 0;
+    if (!readAs(read, rctx, node + kNodeSet, &set) || !readAs(read, rctx, set + kSetContext, &s->ctx) ||
+        !readAs(read, rctx, s->ctx + kCtxNode, &ctxNode))
+        return kSnapFault;
+    if (ctxNode != node) {
+        s->badA = ctxNode;
+        s->badB = node;
+        return kSnapOtherNode;
+    }
+    if (!readAs(read, rctx, s->ctx + kCtxCamera, &s->cam) || !readAs(read, rctx, s->ctx + kCtxMask, &s->mask) ||
+        !readAs(read, rctx, s->ctx + kCtxProviders, &list) || !readAs(read, rctx, list, &array) ||
+        !readAs(read, rctx, list + kListNumber, &number) || !readAs(read, rctx, s->cam + kCamMask8E0, &s->cam8E0) ||
+        !readAs(read, rctx, s->cam + kCam8F0, &s->cam8F0) || number > kMaxListed)
+        return kSnapFault;
+    if (readAs(read, rctx, node + kNodeView, &view)) readAs(read, rctx, view + kViewBitIndex, &s->viewBit);
+    s->number = number;
+    uint64_t orAll = s->cam8F0, shape = 1469598103934665603ull;
+    auto mix = [&shape](uint64_t v) { shape = (shape ^ v) * 1099511628211ull; };
+    mix(number);
+    for (uint32_t i = 0; i < number; ++i) {
+        uint64_t addr = 0;
+        if (!readAs(read, rctx, array + 8ull * i, &addr)) return kSnapFault;
+        Provider p = {addr, 0, 0, 0, 0};
+        if (addr) {
+            uint64_t body[2] = {};  // +0x28 the subscription, +0x30 the answer
+            if (!readAs(read, rctx, addr + kProvSub, &body) || !readAs(read, rctx, addr, &p.vtable)) return kSnapFault;
+            readAs(read, rctx, p.vtable + kVtAnswer, &p.answerFn);
+            p.sub = body[0];
+            p.answer = body[1];
+            orAll |= p.answer;
+        }
+        mix(p.addr);
+        mix(p.vtable);
+        mix(subscribed(p, s->cam8E0) ? 1 : 0);
+        if (i < static_cast<uint32_t>(kMaxProviders)) s->p[s->stored++] = p;
+        else ++s->extras;
+    }
+    s->shape = shape;
+    if (orAll != s->mask) {
+        s->badA = orAll;
+        s->badB = s->mask;
+        return kSnapOrMismatch;
+    }
+    return kSnapOk;
+}
+
+// What the hook keeps per provider and view, by place, and what it counts. Lock-free, as the other tables: a provider claims a row by
+// compare-and-swap, every other field is a relaxed store or add. The frame thread reads it without stopping the hook.
+class ProviderTable {
+public:
+    struct Row {
+        std::atomic<uint64_t> key{0};  // the provider's address | (view cell + 1) << 56; 0 is a free row
+        std::atomic<uint64_t> vtable{0}, answerFn{0}, sub{0}, answer{0};
+        std::atomic<uint64_t> frames[kPlaces]{}, subscribed[kPlaces]{}, hud[kPlaces]{};
+        std::atomic<uint64_t> nonzero{0};  // frames whose answer was not 0
+        std::atomic<uint64_t> hudSeq{0};   // the order in which providers first answered with 0x8 (1 is the first), 0 never
+    };
+    struct View {
+        std::atomic<uint64_t> key{0};  // the view bit + 1, 0 is a free cell
+        std::atomic<uint64_t> cam{0}, cam8E0{0}, shape{0}, snaps{0};
+        std::atomic<int> place{-1};
+    };
+
+    // Any thread. A snapshot that read to the end is in the table; true when its shape or the place is new for its view (the caller
+    // then hands it to the ring). Any other result is only counted, and the first pair that did not match is kept for one line.
+    bool take(int result, ProviderSnap& s, int place) noexcept {
+        if (result != kSnapOk) {
+            (result == kSnapFault ? m_faults : result == kSnapOtherNode ? m_otherNode : m_orMismatch).fetch_add(1, std::memory_order_relaxed);
+            uint8_t none = 0;
+            if (result != kSnapFault && m_badClaim.compare_exchange_strong(none, 1, std::memory_order_acq_rel)) {
+                m_badReason = result;
+                m_badA = s.badA;
+                m_badB = s.badB;
+                m_badNode = s.node;
+                m_badReady.store(1, std::memory_order_release);
+            }
+            return false;
+        }
+        m_matched.fetch_add(1, std::memory_order_relaxed);
+        const int pl = place >= 0 && place < kPlaces ? place : kPlaceShip;
+        s.place = static_cast<uint32_t>(pl);
+        const int v = viewCell(s.viewBit);
+        s.viewSlot = v;
+        if (v < 0) {
+            m_viewsFull.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        View& w = m_views[v];
+        w.cam.store(s.cam, std::memory_order_relaxed);
+        w.cam8E0.store(s.cam8E0, std::memory_order_relaxed);
+        w.snaps.fetch_add(1, std::memory_order_relaxed);
+        m_extras.store(s.extras, std::memory_order_relaxed);
+        for (uint32_t i = 0; i < s.stored; ++i) {
+            const Provider& p = s.p[i];
+            if (!p.addr) continue;
+            Row* r = row(p.addr, v);
+            if (!r) {
+                m_rowsFull.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+            r->vtable.store(p.vtable, std::memory_order_relaxed);
+            r->answerFn.store(p.answerFn, std::memory_order_relaxed);
+            r->sub.store(p.sub, std::memory_order_relaxed);
+            r->answer.store(p.answer, std::memory_order_relaxed);
+            r->frames[pl].fetch_add(1, std::memory_order_relaxed);
+            if (subscribed(p, s.cam8E0)) r->subscribed[pl].fetch_add(1, std::memory_order_relaxed);
+            if (p.answer) r->nonzero.fetch_add(1, std::memory_order_relaxed);
+            if (p.answer & kHudBit) {
+                r->hud[pl].fetch_add(1, std::memory_order_relaxed);
+                if (r->hudSeq.load(std::memory_order_relaxed) == 0) {
+                    uint64_t none = 0;
+                    r->hudSeq.compare_exchange_strong(none, m_hudSeq.fetch_add(1, std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+                }
+            }
+        }
+        const bool shapeNew = w.shape.exchange(s.shape, std::memory_order_relaxed) != s.shape;
+        const bool placeNew = w.place.exchange(pl, std::memory_order_relaxed) != pl;
+        return shapeNew || placeNew;
+    }
+
+    // The frame thread's side.
+    const Row& rowAt(int i) const { return m_rows[i]; }
+    static uint64_t rowAddress(const Row& r) { return r.key.load(std::memory_order_relaxed) & 0x00FFFFFFFFFFFFFFull; }
+    static int rowView(const Row& r) { return static_cast<int>(r.key.load(std::memory_order_relaxed) >> 56) - 1; }
+    const View& view(int v) const { return m_views[v]; }
+    int viewBitOf(int v) const {
+        const uint64_t k = m_views[v].key.load(std::memory_order_acquire);
+        return k ? static_cast<int32_t>(static_cast<uint32_t>(k - 1)) : -1;
+    }
+    // The camera bits of the HUD nodes of every view, one word for the watch's handler.
+    uint64_t camBits() const {
+        uint64_t bits = 0;
+        for (const View& w : m_views) bits |= w.cam8E0.load(std::memory_order_relaxed);
+        return bits;
+    }
+    uint64_t matched() const { return m_matched.load(std::memory_order_relaxed); }
+    uint64_t otherNode() const { return m_otherNode.load(std::memory_order_relaxed); }
+    uint64_t orMismatch() const { return m_orMismatch.load(std::memory_order_relaxed); }
+    uint64_t faults() const { return m_faults.load(std::memory_order_relaxed); }
+    uint64_t attempts() const { return matched() + otherNode() + orMismatch() + faults(); }
+    uint64_t extras() const { return m_extras.load(std::memory_order_relaxed); }
+    uint64_t rowsFull() const { return m_rowsFull.load(std::memory_order_relaxed); }
+    uint64_t viewsFull() const { return m_viewsFull.load(std::memory_order_relaxed); }
+    bool hudSeen() const { return m_hudSeq.load(std::memory_order_relaxed) != 0; }
+    // The first snapshot that did not match, once.
+    bool nextBad(int* reason, uint64_t* a, uint64_t* b, uint64_t* node) {
+        if (m_badSaid || !m_badReady.load(std::memory_order_acquire)) return false;
+        m_badSaid = true;
+        *reason = m_badReason;
+        *a = m_badA;
+        *b = m_badB;
+        *node = m_badNode;
+        return true;
+    }
+
+private:
+    static_assert((kProvRows & (kProvRows - 1)) == 0, "the rows are probed by a power-of-two mask");
+    int viewCell(int32_t viewBit) noexcept {
+        const uint64_t stored = static_cast<uint64_t>(static_cast<uint32_t>(viewBit)) + 1;
+        for (int i = 0; i < kProvViews; ++i) {
+            uint64_t now = m_views[i].key.load(std::memory_order_acquire);
+            if (now == 0 && m_views[i].key.compare_exchange_strong(now, stored, std::memory_order_acq_rel)) now = stored;
+            if (now == stored) return i;
+        }
+        return -1;
+    }
+    Row* row(uint64_t addr, int v) noexcept {
+        const uint64_t key = (addr & 0x00FFFFFFFFFFFFFFull) | (static_cast<uint64_t>(v + 1) << 56);
+        size_t at = static_cast<size_t>((key * 0x9E3779B97F4A7C15ull) >> 40) & (kProvRows - 1);
+        for (int n = 0; n < kProvRows; ++n, at = (at + 1) & (kProvRows - 1)) {
+            uint64_t now = m_rows[at].key.load(std::memory_order_acquire);
+            if (now == 0 && m_rows[at].key.compare_exchange_strong(now, key, std::memory_order_acq_rel)) now = key;
+            if (now == key) return &m_rows[at];
+        }
+        return nullptr;
+    }
+    Row m_rows[kProvRows];
+    View m_views[kProvViews];
+    std::atomic<uint64_t> m_matched{0}, m_otherNode{0}, m_orMismatch{0}, m_faults{0}, m_extras{0}, m_rowsFull{0}, m_viewsFull{0};
+    std::atomic<uint64_t> m_hudSeq{0};
+    std::atomic<uint8_t> m_badClaim{0}, m_badReady{0};
+    int m_badReason = 0;
+    uint64_t m_badA = 0, m_badB = 0, m_badNode = 0;
+    bool m_badSaid = false;
+};
+
+// The window of the provider summary: due every 30 s from its first call; says whether the HUD node was read at all in it.
+class ProviderSummary {
+public:
+    static constexpr uint64_t kWindowMs = 30000;
+    // 0 not due; 1 due, with snapshots in the window; 2 due, with none (*seconds the window's length, *snaps its snapshots).
+    int step(uint64_t nowMs, uint64_t attempts, uint64_t* seconds, uint64_t* snaps) {
+        if (!m_started) {
+            m_started = true;
+            m_since = nowMs;
+            m_base = attempts;
+            return 0;
+        }
+        if (nowMs - m_since < kWindowMs) return 0;
+        *seconds = (nowMs - m_since) / 1000;
+        *snaps = attempts - m_base;
+        m_since = nowMs;
+        m_base = attempts;
+        return *snaps ? 1 : 2;
+    }
+
+private:
+    bool m_started = false;
+    uint64_t m_since = 0, m_base = 0;
+};
+
+// ---- the .19 provider lines ---------------------------------------------------------------------------------------------------------
+inline int formatImageAddress(uint64_t a, uint64_t base, uint64_t imageSize, char* out, size_t cap) {
+    if (!a) return std::snprintf(out, cap, "none");
+    if (a >= base && a - base < imageSize) return std::snprintf(out, cap, "EliteDangerous64.exe+0x%llX", static_cast<unsigned long long>(a - base));
+    return std::snprintf(out, cap, "0x%llX (outside the image)", static_cast<unsigned long long>(a));
+}
+
+// The list's head: the view, the place, the camera's bit, the constant lists, the frame mask, how many providers and how many were not listed.
+inline int formatProviderHead(const ProviderSnap& s, char* out, size_t cap) {
+    return std::snprintf(out, cap,
+                         "on-foot hud probe: providers of the HUD node: view bit %d, %s, node 0x%llX camera 0x%llX: camera bit (cam+0x8E0) 0x%llX, "
+                         "constant lists (cam+0x8F0) 0x%llX, frame mask (ctx+0x270) 0x%llX; %u provider(s), %u listed, %u extra not listed",
+                         s.viewBit, placeName(static_cast<int>(s.place)), static_cast<unsigned long long>(s.node),
+                         static_cast<unsigned long long>(s.cam), static_cast<unsigned long long>(s.cam8E0),
+                         static_cast<unsigned long long>(s.cam8F0), static_cast<unsigned long long>(s.mask), s.number, s.stored, s.extras);
+}
+
+// One provider of the list: its place in it, its address, its vtable and the answering method as offsets into the game, the
+// subscription and whether it is on the camera, the answer and whether it carries _HUD.
+inline int formatProviderLine(const ProviderSnap& s, uint32_t index, uint64_t base, uint64_t imageSize, char* out, size_t cap) {
+    const Provider& p = s.p[index];
+    if (!p.addr) return std::snprintf(out, cap, "on-foot hud probe:   provider #%u: empty slot", index);
+    char vt[80], fn[80];
+    formatImageAddress(p.vtable, base, imageSize, vt, sizeof(vt));
+    formatImageAddress(p.answerFn, base, imageSize, fn, sizeof(fn));
+    return std::snprintf(out, cap,
+                         "on-foot hud probe:   provider #%u 0x%llX vtable %s answer method %s +0x28=0x%llX subscribed=%s +0x30=0x%llX _HUD=%s", index,
+                         static_cast<unsigned long long>(p.addr), vt, fn, static_cast<unsigned long long>(p.sub),
+                         subscribed(p, s.cam8E0) ? "yes" : "no", static_cast<unsigned long long>(p.answer), (p.answer & kHudBit) ? "yes" : "no");
+}
+
+// The first snapshot that did not match, once: which of the two conditions failed and the pair of values.
+inline int formatBadPair(int reason, uint64_t a, uint64_t b, uint64_t node, char* out, size_t cap) {
+    if (reason == kSnapOtherNode)
+        return std::snprintf(out, cap,
+                             "on-foot hud probe: first provider snapshot that did not match: the draw context was prepared for another node "
+                             "(ctx+0x150 = 0x%llX, the node drawn 0x%llX); later ones are only counted",
+                             static_cast<unsigned long long>(a), static_cast<unsigned long long>(b));
+    return std::snprintf(out, cap,
+                         "on-foot hud probe: first provider snapshot that did not match: the answers' OR with cam+0x8F0 is 0x%llX but the frame "
+                         "mask ctx+0x270 of node 0x%llX is 0x%llX; later ones are only counted",
+                         static_cast<unsigned long long>(a), static_cast<unsigned long long>(node), static_cast<unsigned long long>(b));
+}
+
+// Every 30 s: the snapshots of the window (or that there were none -- the node not drawn, not the providers silent), then the totals
+// since recording began, which are what counted against what did not.
+inline int formatProviderSummary(uint64_t seconds, uint64_t snaps, const ProviderTable& t, uint64_t ringLost, char* out, size_t cap) {
+    int n = 0;
+    if (snaps)
+        n = std::snprintf(out, cap, "on-foot hud probe: %llu s providers of the HUD node: %llu snapshot(s) of the HUD node in these seconds",
+                          static_cast<unsigned long long>(seconds), static_cast<unsigned long long>(snaps));
+    else
+        n = std::snprintf(out, cap,
+                          "on-foot hud probe: %llu s providers of the HUD node: no snapshots of the HUD node in these seconds (the node was not "
+                          "drawn, or none could be read): the providers are not silent, they were not asked",
+                          static_cast<unsigned long long>(seconds));
+    if (n > 0 && static_cast<size_t>(n) < cap)
+        n += std::snprintf(out + n, cap - n,
+                           "; since recording began %llu matched, %llu not matched (%llu another node's context, %llu OR of the answers != frame "
+                           "mask), %llu unreadable; ring full %llu time(s); %llu extra provider(s) not listed, %llu did not fit the table, %llu "
+                           "view(s) did not fit",
+                           static_cast<unsigned long long>(t.matched()),
+                           static_cast<unsigned long long>(t.otherNode() + t.orMismatch()), static_cast<unsigned long long>(t.otherNode()),
+                           static_cast<unsigned long long>(t.orMismatch()), static_cast<unsigned long long>(t.faults()),
+                           static_cast<unsigned long long>(ringLost), static_cast<unsigned long long>(t.extras()),
+                           static_cast<unsigned long long>(t.rowsFull()), static_cast<unsigned long long>(t.viewsFull()));
+    return n;
+}
+
+// A provider that was ever subscribed or answered with something: per place the frames, the frames subscribed and the frames with
+// _HUD (0x8), then the last subscription and answer.
+inline bool providerWorthALine(const ProviderTable::Row& r) {
+    if (!r.key.load(std::memory_order_relaxed)) return false;
+    if (r.nonzero.load(std::memory_order_relaxed)) return true;
+    for (int p = 0; p < kPlaces; ++p)
+        if (r.subscribed[p].load(std::memory_order_relaxed)) return true;
+    return false;
+}
+inline int formatProviderRow(const ProviderTable::Row& r, int viewBit, uint64_t base, uint64_t imageSize, char* out, size_t cap) {
+    char vt[80], fn[80];
+    formatImageAddress(r.vtable.load(std::memory_order_relaxed), base, imageSize, vt, sizeof(vt));
+    formatImageAddress(r.answerFn.load(std::memory_order_relaxed), base, imageSize, fn, sizeof(fn));
+    int n = std::snprintf(out, cap, "on-foot hud probe:   provider 0x%llX view bit %d vtable %s answer method %s: frames/subscribed/_HUD",
+                          static_cast<unsigned long long>(ProviderTable::rowAddress(r)), viewBit, vt, fn);
+    for (int p = 0; p < kPlaces && n > 0 && static_cast<size_t>(n) < cap; ++p)
+        n += std::snprintf(out + n, cap - n, "%s %s %llu/%llu/%llu", p ? "," : "", placeShort(p),
+                           static_cast<unsigned long long>(r.frames[p].load(std::memory_order_relaxed)),
+                           static_cast<unsigned long long>(r.subscribed[p].load(std::memory_order_relaxed)),
+                           static_cast<unsigned long long>(r.hud[p].load(std::memory_order_relaxed)));
+    if (n > 0 && static_cast<size_t>(n) < cap)
+        n += std::snprintf(out + n, cap - n, "; last +0x28 0x%llX, last +0x30 0x%llX",
+                           static_cast<unsigned long long>(r.sub.load(std::memory_order_relaxed)),
+                           static_cast<unsigned long long>(r.answer.load(std::memory_order_relaxed)));
+    return n;
+}
+
+// No provider answered with 0x8 in a matched snapshot: said in the 30-second summary, and it is why no watch is armed.
+inline int formatNoHudProvider(char* out, size_t cap) {
+    return std::snprintf(out, cap,
+                         "on-foot hud probe: no provider of the HUD node has answered with the _HUD bit 0x8 in a matched snapshot yet: the "
+                         "subscription watch is not armed");
+}
+
+// ---- the subscription watch (the .16 camera and mask watches are gone: flight .16 answered them) -----------------------------------
+// Debug register slot 2 watches the low four bytes of the subscription (p+0x28) of the first provider that answered with 0x8 in a
+// matched snapshot -- write, 4 bytes, every thread (slot 0 is the flat camera producer probe's, slot 1 native_vr_probe's, slot 3 is
+// free). The low four bytes hold the bits of both PostGUI cameras (0x4 and 0x800000). The CPU reports a data breakpoint AFTER the
+// write: the handler records each distinct instruction once (the address after it, the value it wrote, where the commander was, the
+// callers) and counts the rest by place, and how many of the writes carried a bit of the HUD nodes' cameras.
+enum Watch : int { kWatchSubscription = 0, kWatchCount = 1 };
+constexpr unsigned kWatchSlot[kWatchCount] = {2};
+inline const char* watchName(int) { return "hud provider subscription"; }
+inline uintptr_t watchOffset(int) { return kProvSub; }
+constexpr int kSites = 8;
+
+// One instruction that wrote the watched place: its writes by place (and those with a HUD camera bit in the value) and the last value,
+// all kept by the handler; the first write's value, place, thread and callers, published once.
 struct Site {
     std::atomic<uint64_t> rip{0};
     std::atomic<uint64_t> hits{0};
-    std::atomic<uint64_t> at[kPlaces]{}, hud[kPlaces]{};
+    std::atomic<uint64_t> at[kPlaces]{}, camBit[kPlaces]{};
     std::atomic<uint64_t> last{0};
     std::atomic<uint8_t> ready{0};
-    uint8_t place = 0, frames = 0;
+    uint8_t place = 0, frames = 0, camFirst = 0;  // camFirst: the first value carried a bit of the HUD nodes' cameras
     uint32_t thread = 0;
     uint64_t value = 0;
     uint64_t stack[kStackFrames] = {};
@@ -1141,7 +1506,7 @@ struct Site {
 // Lock-free, as nvp::WriterTable: a new site claims a free row by compare-and-swap, the handler fills it and only then sets `ready`.
 class SiteTable {
 public:
-    int record(uint64_t rip, int place, uint64_t value, bool hud, bool* fresh) noexcept {
+    int record(uint64_t rip, int place, uint64_t value, bool withCamBit, bool* fresh) noexcept {
         *fresh = false;
         m_hits.fetch_add(1, std::memory_order_relaxed);
         const int p = place >= 0 && place < kPlaces ? place : kPlaceShip;
@@ -1150,25 +1515,26 @@ public:
             if (seen == 0) {
                 uint64_t expected = 0;
                 if (m_sites[i].rip.compare_exchange_strong(expected, rip, std::memory_order_acq_rel)) {
-                    count(m_sites[i], p, value, hud);
+                    count(m_sites[i], p, value, withCamBit);
                     *fresh = true;
                     return i;
                 }
                 seen = expected;
             }
             if (seen == rip) {
-                count(m_sites[i], p, value, hud);
+                count(m_sites[i], p, value, withCamBit);
                 return i;
             }
         }
         m_overflow.fetch_add(1, std::memory_order_relaxed);
         return -1;
     }
-    void publish(int row, uint32_t thread, int place, uint64_t value, const uint64_t* stack, int frames) noexcept {
+    void publish(int row, uint32_t thread, int place, uint64_t value, bool withCamBit, const uint64_t* stack, int frames) noexcept {
         Site& s = m_sites[row];
         s.thread = thread;
         s.place = static_cast<uint8_t>(place >= 0 && place < kPlaces ? place : kPlaceShip);
         s.value = value;
+        s.camFirst = withCamBit ? 1 : 0;
         s.frames = static_cast<uint8_t>(frames < 0 ? 0 : (frames > kStackFrames ? kStackFrames : frames));
         for (int i = 0; i < s.frames; ++i) s.stack[i] = stack[i];
         s.ready.store(1, std::memory_order_release);
@@ -1193,10 +1559,10 @@ public:
     uint64_t overflow() const { return m_overflow.load(std::memory_order_relaxed); }
 
 private:
-    static void count(Site& s, int p, uint64_t value, bool hud) noexcept {
+    static void count(Site& s, int p, uint64_t value, bool withCamBit) noexcept {
         s.hits.fetch_add(1, std::memory_order_relaxed);
         s.at[p].fetch_add(1, std::memory_order_relaxed);
-        if (hud) s.hud[p].fetch_add(1, std::memory_order_relaxed);
+        if (withCamBit) s.camBit[p].fetch_add(1, std::memory_order_relaxed);
         s.last.store(value, std::memory_order_relaxed);
     }
     Site m_sites[kSites];
@@ -1204,26 +1570,26 @@ private:
     std::atomic<uint64_t> m_hits{0}, m_overflow{0};
 };
 
-// The value a watch saw written: the camera's first float (1.000 for the identity), the mask's bits.
-inline int formatWatchValue(int w, uint64_t v, char* out, size_t cap) {
-    if (w == kWatchCamera) {
-        const uint32_t bits = static_cast<uint32_t>(v);
-        float f = 0.f;
-        std::memcpy(&f, &bits, sizeof(f));
-        return std::snprintf(out, cap, "%.3f", f);
-    }
-    return std::snprintf(out, cap, "0x%llX", static_cast<unsigned long long>(v));
+// The value a watch saw written: the subscription's eight bytes.
+inline int formatWatchValue(uint64_t v, char* out, size_t cap) { return std::snprintf(out, cap, "0x%llX", static_cast<unsigned long long>(v)); }
+
+// Which provider the watch took and why this one: the view it is of and whether that is the pass's view 0 (`pass`: 1 it is, 0 it is
+// another view because view 0 had none with 0x8, -1 the pass's view 0 is not known yet).
+inline int formatWatchTarget(int viewBit, int pass, char* out, size_t cap) {
+    return std::snprintf(out, cap, "the first provider with 0x8, of view bit %d%s", viewBit,
+                         pass > 0 ? ", the pass's view 0" : pass == 0 ? " (view 0 has none with 0x8)" : " (the pass's view 0 is not known yet)");
 }
 
-inline int formatWatchOn(int w, uint64_t address, uint64_t object, uint32_t armed, uint32_t skipped, uint32_t failed, char* out, size_t cap) {
+inline int formatWatchOn(int w, uint64_t address, uint64_t object, uint32_t armed, uint32_t skipped, uint32_t failed, const char* note, char* out,
+                         size_t cap) {
     return std::snprintf(out, cap,
                          "on-foot hud probe: watch on: %s 0x%llX (0x%llX+0x%llX) on debug slot %u, write, 4 bytes: %u thread(s), %u skipped "
-                         "(slot taken), %u could not be set",
+                         "(slot taken), %u could not be set%s%s",
                          watchName(w), static_cast<unsigned long long>(address), static_cast<unsigned long long>(object),
-                         static_cast<unsigned long long>(watchOffset(w)), kWatchSlot[w], armed, skipped, failed);
+                         static_cast<unsigned long long>(watchOffset(w)), kWatchSlot[w], armed, skipped, failed, note ? "; " : "", note ? note : "");
 }
 inline int formatWatchNotOn(int w, uint64_t address, const char* why, char* out, size_t cap) {
-    return std::snprintf(out, cap, "on-foot hud probe: watch NOT on: %s 0x%llX: %s; the pose, state and graph lines go on", watchName(w),
+    return std::snprintf(out, cap, "on-foot hud probe: watch NOT on: %s 0x%llX: %s; the provider, pose, state and graph lines go on", watchName(w),
                          static_cast<unsigned long long>(address), why);
 }
 inline int formatWatchOff(int w, uint64_t address, const char* why, const SiteTable& t, char* out, size_t cap) {
@@ -1232,28 +1598,28 @@ inline int formatWatchOff(int w, uint64_t address, const char* why, const SiteTa
                          static_cast<unsigned long long>(t.overflow()));
 }
 inline int formatWatchMoves(int w, uint64_t from, uint64_t to, char* out, size_t cap) {
-    return std::snprintf(out, cap, "on-foot hud probe: watch moves: %s 0x%llX -> 0x%llX (view 0's %s is another now)", watchName(w),
-                         static_cast<unsigned long long>(from), static_cast<unsigned long long>(to),
-                         w == kWatchCamera ? "PostGUI camera" : "HUD node's draw context");
+    return std::snprintf(out, cap,
+                         "on-foot hud probe: watch moves: %s 0x%llX -> 0x%llX (the watched provider left its view's list for 2 s; this one "
+                         "answered with 0x8)",
+                         watchName(w), static_cast<unsigned long long>(from), static_cast<unsigned long long>(to));
 }
 
-// One line per site: the instruction after the write, the value it wrote first and where, the callers (unwound from the writer's own
-// context); for the mask, whether that first value carried the _HUD bit.
+// One line per site: the instruction after the write, the value it wrote first and where, whether that value carried a bit of the HUD
+// nodes' cameras (the handler's test against the bits the frame thread publishes), the callers (unwound from the writer's own context).
 inline int formatWriter(int w, int row, const Site& s, uint64_t object, uint64_t base, uint64_t imageSize, char* out, size_t cap) {
     char at[100], callers[400], value[40];
     const uint64_t rip = s.rip.load(std::memory_order_acquire);
     formatCallers(&rip, 1, base, imageSize, at, sizeof(at));
     formatCallers(s.stack, s.frames, base, imageSize, callers, sizeof(callers));
-    formatWatchValue(w, s.value, value, sizeof(value));
+    formatWatchValue(s.value, value, sizeof(value));
     return std::snprintf(out, cap, "on-foot hud probe: writer #%d of the %s of 0x%llX: at %s (after the write), value %s%s, %s, thread %u, from %s",
                          row + 1, watchName(w), static_cast<unsigned long long>(object), at, value,
-                         w != kWatchMask ? "" : s.value & kHudBit ? " (the _HUD bit on)" : " (the _HUD bit off)", placeName(s.place), s.thread,
-                         callers);
+                         s.camFirst ? " (with the HUD camera bit)" : " (without the HUD camera bit)", placeName(s.place), s.thread, callers);
 }
 
-// A watch's 30-second line while it is on: the window's writes, then each site that wrote in it -- its writes in the ship, on foot in
-// stereo, on foot in cinema, for the mask how many of them carried the _HUD bit, and the last value it wrote. "0 write(s)" when the
-// watch stood quiet: a watch that is not on has no line at all.
+// The watch's 30-second line while it is on: the window's writes, then each site that wrote in it -- its writes in the ship, on foot in
+// stereo, on foot in cinema, how many of them carried the HUD camera bit, and the last value it wrote. "0 write(s)" when the watch stood
+// quiet: a watch that is not on has no line at all.
 class WatchSummary {
 public:
     static constexpr uint64_t kWindowMs = 30000;
@@ -1277,18 +1643,18 @@ public:
             uint64_t n[kPlaces], h[kPlaces], any = 0;
             for (int p = 0; p < kPlaces; ++p) {
                 n[p] = s.at[p].load(std::memory_order_relaxed) - m_at[i][p];
-                h[p] = s.hud[p].load(std::memory_order_relaxed) - m_hud[i][p];
+                h[p] = s.camBit[p].load(std::memory_order_relaxed) - m_camBit[i][p];
                 any += n[p];
             }
             if (!any) continue;
             char value[40];
-            formatWatchValue(w, s.last.load(std::memory_order_relaxed), value, sizeof(value));
+            formatWatchValue(s.last.load(std::memory_order_relaxed), value, sizeof(value));
             len += std::snprintf(out + len, cap - len, "; #%d %s %llu, %s %llu, %s %llu", i + 1, placeShort(kPlaceShip),
                                  static_cast<unsigned long long>(n[kPlaceShip]), placeShort(kPlaceStereo),
                                  static_cast<unsigned long long>(n[kPlaceStereo]), placeShort(kPlaceCinema),
                                  static_cast<unsigned long long>(n[kPlaceCinema]));
-            if (w == kWatchMask && len > 0 && static_cast<size_t>(len) < cap)
-                len += std::snprintf(out + len, cap - len, " (with _HUD %llu, %llu, %llu)", static_cast<unsigned long long>(h[kPlaceShip]),
+            if (len > 0 && static_cast<size_t>(len) < cap)
+                len += std::snprintf(out + len, cap - len, " (with the camera bit %llu, %llu, %llu)", static_cast<unsigned long long>(h[kPlaceShip]),
                                      static_cast<unsigned long long>(h[kPlaceStereo]), static_cast<unsigned long long>(h[kPlaceCinema]));
             if (len > 0 && static_cast<size_t>(len) < cap) len += std::snprintf(out + len, cap - len, ", last %s", value);
         }
@@ -1305,12 +1671,12 @@ private:
         for (int i = 0; i < kSites; ++i)
             for (int p = 0; p < kPlaces; ++p) {
                 m_at[i][p] = t.site(i).at[p].load(std::memory_order_relaxed);
-                m_hud[i][p] = t.site(i).hud[p].load(std::memory_order_relaxed);
+                m_camBit[i][p] = t.site(i).camBit[p].load(std::memory_order_relaxed);
             }
     }
     bool m_started = false;
     uint64_t m_since = 0, m_hits = 0, m_overflow = 0;
-    uint64_t m_at[kSites][kPlaces] = {}, m_hud[kSites][kPlaces] = {};
+    uint64_t m_at[kSites][kPlaces] = {}, m_camBit[kSites][kPlaces] = {};
 };
 
 }  // namespace ohp
