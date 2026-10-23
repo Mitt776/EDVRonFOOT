@@ -344,9 +344,9 @@ void partA() {
     n = census.kinds(kinds, ohp::Census::kCells);
     check(n == ohp::Census::kCells && census.overflow() == 40 - (ohp::Census::kCells - 3), "census: a full table counts what did not fit");
     check(ohp::formatCensusKind(kinds[0], line, sizeof(line)) > 0 &&
-              std::strcmp(line, "on-foot hud probe: census: vtable +0x52ED2C0 (the list-range node's), first list 36, 4 list(s): 5 draw(s)") == 0,
+              std::strcmp(line, "on-foot hud probe: census: vtable +0x52ED290 (the list-range node's), first list 36, 4 list(s): 5 draw(s)") == 0,
           "census text: a kind");
-    check(ohp::formatCensusHead(32, 11, line, sizeof(line)) > 0 && std::strstr(line, "no PostGUI node (vtable +0x52ED2C0, lists 0+4 or 4+7) in 20 s") &&
+    check(ohp::formatCensusHead(32, 11, line, sizeof(line)) > 0 && std::strstr(line, "no PostGUI node (vtable +0x52ED290, lists 0+4 or 4+7) in 20 s") &&
               std::strstr(line, "32 kind(s), 11 draw(s) of kinds that did not fit"),
           "census text: the head");
 
@@ -476,11 +476,11 @@ void partA13() {
     check(popped == 32 && events.dropped() == 3, "events: a full ring drops and counts");
 
     // The lines.
-    check(ohp::formatPointHooked(ohp::kPointWalk, 0x1406BF980ull, 8, line, sizeof(line)) > 0 &&
-              std::strstr(line, "hooked graph walk at EliteDangerous64.exe+0x6BF980 (0x1406BF980), 16 bytes verified, 8 moved; it reads"),
+    check(ohp::formatPointHooked(ohp::kPointWalk, 0x1406BF920ull, 8, line, sizeof(line)) > 0 &&
+              std::strstr(line, "hooked graph walk at EliteDangerous64.exe+0x6BF920 (0x1406BF920), 16 bytes verified, 8 moved; it reads"),
           "text: a point hooked");
     check(ohp::formatPointWrongBytes(ohp::kPointRemove, line, sizeof(line)) > 0 &&
-              std::strstr(line, "NOT installed: the graph remove at EliteDangerous64.exe+0x6BFE60 does not begin") &&
+              std::strstr(line, "NOT installed: the graph remove at EliteDangerous64.exe+0x6BFE00 does not begin") &&
               std::strstr(line, "the others stand"),
           "text: a point refused");
     check(ohp::formatState(ohp::kKindHud, 8, ohp::kStateNodeOff, 0xAB0, 0, 0xC00, 1, 1, line, sizeof(line)) > 0 &&
@@ -693,8 +693,8 @@ void partA15() {
           "text: the switch's 30-second line");
     ohp::formatSwitchSummary(30, ohp::SwitchWindow{}, passes, views, 0, line, sizeof(line));
     check(std::strstr(line, "0 call(s); 0 pass(es) now; 0 new") != nullptr, "text: a switch never called");
-    check(ohp::formatPointHooked(ohp::kPointPass, 0x1428AD4A0ull, 6, line, sizeof(line)) > 0 &&
-              std::strstr(line, "hooked pass switch at EliteDangerous64.exe+0x28AD4A0 (0x1428AD4A0), 16 bytes verified, 6 moved; it only notes the pass"),
+    check(ohp::formatPointHooked(ohp::kPointPass, 0x1428AD3E0ull, 6, line, sizeof(line)) > 0 &&
+              std::strstr(line, "hooked pass switch at EliteDangerous64.exe+0x28AD3E0 (0x1428AD3E0), 16 bytes verified, 6 moved; it only notes the pass"),
           "text: the switch hooked");
 }
 
@@ -2058,26 +2058,26 @@ void partB() {
     check(!onFootHudProbeWantsDraws(), "flag: recording, but nothing hooked yet: the draw path's flag is down");
     onFootHudProbeSetRecording(false);
 
-    // Another build: a fake image whose PE stamp is not 334473's.
+    // Another build: a fake image whose PE stamp is not 334925's.
     std::vector<uint8_t> pe(0x200, 0);
     put<uint32_t>(pe.data(), 0x3C, 0x80);
     put<uint32_t>(pe.data(), 0x80 + 8, 0x12345678u);
     put<uint32_t>(pe.data(), 0x80 + 0x50, 0x1000u);
     g_lines.clear();
     check(!onFootHudProbeInstall(addr(pe.data()), addr(page), true, &sink, nullptr) && g_lines.size() == 1 &&
-              anyLine("NOT installed: the game is not build 334473 (PE stamp 0x12345678, image size 0x1000)") && page[0] == 0x40,
+              anyLine("NOT installed: the game is not build 334925 (PE stamp 0x12345678, image size 0x1000)") && page[0] == 0x40,
           "glue: another build, one line, nothing patched");
 
     page[1] = 0x54;  // not the game's prologue
     g_lines.clear();
     check(!onFootHudProbeInstall(base, addr(page), false, &sink, nullptr) && g_lines.size() == 1 &&
-              anyLine("does not begin with build 334473's 16 bytes") && page[0] == 0x40 && page[1] == 0x54,
+              anyLine("does not begin with build 334925's 16 bytes") && page[0] == 0x40 && page[1] == 0x54,
           "glue: wrong bytes, one line, untouched");
     page[1] = 0x53;
     FlushInstructionCache(GetCurrentProcess(), page, 2);
     g_lines.clear();
     check(onFootHudProbeInstall(base, addr(page), false, &sink, nullptr) && g_lines.size() == 1 &&
-              anyLine("hooked node draw at EliteDangerous64.exe+0x58F0F0") && anyLine("16 bytes verified, 5 moved") && page[0] == 0xE9,
+              anyLine("hooked node draw at EliteDangerous64.exe+0x58F090") && anyLine("16 bytes verified, 5 moved") && page[0] == 0xE9,
           "glue: the right bytes are hooked, five moved");
     g_lines.clear();
     check(onFootHudProbeInstall(base, addr(page), false, &sink, nullptr) && g_lines.empty(), "glue: a second install says nothing");
@@ -2101,8 +2101,8 @@ void partB() {
     onFootHudProbeDrain(69999, 0, &sink, nullptr);
     check(g_lines.empty(), "glue census: not before 20 s");
     onFootHudProbeDrain(70000, 0, &sink, nullptr);
-    check(countLines("no PostGUI node") == 1 && anyLine("2 kind(s)") && anyLine("census: vtable +0x52ED2C8, first list 0, 4 list(s): 2 draw(s)") &&
-              anyLine("census: vtable +0x52ED2C0 (the list-range node's), first list 0, 3 list(s): 1 draw(s)"),
+    check(countLines("no PostGUI node") == 1 && anyLine("2 kind(s)") && anyLine("census: vtable +0x52ED298, first list 0, 4 list(s): 2 draw(s)") &&
+              anyLine("census: vtable +0x52ED290 (the list-range node's), first list 0, 3 list(s): 1 draw(s)"),
           "glue census: written once, the kinds seen");
     g_lines.clear();
     onFootHudProbeDrain(95000, 0, &sink, nullptr);
@@ -2251,9 +2251,9 @@ void partB13() {
     const bool addHooked = onFootHudProbeInstallPoint(ohp::kPointAdd, base, addr(addAt), &sink, nullptr);
     const bool removeHooked = onFootHudProbeInstallPoint(ohp::kPointRemove, base, addr(removeAt), &sink, nullptr);
     check(walkHooked && !addHooked && removeHooked && g_lines.size() == 3 &&
-              anyLine("hooked graph walk at EliteDangerous64.exe+0x6BF980") && anyLine("8 moved") &&
-              anyLine("NOT installed: the graph add at EliteDangerous64.exe+0x6BFC60 does not begin") &&
-              anyLine("hooked graph remove at EliteDangerous64.exe+0x6BFE60") && addAt[0] == 0x90 && walkAt[0] == 0xE9 && removeAt[0] == 0xE9,
+              anyLine("hooked graph walk at EliteDangerous64.exe+0x6BF920") && anyLine("8 moved") &&
+              anyLine("NOT installed: the graph add at EliteDangerous64.exe+0x6BFC00 does not begin") &&
+              anyLine("hooked graph remove at EliteDangerous64.exe+0x6BFE00") && addAt[0] == 0x90 && walkAt[0] == 0xE9 && removeAt[0] == 0xE9,
           "graph glue: one point's wrong bytes refuse only it, the others are hooked");
     addAt[0] = 0x48;
     FlushInstructionCache(GetCurrentProcess(), addAt, 1);
@@ -2432,14 +2432,14 @@ void partB15() {
     const uintptr_t base = g_game.base();
     g_lines.clear();
     check(!onFootHudProbeInstallPoint(ohp::kPointPass, base, addr(page), &sink, nullptr) && g_lines.size() == 1 &&
-              anyLine("NOT installed: the pass switch at EliteDangerous64.exe+0x28AD4A0 does not begin") && anyLine("the others stand") &&
+              anyLine("NOT installed: the pass switch at EliteDangerous64.exe+0x28AD3E0 does not begin") && anyLine("the others stand") &&
               page[0] == 0x40 && page[2] == 0x90,
           "pass glue: wrong bytes, one line, untouched");
     page[2] = 0x48;
     FlushInstructionCache(GetCurrentProcess(), page, 4096);
     g_lines.clear();
     check(onFootHudProbeInstallPoint(ohp::kPointPass, base, addr(page), &sink, nullptr) && g_lines.size() == 1 &&
-              anyLine("hooked pass switch at EliteDangerous64.exe+0x28AD4A0") && anyLine("6 moved") && page[0] == 0xE9,
+              anyLine("hooked pass switch at EliteDangerous64.exe+0x28AD3E0") && anyLine("6 moved") && page[0] == 0xE9,
           "pass glue: the right bytes are hooked, six moved");
 
     using FnSwitch = uint64_t (*)(void*, uint64_t);
@@ -3015,7 +3015,7 @@ void partB21() {
     page[0] = 0x42;
     g_lines.clear();
     check(!onFootHudProbeInstallPoint(ohp::kPointList, base, addr(page), &sink, nullptr) && g_lines.size() == 1 &&
-              anyLine("NOT installed: the list prep at EliteDangerous64.exe+0x592090 does not begin with build 334473's 16 bytes") && anyLine("the others stand") &&
+              anyLine("NOT installed: the list prep at EliteDangerous64.exe+0x592030 does not begin with build 334925's 16 bytes") && anyLine("the others stand") &&
               page[0] == 0x42,
           "list glue: wrong bytes, one line, untouched");
     g_originalCalls = 0;
@@ -3024,7 +3024,7 @@ void partB21() {
     page[0] = 0x41;
     FlushInstructionCache(GetCurrentProcess(), page, 1);
     g_lines.clear();
-    check(onFootHudProbeInstallPoint(ohp::kPointList, base, addr(page), &sink, nullptr) && g_lines.size() == 1 && anyLine("hooked list prep at EliteDangerous64.exe+0x592090") &&
+    check(onFootHudProbeInstallPoint(ohp::kPointList, base, addr(page), &sink, nullptr) && g_lines.size() == 1 && anyLine("hooked list prep at EliteDangerous64.exe+0x592030") &&
               anyLine("16 bytes verified") && anyLine("it only notes which list of the HUD node is drawn before the original and calls it unchanged") && page[0] == 0xE9,
           "list glue: the right bytes are hooked");
     g_listFn = reinterpret_cast<FnList>(page);

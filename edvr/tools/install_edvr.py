@@ -2864,7 +2864,7 @@ def self_test():
             ok = False
         except ValueError as exc:
             if "not one this EDVR build is qualified for" not in str(exc) or \
-               "334473" not in str(exc):
+               "334925" not in str(exc):
                 print("unknown Odyssey revision got the wrong message: %s" % exc)
                 ok = False
         legacy_exe = os.path.join(tmp, "gate-legacy.exe")

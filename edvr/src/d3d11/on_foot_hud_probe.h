@@ -4,7 +4,7 @@
 //
 // In headset stereo on foot the game builds its PostGUI pass -- render lists 36-39 (PostGui_FirstPerson_*, the on-foot HUD) and 40-46
 // -- yet the HUD never reaches the headset. This probe answers where it is lost: it hooks the game's list-range node draw
-// (EliteDangerous64.exe+0x58F0F0, build 334473 only), calls the original unchanged and then, for the PostGUI pass's nodes only, writes
+// (EliteDangerous64.exe+0x58F090, build 334925 only), calls the original unchanged and then, for the PostGUI pass's nodes only, writes
 // down the view, its camera, whether the camera's mask passes each list and in which camera "pockets" the list holds models
 // (on_foot_hud_probe_core.h has the game's fields).
 //
@@ -17,7 +17,7 @@
 // what there was (flight .11 lost a walk to a wrong filter).
 //
 // The hook goes in the first time the key is on and stays until the game exits; with the key off it only forwards. On another build,
-// or when the function does not begin with build 334473's bytes, nothing is patched and one line says why.
+// or when the function does not begin with build 334925's bytes, nothing is patched and one line says why.
 //
 // .13 (flight .12: on foot in stereo the lists 36-39 node is never drawn): three more hooks and two write watches find out why.
 //   - The node draw hook also keeps the PostGUI nodes it sees, per kind and view (four cells).

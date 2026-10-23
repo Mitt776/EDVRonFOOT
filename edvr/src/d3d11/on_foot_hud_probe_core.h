@@ -1,7 +1,7 @@
 #pragma once
 // On-foot HUD probe, the pure half (EDVRonFOOT; experimental.on_foot_hud_probe; the project's docs\research\native-vr-on-foot.md,
 // "Разведка: где игра рисует пеший HUD"). on_foot_hud_probe.h has the hook. Everything here is plain C++ the rig drives directly: the
-// build-334473 identity and prologue, the fields of the game's objects, which node is ours, the snapshot taken through a reader the
+// build-334925 identity and prologue, the fields of the game's objects, which node is ours, the snapshot taken through a reader the
 // caller supplies, the ring from the game's threads to the frame thread, the filter that writes a node only when it changed, the
 // 30-second summary and the text of every line. .19 adds the HUD node's provider list (read the way the node's prepare reads it,
 // checked against the frame mask, kept in a lock-free table by provider, view and place) (".19: the HUD node's providers" below). .20
@@ -15,7 +15,9 @@
 // What it answers: in headset stereo on foot the game builds its PostGUI pass (render lists 36-39 PostGui_FirstPerson_*, the HUD, and
 // 40-46) but the HUD never reaches the headset. Either the lists hold nothing, or they hold models the view's camera does not draw.
 //
-// The game, build 334473 (Ghidra):
+// The game, build 334473 (Ghidra). The addresses in the comments are 334473's; in 334925 the code at 0x5xxxxx/0x6Bxxxx is 0x60 lower, at
+// 0x28xxxxx 0xC0, at 0x4Cxxxxx 0x120, the node vtable 0x30 and the _HUD provider vtable 0x20 lower
+// (docs/research/native-vr-on-foot.md, "Перенос на 334925"):
 //   0x58F0F0 (node): draws a list-range node. S = *(node+0x108), ctx = *(S+0x60), the lists *(S+0x70)[i] (S+0x44 of them); for each
 //     i in [*(node+0xD8), +*(node+0xE0)) it calls 0x592090(ctx, list) and 0x594EF0(ctx, list). It begins
 //     rex push rbx; push rdi; push r14; sub rsp,80h; mov rax,[rcx+108h] -- no relative operand.
@@ -39,12 +41,12 @@
 namespace edvr {
 namespace ohp {
 
-// Build 334473's PE TimeDateStamp and SizeOfImage (common/elite_oculus_profile.h checks the same stamp).
-constexpr uint32_t kExpectedTimestamp = 0x6ACD513Du;
+// Build 334925's PE TimeDateStamp and SizeOfImage (common/elite_oculus_profile.h checks the same stamp; 334473 had 0x6ACD513D).
+constexpr uint32_t kExpectedTimestamp = 0x6ADA8048u;
 constexpr uint32_t kExpectedImageSize = 0x640C000u;
 
-constexpr uintptr_t kNodeDrawRva = 0x58F0F0u;
-constexpr uintptr_t kNodeVtableRva = 0x52ED2C0u;
+constexpr uintptr_t kNodeDrawRva = 0x58F090u;    // 334473: 0x58F0F0
+constexpr uintptr_t kNodeVtableRva = 0x52ED290u; // 334473: 0x52ED2C0
 constexpr size_t kPrologueBytes = 16;
 constexpr uint8_t kPrologue[kPrologueBytes] = {0x40, 0x53, 0x57, 0x41, 0x56, 0x48, 0x81, 0xEC,
                                                0x80, 0x00, 0x00, 0x00, 0x48, 0x8B, 0x81, 0x08};
@@ -472,14 +474,14 @@ inline int formatKey(bool on, bool installed, char* out, size_t cap) {
 
 inline int formatWrongBuild(uint32_t timestamp, uint32_t imageSize, char* out, size_t cap) {
     return std::snprintf(out, cap,
-                         "on-foot hud probe: NOT installed: the game is not build 334473 (PE stamp 0x%08X, image size 0x%X); nothing was "
+                         "on-foot hud probe: NOT installed: the game is not build 334925 (PE stamp 0x%08X, image size 0x%X); nothing was "
                          "patched and the game runs as without the probe",
                          timestamp, imageSize);
 }
 
 inline int formatWrongBytes(char* out, size_t cap) {
     return std::snprintf(out, cap,
-                         "on-foot hud probe: NOT installed: the node draw at EliteDangerous64.exe+0x%llX does not begin with build 334473's "
+                         "on-foot hud probe: NOT installed: the node draw at EliteDangerous64.exe+0x%llX does not begin with build 334925's "
                          "%zu bytes; nothing was patched",
                          static_cast<unsigned long long>(kNodeDrawRva), kPrologueBytes);
 }
@@ -511,8 +513,9 @@ inline int formatFault(uint64_t node, char* out, size_t cap) {
 // .15 adds the PostGUI pass switch (kPointPass; "the PostGUI pass's cameras" below). .21 adds the list prep (kPointList, ".21: the HUD
 // node's draw shapes" below): the node draw 0x58F0F0 calls 0x592090(ctx, list, 0) for every list of the node, before the list is drawn.
 enum Point : int { kPointNodeDraw = 0, kPointWalk, kPointAdd, kPointRemove, kPointPass, kPointList, kPointCount };
-constexpr uintptr_t kPointRva[kPointCount] = {kNodeDrawRva, 0x6BF980u, 0x6BFC60u, 0x6BFE60u, 0x28AD4A0u, 0x592090u};
-// Each point's first 16 bytes in build 334473 (capstone, 2026-10-22). None has a relative operand in the bytes CodeHook moves.
+constexpr uintptr_t kPointRva[kPointCount] = {kNodeDrawRva, 0x6BF920u, 0x6BFC00u, 0x6BFE00u, 0x28AD3E0u, 0x592030u};
+// 334473: 0x58F0F0, 0x6BF980, 0x6BFC60, 0x6BFE60, 0x28AD4A0, 0x592090 (the same bytes, 0x60 / 0xC0 lower now).
+// Each point's first 16 bytes, the same in builds 334473 and 334925 (capstone, 2026-10-22; whole bodies compared 2026-10-23). None has a relative operand in the bytes CodeHook moves.
 constexpr uint8_t kPointPrologue[kPointCount][kPrologueBytes] = {
     {0x40, 0x53, 0x57, 0x41, 0x56, 0x48, 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00, 0x48, 0x8B, 0x81, 0x08},
     // sub rsp,48h; mov rax,[rcx+20h]; mov [rsp+60h],rbx; mov rbx,[rcx+28h]
@@ -752,7 +755,7 @@ inline int formatPointHooked(int point, uint64_t target, size_t moved, char* out
 }
 inline int formatPointWrongBytes(int point, char* out, size_t cap) {
     return std::snprintf(out, cap,
-                         "on-foot hud probe: NOT installed: the %s at EliteDangerous64.exe+0x%llX does not begin with build 334473's %zu "
+                         "on-foot hud probe: NOT installed: the %s at EliteDangerous64.exe+0x%llX does not begin with build 334925's %zu "
                          "bytes; that one was not patched, the others stand",
                          pointName(point), static_cast<unsigned long long>(kPointRva[point]), kPrologueBytes);
 }
@@ -1512,7 +1515,7 @@ inline int formatNoHudProvider(char* out, size_t cap) {
 // every path and names the first closed one; a path is a _HUD one when its material gave a pass with 0x8 at any time (a lock-free
 // set remembers the view). The OR of the open paths' lists is recomputed and checked against the record's answer: what the record has
 // more is the collectors', a bit the paths give and the record does not is a misread walk (counted by reason, never a finding).
-constexpr uintptr_t kProvBVtableRva = 0x5A72D58u;       // provider B: the _HUD provider
+constexpr uintptr_t kProvBVtableRva = 0x5A72D38u;       // provider B: the _HUD provider (334473: 0x5A72D58)
 constexpr uintptr_t kCollectorTableRva = 0x6054C70u;    // {function, int offset} x 7, 16 bytes each, filled at launch
 constexpr int kCollectors = 7;
 constexpr uintptr_t kCollectorStride = 16;

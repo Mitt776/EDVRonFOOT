@@ -140,9 +140,9 @@ Bytes readAll(const std::wstring& path) {
   return Bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
 }
 
-// Qualified identity of revision 334473, shared by the synthetic fixtures.
+// Qualified identity of revision 334925, shared by the synthetic fixtures.
 constexpr std::uint32_t kImageSize = 0x640C000;
-constexpr std::uint32_t kTimestamp = 0x6ACD513D;
+constexpr std::uint32_t kTimestamp = 0x6ADA8048;
 constexpr std::uint32_t kIat = edvr::elite_oculus_profile_detail::kLoadLibraryIatRva;
 // The IAT section ends here, and a gap follows it.
 constexpr std::uint32_t kIatSectionEnd = 0x4DB7000;
@@ -282,9 +282,9 @@ int gameTest(const wchar_t* path) {
     check(!out.loadLibrarySlot && !out.callerReturnRva, "mutation rejection clears output");
     mapped[offset] ^= 1;
   };
-  for (const auto rva : {0x8D549Cu, 0x4E4BA0u, 0x4E4730u, 0x4E4970u,
-                         0x4E8630u, 0x4E71D0u, 0x4E6E40u, 0x4E0F60u,
-                         0x4E8330u, 0x4E5DA0u, 0x4E87B0u})
+  for (const auto rva : {0x8D543Cu, 0x4E4B40u, 0x4E46D0u, 0x4E4910u,
+                         0x4E85D0u, 0x4E7170u, 0x4E6DE0u, 0x4E0F00u,
+                         0x4E82D0u, 0x4E5D40u, 0x4E8750u})
     rejectsMutation(rva, "audited code-block mutation rejected");
   for (const auto rva : {0x4E27438u, 0x4E27440u, 0x4E27600u})
     rejectsMutation(rva, "vtable mutation rejected");

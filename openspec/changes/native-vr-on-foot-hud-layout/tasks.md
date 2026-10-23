@@ -47,13 +47,13 @@
 
 ## 3. Сборка и установка
 
-- [ ] 3.1 Полная сборка. В PowerShell: PATH начинается с `C:\Users\user\AppData\Local\Programs\Python\Python312`,
+- [x] 3.1 Полная сборка. В PowerShell: PATH начинается с `C:\Users\user\AppData\Local\Programs\Python\Python312`,
   `TEMP`/`TMP` = `D:\Project VSC\EDVRonFOOT\edvr\build\tmp`, затем `cmd /c '"D:\Project VSC\EDVRonFOOT\edvr\build.bat"
   --jobs 8'`. Проверка:
   - «all gates passed», квитанция `full-pass`;
   - коммит через `git commit -F`, тег `v0.19.1-edvronfoot.22`;
   - `build.bat --dll-only` проходит.
-- [ ] 3.2 Установка при закрытой игре: `py -3.12 edvr\tools\install_edvr.py --target "C:\Steam\steamapps\common\Elite
+- [x] 3.2 Установка при закрытой игре: `py -3.12 edvr\tools\install_edvr.py --target "C:\Steam\steamapps\common\Elite
   Dangerous\Products\elite-dangerous-odyssey-64" --all --tag edvronfoot --dry-run`, затем без `--dry-run`. В живом
   `edvr.ini` через Edit — `on_foot_hud_probe = 1`. Проверка:
   - `edvronfoot_game.ps1 -Action Status` показывает `.22`;
