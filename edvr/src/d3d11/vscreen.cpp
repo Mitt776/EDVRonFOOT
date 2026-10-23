@@ -59,6 +59,7 @@
 #include "on_foot_hud.h"  // EDVRonFOOT: the on-foot HUD's panel census
 #include "on_foot_hud_probe.h"  // EDVRonFOOT: onFootHudProbeWantsDraws / NoteDraw, the HUD probe's draw window
 #include "on_foot_hud_probe_core.h"  // EDVRonFOOT: ohp::DrawShape, for NoteDraw below
+#include "on_foot_hud_layout.h"  // EDVRonFOOT: .22's layout snapshot (the replay of a draw of the HUD node)
 #include "ui_layer.h"
 #include "ui_layer_math.h"
 #include "vr_world_route.h"  // VrWorldInternalScope: the world route's own D3D calls step past these hooks
@@ -1793,6 +1794,7 @@ void pixelProbeAfterEye(State* s, ID3D11DeviceContext* self, uint32_t count,
 // rather than stashed because a stash read the wrong draw's numbers once
 // (hookedDraw says); every other consumer of this function is indifferent
 // to them.
+__declspec(noinline) void pureDrawReissue(ID3D11DeviceContext* self, char kind, UINT count, UINT instances, const DrawArgs& args);   // defined below; the HUD probe's replay draws through it
 DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                                UINT instances, const DrawArgs& args) {
     State* s = g_state;
@@ -1898,7 +1900,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     s->glareClamp = 0;
     // EDVRonFOOT: the on-foot HUD probe's draws (on_foot_hud_probe.h): the HUD node's own and foreign alike, so above the branch below. One
     // relaxed load while the probe is off.
-    if (onFootHudProbeWantsDraws()) onFootHudProbeNoteDraw(self, kind, count, instances, args, !foreignContext(self));
+    if (onFootHudProbeWantsDraws()) onFootHudProbeNoteDraw(self, kind, count, instances, args, !foreignContext(self), &pureDrawReissue);
     if (foreignContext(self)) {
         noteForeignDraw(self);
         // Round seventeen: recorded before the decline, every token read
@@ -5023,13 +5025,14 @@ uint32_t readDistanceIndex(Config& cfg) {
 // and the shader registry, which the probe's test rig does not link. The hashes: the shadow's for EDVR's own context (set with the
 // shader), the registry's for the shader object a foreign context reports; a shadow that holds nothing (a slot never set) falls back to
 // the getter, as the draw path's other readers do.
-void onFootHudProbeNoteDraw(ID3D11DeviceContext* ctx, char kind, unsigned count, unsigned instances, const DrawArgs& args, bool own) {
+void onFootHudProbeNoteDraw(ID3D11DeviceContext* ctx, char kind, unsigned count, unsigned instances, const DrawArgs& args, bool own, OnFootHudRealDraw real) {
     static FaultBudget drawBudget("onFootHudProbe.draw", 5);
     if (!ctx) return;
     // Not zeroed up front: most draws on most frames are not the probe's, and the class (a thread-id compare, a hash compare) says so.
     ohp::DrawShape s;
     const uint64_t ownVs = own ? bindingShaderHash(BindSlot::Vs) : 0;
-    if (!onFootHudProbeDrawClass(ownVs, &s)) return;
+    const int drawClass = onFootHudProbeDrawClass(ownVs, &s);
+    if (!drawClass) return;
     s.rt = ohp::ShapeTexture{};
     for (ohp::ShapeTexture& t : s.tex) t = ohp::ShapeTexture{};
     s.kind = static_cast<uint8_t>(kind);
@@ -5096,6 +5099,9 @@ void onFootHudProbeNoteDraw(ID3D11DeviceContext* ctx, char kind, unsigned count,
         }
     });
     onFootHudProbeNoteShape(s);
+    // .22: a draw inside the HUD node's window (class 1) may be replayed for its layout; the replay draws through `real` (the game's own
+    // draw function), never through EDVR's hooks. A fault in it is the same budget as the reading above.
+    if (drawClass == 1) guardedBudget(drawBudget, [&] { onFootHudLayoutSnapshot(ctx, s, kind, count, instances, args, own, real); });
 }
 
 bool vScreenPanelSize(uint32_t* width, uint32_t* height) {

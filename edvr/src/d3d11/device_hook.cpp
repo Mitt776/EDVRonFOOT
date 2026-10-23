@@ -45,6 +45,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "native_vr_probe.h"   // EDVRonFOOT: nativeVrProbeFrameBoundary (the frame tick: config, install, drain)
 #include "on_foot_hud.h"       // EDVRonFOOT: onFootHudFrameBoundary
 #include "on_foot_hud_probe.h" // EDVRonFOOT: onFootHudProbeFrameBoundary
+#include "on_foot_hud_layout.h" // EDVRonFOOT: .22 keeps vertex shader code for the HUD layout snapshot
 #include "on_foot_markers.h"   // EDVRonFOOT: onFootMarkersFrameBoundary
 #include "ui_surfaces.h"   // the glyph atlas and sizing chain instruments
 #include "ui_panel_scale.h" // uiPanelScaleShutdown: the panel operands put back
@@ -718,6 +719,9 @@ HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecod
         registerShaderHash(*out, hash);
         engineVelocityRememberVs(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
         weaponMotionRememberShader(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len));
+        // EDVRonFOOT .22: the code of every vertex shader, for the HUD probe's layout snapshot -- only when experimental.on_foot_hud_probe was on at the
+        // launch (read once); one relaxed load when it was not. After the weapon family above: a shader that holds its code already is not kept twice.
+        if (onFootHudProbeKeepsCode()) onFootHudLayoutRememberVs(static_cast<ID3D11VertexShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
         orbitalWidthRememberVs(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);   // fix.ui_quality: the orbit lines (orbital_width.h)
         EyeDrawSnapshot::rememberShader(hash, bytecode, static_cast<size_t>(len));
         EyeTonemapSnapshot::rememberShader(hash, bytecode, static_cast<size_t>(len));

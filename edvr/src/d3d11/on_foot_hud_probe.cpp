@@ -12,7 +12,10 @@
 #include <tlhelp32.h>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <memory>
+#include <string>
 
 namespace edvr {
 namespace {
@@ -88,6 +91,18 @@ ohp::HudPartMemory g_hudPart;
 ohp::PartReads g_partReads;
 ohp::NodeWindows g_windows;
 ohp::ShapeTable g_shapes;
+// .22: the layout snapshot. The draw threads claim a form in the table, count what they did, push results; the frame thread writes them.
+ohp::SnapTable g_snapTable;
+ohp::SnapCounters g_snapCounts;
+ohp::RefusalTable g_refusals;
+ohp::ResultQueue<ohp::SnapshotResult, 8> g_snapQueue;
+ohp::CodeBudget g_code;
+std::atomic<uint64_t> g_frame{0};
+std::wstring g_layoutDirOverride;  // the rig's folder
+std::wstring g_layoutDir;          // the frame thread's: made once
+bool g_layoutDirDone = false, g_layoutDirOk = false;
+uint32_t g_layoutNumber = 0;       // the number of the last snapshot line
+ohp::LayoutFiles g_layoutFiles;
 
 // ---- the hook side: no lock, no allocation, no log -------------------------------------------------------------------------------
 
@@ -569,6 +584,14 @@ bool anyInstalled() {
 // .21: the draw path's flag (on_foot_hud_probe.h): up while the key is on and the node draw is hooked.
 namespace detail {
 std::atomic<bool> g_onFootHudProbeWantsDraws{false};
+std::atomic<int> g_onFootHudProbeKeepsCode{-1};
+}  // namespace detail
+
+bool onFootHudProbeKeepsCodeSlow() {
+    int unread = -1;
+    const bool want = Config::get().getBool("experimental.on_foot_hud_probe", false);
+    detail::g_onFootHudProbeKeepsCode.compare_exchange_strong(unread, want ? 1 : 0, std::memory_order_relaxed);
+    return detail::g_onFootHudProbeKeepsCode.load(std::memory_order_relaxed) > 0;
 }  // namespace detail
 
 bool onFootHudProbeInstall(uintptr_t base, uintptr_t targetOverride, bool checkIdentity, OnFootHudProbeSink sink, void* ctx) {
@@ -654,6 +677,47 @@ int onFootHudProbeDrawClass(uint64_t ownVsHash, ohp::DrawShape* shape) {
 }
 
 void onFootHudProbeNoteShape(const ohp::DrawShape& shape) { g_shapes.note(shape); }
+
+// ---- .22: the layout snapshot's calls from the draw path ----
+uint64_t onFootHudProbeFrame() { return g_frame.load(std::memory_order_relaxed); }
+bool onFootHudLayoutClaim(uint64_t formKey, uint64_t nowMs, int* row, uint64_t* prior) {
+    const int r = g_snapTable.claim(formKey, nowMs, prior);
+    if (r < 0) return false;
+    *row = r;
+    return true;
+}
+void onFootHudLayoutUnclaim(int row, uint64_t prior) { g_snapTable.unclaim(row, prior); }
+bool onFootHudLayoutDecide(int row, const ohp::Layout& layout) { return g_snapTable.decide(row, layout); }
+void onFootHudLayoutSnapped(int place) { g_snapCounts.snaps[place >= 0 && place < ohp::kPlaces ? place : 0].fetch_add(1, std::memory_order_relaxed); }
+void onFootHudLayoutRefuse(int reason, const ohp::RefusalNote& note) {
+    if (reason < 0 || reason >= ohp::kRefusals) return;
+    ohp::RefusalNote n = note;
+    n.reason = static_cast<uint8_t>(reason);
+    if (n.place >= ohp::kPlaces) n.place = 0;
+    g_snapCounts.refused[n.place][reason].fetch_add(1, std::memory_order_relaxed);
+    g_refusals.note(n);
+}
+void onFootHudLayoutSubmit(ohp::SnapshotResult* result) {
+    if (!result) return;
+    if (!g_snapQueue.push(result)) {
+        const int place = result->info.place < ohp::kPlaces ? result->info.place : 0;
+        g_snapCounts.refused[place][ohp::kRefQueueFull].fetch_add(1, std::memory_order_relaxed);
+        delete result;
+    }
+}
+int onFootHudProbeCodeAdd(uint64_t bytes) {
+    const int r = g_code.add(bytes);
+    if (r == 1) {
+        char line[300];
+        ohp::formatCodeLimit(g_code.bytes(), line, sizeof(line));
+        Log::get().note("%s", line);
+    }
+    return r;
+}
+void onFootHudProbeSetLayoutDirectory(const wchar_t* directory) {
+    g_layoutDirOverride = directory ? directory : L"";
+    g_layoutDirDone = false;
+}
 
 uint64_t onFootHudProbeCalls() { return g_calls.load(std::memory_order_relaxed); }
 uint64_t onFootHudProbeFaults() { return g_faults.load(std::memory_order_relaxed); }
@@ -1045,6 +1109,117 @@ void drainGates(uint64_t nowMs, int onFoot, OnFootHudProbeSink sink, void* ctx) 
     }
 }
 
+// .22: the folder of the files: the rig's, else <logDir>\hud_layout\<the launch's local time>. Made on the first file.
+const std::wstring& layoutDirectory(bool* ok) {
+    if (!g_layoutDirDone) {
+        g_layoutDirDone = true;
+        if (!g_layoutDirOverride.empty()) {
+            g_layoutDir = g_layoutDirOverride;
+            g_layoutDirOk = ensureDirectory(g_layoutDir);
+        } else {
+            SYSTEMTIME st{};
+            FILETIME created{}, exited{}, kernel{}, user{}, local{};
+            if (GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user) && FileTimeToLocalFileTime(&created, &local) && FileTimeToSystemTime(&local, &st)) {
+            } else {
+                GetLocalTime(&st);
+            }
+            wchar_t stamp[40];
+            _snwprintf_s(stamp, _TRUNCATE, L"%04u%02u%02u_%02u%02u%02u", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+            const std::wstring root = Config::get().logDir() + L"\\hud_layout";
+            g_layoutDir = root + L"\\" + stamp;
+            g_layoutDirOk = ensureDirectory(Config::get().logDir()) && ensureDirectory(root) && ensureDirectory(g_layoutDir);
+        }
+    }
+    *ok = g_layoutDirOk;
+    return g_layoutDir;
+}
+bool writeLayoutFile(const std::wstring& dir, const char* name, const void* data, size_t bytes) {
+    const std::wstring path = dir + L"\\" + std::wstring(name, name + std::strlen(name));
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path.c_str(), L"wb") != 0 || !f) return false;
+    const size_t wrote = std::fwrite(data, 1, bytes, f);
+    std::fclose(f);
+    return wrote == bytes;
+}
+
+// .22, from drainProviders: the layout snapshots. Every frame: the first refusal of each kind (a line), the results the draw threads
+// pushed (the CSV and the BMP first, then the line that names them); every 30 s the summary: snapshots and lines by place, refusals by
+// reason, the files and the shader code, or "no snapshot".
+void drainLayout(uint64_t nowMs, OnFootHudProbeSink sink, void* ctx) {
+    static ohp::LayoutSummary summary;
+    char line[3000];
+    ohp::RefusalNote note;
+    while (g_refusals.next(&note)) say(sink, ctx, ohp::formatRefusalLine(note, line, sizeof(line)), line);
+    while (ohp::SnapshotResult* raw = g_snapQueue.pop()) {
+        std::unique_ptr<ohp::SnapshotResult> r(raw);
+        const uint32_t number = ++g_layoutNumber;
+        const int place = r->info.place < ohp::kPlaces ? r->info.place : 0;
+        g_snapCounts.lines[place].fetch_add(1, std::memory_order_relaxed);
+        bool dirOk = false;
+        const std::wstring& dir = layoutDirectory(&dirOk);
+        char files[400];
+        int fl = 0;
+        files[0] = 0;
+        char name[160];
+        // The CSV: every vertex.
+        ohp::layoutFileName(number, r->info.list, r->info.vs, r->info.panel.width, r->info.panel.height, "csv", name, sizeof(name));
+        if (g_layoutFiles.csvWritten >= static_cast<uint64_t>(ohp::kLayoutFiles)) {
+            ++g_layoutFiles.csvOver;
+            fl = ohp::layoutAppend(files, sizeof(files), fl, "csv over the limit of %d", ohp::kLayoutFiles);
+        } else {
+            std::string csv;
+            char row[200];
+            ohp::formatCsvHeader(row, sizeof(row));
+            csv += row;
+            csv += "\n";
+            const uint32_t fpv = r->floatsPerVertex ? r->floatsPerVertex : 4;
+            for (uint32_t i = 0; i < r->layout.vertices && static_cast<size_t>(i + 1) * fpv <= r->vertices.size(); ++i) {
+                ohp::formatCsvRow(i, r->vertices.data() + static_cast<size_t>(i) * fpv, fpv, row, sizeof(row));
+                csv += row;
+                csv += "\n";
+            }
+            if (dirOk && writeLayoutFile(dir, name, csv.data(), csv.size())) {
+                ++g_layoutFiles.csvWritten;
+                fl = ohp::layoutAppend(files, sizeof(files), fl, "%s", name);
+            } else {
+                ++g_layoutFiles.csvFailed;
+                fl = ohp::layoutAppend(files, sizeof(files), fl, "csv failed");
+            }
+        }
+        // The BMP: the panel image, when it was read.
+        if (r->panelState == ohp::kPanelRead && r->pixels.size() == static_cast<size_t>(r->panelW) * r->panelH * 4 && r->panelW && r->panelH) {
+            ohp::layoutFileName(number, r->info.list, r->info.vs, r->info.panel.width, r->info.panel.height, "bmp", name, sizeof(name));
+            if (g_layoutFiles.bmpWritten >= static_cast<uint64_t>(ohp::kLayoutFiles)) {
+                ++g_layoutFiles.bmpOver;
+                fl = ohp::layoutAppend(files, sizeof(files), fl, "%sbmp over the limit of %d", fl ? ", " : "", ohp::kLayoutFiles);
+            } else {
+                std::vector<uint8_t> bmp;
+                ohp::makeBmp32(r->pixels.data(), r->panelW, r->panelH, r->panelBgra != 0, &bmp);
+                if (dirOk && writeLayoutFile(dir, name, bmp.data(), bmp.size())) {
+                    ++g_layoutFiles.bmpWritten;
+                    fl = ohp::layoutAppend(files, sizeof(files), fl, "%s%s", fl ? ", " : "", name);
+                } else {
+                    ++g_layoutFiles.bmpFailed;
+                    fl = ohp::layoutAppend(files, sizeof(files), fl, "%sbmp failed", fl ? ", " : "");
+                }
+            }
+        } else {
+            ++g_layoutFiles.bmpNone;
+        }
+        say(sink, ctx, ohp::formatLayoutLine(*r, number, files, line, sizeof(line)), line);
+    }
+    uint64_t seconds = 0;
+    ohp::LayoutWindow win;
+    if (summary.step(nowMs, g_snapCounts, g_snapTable, &seconds, &win)) {
+        say(sink, ctx, ohp::formatLayoutSummaryHead(seconds, win, g_code.bytes(), line, sizeof(line)), line);
+        if (!win.total() && !win.totalRefused()) return;  // "no snapshot" is one line
+        for (int p = 0; p < ohp::kPlaces; ++p)
+            if (win.snaps[p] || win.totalRefused(p)) say(sink, ctx, ohp::formatLayoutSummaryPlace(p, win, line, sizeof(line)), line);
+        say(sink, ctx, ohp::formatLayoutSummaryRefusals(win, line, sizeof(line)), line);
+        say(sink, ctx, ohp::formatLayoutSummaryFiles(g_layoutFiles, g_code.bytes(), g_code.shaders(), line, sizeof(line)), line);
+    }
+}
+
 // .21, from drainProviders: the draws of the HUD node. Every frame: the census of each (view bit, place) whose picture of shapes changed
 // (up to 16 shapes by list, each view at most every 5 s), and, every 30 s, the windows and draws by place, list and context, and the
 // draws outside the node.
@@ -1171,6 +1346,7 @@ void drainProviders(uint64_t nowMs, int onFoot, int stereo, OnFootHudProbeSink s
     }
     drainGates(nowMs, onFoot, sink, ctx);
     drainShapes(nowMs, sink, ctx);
+    drainLayout(nowMs, sink, ctx);
 }
 
 }  // namespace
@@ -1213,6 +1389,7 @@ void onFootHudProbeDrain(uint64_t nowMs, int onFoot, OnFootHudProbeSink sink, vo
 }
 
 void onFootHudProbeCameraDrain(uint64_t nowMs, int onFoot, int stereo, const float* head12, OnFootHudProbeSink sink, void* ctx) {
+    g_frame.fetch_add(1, std::memory_order_relaxed);
     // Per cell: the pass seen there, its calls and when it was last called, and the sample its next yaw step starts from.
     struct Track {
         uint64_t pass = 0, calls = 0, calledMs = 0, sampleMs = 0;

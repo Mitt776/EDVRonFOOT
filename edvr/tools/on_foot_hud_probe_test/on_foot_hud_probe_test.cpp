@@ -47,6 +47,16 @@
 // hooked, the three registers forwarded), opens the HUD node's window in the node draw, keeps the draws made in it by shape and list
 // (a draw from another thread, after the window and in another node is not kept), those outside it with the HUD meshes' vertex shaders,
 // writes the census when it changes (not before 5 s) and the 30-second line (also: the node drawn and nothing in it, the node not drawn).
+// .22: Part A22 drives the layout snapshot's core: the output signature of a fake DXBC (OSGN and OSG5; position and the first TEXCOORD of two
+// or more components, a one-component TEXCOORD passed over, none: position only; no whole position, garbage and a cut container refused),
+// the layout of vertices (a flat rectangle: frame, visible part of the panel, 3x3 grid, bend 0; a strip bowed by 0.02: bend about 0.02; four
+// vertices: corners only; w <= 0 dropped and counted; positions only), the 5-second table (the first at once, 2 s no, 6 s yes, 256 forms and
+// the 257th counted, a shift of 0.02 a line and 0.005 not), the text (CSV rows, file names, the snapshot, refusal and summary lines, "no
+// snapshot"), the replay's order on a stand-in context (the state after is the state before; a geometry shader standing and a foreign context
+// refuse without touching it), the read (still drawing waits, 30 frames is a timeout, the ring of four, the queue of eight), the panel image
+// (formats, the 32-bit BMP) and the budget of shader code; Part B22 drives the real glue: a result gives one line and a CSV and a BMP in a
+// temporary folder, 48 files of each kind and the 49th counted, the first refusal of each kind a line, the queue's 9th result counted, the
+// 30-second summary by place and reason, and a quiet window in one line.
 #include "../../src/d3d11/on_foot_hud_probe.h"
 #include "../../src/d3d11/on_foot_hud_probe_core.h"
 #include "../../src/d3d11/debug_register_core.h"
@@ -3248,6 +3258,569 @@ void partC() {
     }
     onFootHudProbeSetPlace(ohp::kPlaceShip);  // as the process began: Part B's draws are read in the ship
 }
+// ---- .22: the layout snapshot -------------------------------------------------------------------------------------------------------
+
+struct SigElem {
+    const char* name;
+    uint32_t index, sys, reg, mask;
+    uint32_t stream;
+};
+void w32(std::vector<uint8_t>& v, size_t at, uint32_t x) { std::memcpy(v.data() + at, &x, 4); }
+// A DXBC container with one signature chunk (OSGN: 24 bytes an element; OSG5: 28, the stream first).
+std::vector<uint8_t> fakeDxbc(const char* tag, const std::vector<SigElem>& el) {
+    const bool stream = std::strcmp(tag, "OSGN") != 0;
+    const size_t esz = stream ? 28 : 24;
+    std::vector<uint8_t> chunk(8 + el.size() * esz, 0);
+    w32(chunk, 0, static_cast<uint32_t>(el.size()));
+    w32(chunk, 4, 8);
+    for (size_t i = 0; i < el.size(); ++i) {
+        const uint32_t nameAt = static_cast<uint32_t>(chunk.size());
+        for (const char* c = el[i].name; *c; ++c) chunk.push_back(static_cast<uint8_t>(*c));
+        chunk.push_back(0);
+        while (chunk.size() & 3) chunk.push_back(0xab);
+        size_t at = 8 + i * esz;
+        if (stream) {
+            w32(chunk, at, el[i].stream);
+            at += 4;
+        }
+        w32(chunk, at, nameAt);
+        w32(chunk, at + 4, el[i].index);
+        w32(chunk, at + 8, el[i].sys);
+        w32(chunk, at + 12, 3);
+        w32(chunk, at + 16, el[i].reg);
+        w32(chunk, at + 20, el[i].mask | 0xF00u);
+    }
+    std::vector<uint8_t> d(36, 0);
+    std::memcpy(d.data(), "DXBC", 4);
+    w32(d, 28, 1);
+    w32(d, 32, 36);
+    d.resize(36 + 8);
+    std::memcpy(d.data() + 36, tag, 4);
+    w32(d, 40, static_cast<uint32_t>(chunk.size()));
+    d.insert(d.end(), chunk.begin(), chunk.end());
+    w32(d, 24, static_cast<uint32_t>(d.size()));
+    return d;
+}
+
+// Vertices as the vertex shader gives them: clip x, y, z, w [, u, v]. A grid of nx x ny over the screen rectangle (fractions, top 0), w = 2;
+// `bulge` pushes the middle of every row down by that much in a parabola (a curved strip).
+std::vector<float> makeGrid(int nx, int ny, float x0, float y0, float x1, float y1, bool uv = true, float bulge = 0.f, float w = 2.f) {
+    std::vector<float> v;
+    for (int j = 0; j < ny; ++j)
+        for (int i = 0; i < nx; ++i) {
+            const float u = nx > 1 ? static_cast<float>(i) / static_cast<float>(nx - 1) : 0.f, t = ny > 1 ? static_cast<float>(j) / static_cast<float>(ny - 1) : 0.f;
+            const float fx = x0 + u * (x1 - x0), fy = y0 + t * (y1 - y0) + bulge * (1.f - (2.f * u - 1.f) * (2.f * u - 1.f));
+            v.push_back((2.f * fx - 1.f) * w);
+            v.push_back((1.f - 2.f * fy) * w);
+            v.push_back(0.5f);
+            v.push_back(w);
+            if (uv) {
+                v.push_back(u);
+                v.push_back(t);
+            }
+        }
+    return v;
+}
+ohp::Layout layoutOf(const std::vector<float>& v, uint32_t perVertex) {
+    ohp::Layout L;
+    ohp::summarizeLayout(v.data(), static_cast<uint32_t>(v.size() / perVertex), perVertex, &L);
+    return L;
+}
+bool nearF(float a, float b, float eps = 1e-4f) { return std::fabs(a - b) <= eps; }
+
+// A stand-in for the context: the state a replay touches, and a log of what was done.
+struct FakeCtx {
+    int gs = 0;
+    int so[4] = {0, 0, 0, 0};
+    int topology = 4;
+    std::string log;
+    bool boundAtDraw = false;
+};
+struct FakeOps {
+    FakeCtx& c;
+    bool foreign = false;
+    FakeCtx before;
+    int check() {
+        c.log += "check ";
+        if (foreign) return ohp::kRefForeign;
+        if (c.gs) return ohp::kRefGsOrTess;
+        return -1;
+    }
+    void save() {
+        c.log += "save ";
+        before = c;
+    }
+    void bind() {
+        c.log += "bind ";
+        c.gs = 99;
+        c.so[0] = 77;
+        c.topology = 1;
+    }
+    void draw() {
+        c.log += "draw ";
+        c.boundAtDraw = c.gs == 99 && c.so[0] == 77 && c.topology == 1;
+    }
+    void restore() {
+        c.log += "restore ";
+        c.gs = before.gs;
+        for (int i = 0; i < 4; ++i) c.so[i] = before.so[i];
+        c.topology = before.topology;
+    }
+    void copyOut() { c.log += "copy"; }
+};
+
+void partA22() {
+    // 1. The signature: SV_Position and the first TEXCOORD with two or more components.
+    {
+        const auto d = fakeDxbc("OSGN", {{"SV_Position", 0, 1, 0, 0xF, 0}, {"TEXCOORD", 0, 0, 1, 0x3, 0}});
+        const ohp::SoDecl s = ohp::parseSoDecl(d.data(), d.size());
+        check(s.ok && s.hasUv && s.entries == 2 && s.stride == 24 && std::strcmp(s.e[0].name, "SV_Position") == 0 && s.e[0].start == 0 && s.e[0].count == 4 &&
+                  std::strcmp(s.e[1].name, "TEXCOORD") == 0 && s.e[1].semanticIndex == 0 && s.e[1].start == 0 && s.e[1].count == 2,
+              "layout: SV_POSITION and TEXCOORD0 give the declaration: position (4), texture coordinate (2), 24 bytes");
+        const auto none = fakeDxbc("OSGN", {{"SV_Position", 0, 1, 0, 0xF, 0}, {"COLOR", 0, 0, 1, 0xF, 0}});
+        const ohp::SoDecl p = ohp::parseSoDecl(none.data(), none.size());
+        check(p.ok && !p.hasUv && p.entries == 1 && p.stride == 16, "layout: no TEXCOORD: the position only, 16 bytes");
+        const auto skip = fakeDxbc("OSGN", {{"SV_Position", 0, 1, 0, 0xF, 0}, {"TEXCOORD", 0, 0, 1, 0x1, 0}, {"TEXCOORD", 1, 0, 2, 0xC, 0}});
+        const ohp::SoDecl k = ohp::parseSoDecl(skip.data(), skip.size());
+        check(k.ok && k.hasUv && k.e[1].semanticIndex == 1 && k.e[1].start == 2 && k.e[1].count == 2,
+              "layout: a TEXCOORD of one component is passed over; the first of two or more is taken from its first component (z,w: start 2)");
+        const auto o5 = fakeDxbc("OSG5", {{"TEXCOORD", 0, 0, 1, 0x3, 1}, {"SV_Position", 0, 1, 0, 0xF, 0}, {"TEXCOORD", 2, 0, 3, 0x3, 0}});
+        const ohp::SoDecl s5 = ohp::parseSoDecl(o5.data(), o5.size());
+        check(s5.ok && s5.hasUv && s5.e[1].semanticIndex == 2 && s5.stride == 24, "layout: OSG5 (28 bytes an element): the elements of stream 1 are not taken");
+        const auto part = fakeDxbc("OSGN", {{"SV_Position", 0, 1, 0, 0x7, 0}, {"TEXCOORD", 0, 0, 1, 0x3, 0}});
+        check(!ohp::parseSoDecl(part.data(), part.size()).ok, "layout: a position of fewer than 4 components: no declaration");
+        const auto nopos = fakeDxbc("OSGN", {{"TEXCOORD", 0, 0, 1, 0x3, 0}});
+        check(!ohp::parseSoDecl(nopos.data(), nopos.size()).ok, "layout: no SV_POSITION: no declaration");
+        const uint8_t junk[40] = {'N', 'O', 'P', 'E'};
+        auto cut = d;
+        cut.resize(cut.size() - 20);
+        check(!ohp::parseSoDecl(junk, sizeof(junk)).ok && !ohp::parseSoDecl(cut.data(), cut.size()).ok && !ohp::parseSoDecl(nullptr, 0).ok,
+              "layout: garbage, a cut container and nothing give no declaration");
+    }
+    // 2. The layout of a flat rectangle, a bent strip, a quad, and vertices behind the screen.
+    {
+        const auto flat = makeGrid(5, 5, 0.2f, 0.1f, 0.8f, 0.4f);
+        const ohp::Layout L = layoutOf(flat, 6);
+        check(L.valid && L.hasUv && L.vertices == 25 && L.used == 25 && L.dropped == 0 && nearF(L.minX, 0.2f) && nearF(L.maxX, 0.8f) && nearF(L.minY, 0.1f) &&
+                  nearF(L.maxY, 0.4f) && nearF(L.minU, 0.f) && nearF(L.maxU, 1.f) && nearF(L.minV, 0.f) && nearF(L.maxV, 1.f),
+              "layout: a flat rectangle: the frame on the screen and the visible part of the panel");
+        check(nearF(L.g[0].x, 0.2f) && nearF(L.g[0].y, 0.1f) && nearF(L.g[4].x, 0.5f) && nearF(L.g[4].y, 0.25f) && nearF(L.g[8].x, 0.8f) && nearF(L.g[8].y, 0.4f) &&
+                  nearF(L.g[2].x, 0.8f) && nearF(L.g[2].y, 0.1f) && nearF(L.g[6].x, 0.2f) && nearF(L.g[6].y, 0.4f),
+              "layout: the 3x3 grid: corners and the middle on the screen (v rows top first, u columns left first)");
+        check(L.bendKnown && L.measured == 5 && L.bend < 1e-4f, "layout: a flat rectangle does not bend (bend 0, all five points measured)");
+        const auto strip = makeGrid(17, 2, 0.1f, 0.05f, 0.9f, 0.15f, true, 0.02f);
+        const ohp::Layout S = layoutOf(strip, 6);
+        check(S.bendKnown && S.measured == 2 && S.bend > 0.019f && S.bend < 0.021f, "layout: a strip bowed by 0.02 (the top bar of the HUD): bend about 0.02, from the two edge middles");
+        const auto quad = makeGrid(2, 2, 0.3f, 0.3f, 0.7f, 0.7f);
+        const ohp::Layout Q = layoutOf(quad, 6);
+        check(Q.bendKnown && Q.measured == 0 && Q.bend == 0.f && !Q.g[1].hit && Q.g[0].hit, "layout: four vertices: the corners are measured, the middles are not (bend 0 from no point)");
+        auto behind = makeGrid(3, 3, 0.2f, 0.2f, 0.8f, 0.8f);
+        behind[3] = -1.f;       // vertex 0: w < 0
+        behind[6 * 4 + 3] = 0.f;  // vertex 4: w == 0
+        const ohp::Layout B = layoutOf(behind, 6);
+        check(B.vertices == 9 && B.used == 7 && B.dropped == 2, "layout: vertices with w <= 0 are dropped and counted");
+        std::vector<float> allBehind = makeGrid(2, 2, 0.2f, 0.2f, 0.8f, 0.8f, true, 0.f, -1.f);
+        const ohp::Layout A = layoutOf(allBehind, 6);
+        check(!A.valid && A.dropped == 4, "layout: every vertex behind the screen: no layout");
+        const auto flatNoUv = makeGrid(3, 3, 0.2f, 0.2f, 0.8f, 0.8f, false);
+        const ohp::Layout N = layoutOf(flatNoUv, 4);
+        check(N.valid && !N.hasUv && nearF(N.minX, 0.2f) && !N.bendKnown, "layout: positions only: the frame, no grid, no bend");
+        // Moved: the frame or a grid point beyond 0.01 of the screen.
+        auto moved = makeGrid(5, 5, 0.22f, 0.1f, 0.82f, 0.4f);
+        auto nudged = makeGrid(5, 5, 0.205f, 0.1f, 0.805f, 0.4f);
+        check(ohp::layoutMoved(L, layoutOf(moved, 6)) && !ohp::layoutMoved(L, layoutOf(nudged, 6)) && !ohp::layoutMoved(L, L) && ohp::layoutMoved(L, N),
+              "layout: a shift of 0.02 is a move, 0.005 is not, another sort of layout is");
+    }
+    // 3. How often: the first at once, 2 s later no, 6 s later yes; the same layout without a line, a shift of 0.02 with one.
+    {
+        ohp::SnapTable t;
+        uint64_t prior = 0;
+        const int row = t.claim(0x1234, 1000, &prior);
+        check(row >= 0 && prior == 0, "layout: the first snapshot of a form is due at once");
+        check(t.claim(0x1234, 3000, &prior) == ohp::SnapTable::kNotDue, "layout: the second, 2 s later, is not due");
+        const int again = t.claim(0x1234, 7000, &prior);
+        check(again == row && prior == 1001, "layout: 6 s after the first it is due, on the same row");
+        t.unclaim(row, prior);
+        check(t.claim(0x1234, 7500, &prior) >= 0, "layout: a claim given back (the ring was busy) leaves the form due");
+        check(t.claim(0x9999, 7500, &prior) >= 0 && t.kept() == 2, "layout: another form is its own row");
+        const ohp::Layout a = layoutOf(makeGrid(5, 5, 0.2f, 0.1f, 0.8f, 0.4f), 6), b = layoutOf(makeGrid(5, 5, 0.22f, 0.1f, 0.82f, 0.4f), 6),
+                          c = layoutOf(makeGrid(5, 5, 0.225f, 0.1f, 0.825f, 0.4f), 6);
+        check(t.decide(row, a) && !t.decide(row, a) && t.decide(row, b) && !t.decide(row, c),
+              "layout: the first layout is a line, the same is not, 0.02 away is, 0.005 from that one is not");
+        ohp::SnapTable full;
+        int ok = 0;
+        for (uint64_t k = 1; k <= 256; ++k) ok += full.claim(k * 7919u, 0, &prior) >= 0 ? 1 : 0;
+        check(ok == 256 && full.kept() == 256 && full.full() == 0 && full.claim(0xDEADBEEFull, 0, &prior) == ohp::SnapTable::kFull && full.full() == 1,
+              "layout: 256 forms fit; the 257th is counted");
+    }
+    // 4. The text: CSV rows, the names of the files, the lines.
+    {
+        char row[200];
+        const float p[6] = {0.f, 0.f, 0.5f, 2.f, 0.25f, 0.75f};
+        ohp::formatCsvRow(0, p, 6, row, sizeof(row));
+        check(std::strcmp(row, "0,0.50000,0.50000,2,0.25000,0.75000") == 0, "layout: a CSV row: i, x, y, w, u, v");
+        const float behind[6] = {0.f, 0.f, 0.5f, -1.f, 0.1f, 0.2f};
+        ohp::formatCsvRow(3, behind, 6, row, sizeof(row));
+        check(std::strcmp(row, "3,,,-1,0.10000,0.20000") == 0, "layout: a vertex with w <= 0: x and y empty");
+        ohp::formatCsvRow(1, p, 4, row, sizeof(row));
+        check(std::strcmp(row, "1,0.50000,0.50000,2,,") == 0, "layout: no texture coordinate: u and v empty");
+        ohp::formatCsvHeader(row, sizeof(row));
+        check(std::strcmp(row, "i,x,y,w,u,v") == 0, "layout: the CSV header");
+        char name[120];
+        ohp::layoutFileName(3, 3, 0xB10B032BDFD46700ull, 3564, 2140, "csv", name, sizeof(name));
+        check(std::strcmp(name, "s3_list39_B10B032B_3564x2140.csv") == 0, "layout: the file name: snapshot number, list, vertex shader, panel size");
+        ohp::layoutFileName(12, 2, 0xC4B4B334B26E81A9ull, 1521, 1402, "bmp", name, sizeof(name));
+        check(std::strcmp(name, "s12_list38_C4B4B334_1521x1402.bmp") == 0, "layout: the file name of list 38's highlight");
+        check(ohp::panelSlotOf(0xC4B4B334B26E81A9ull) == 2 && ohp::panelSlotOf(0xB10B032BDFD46700ull) == 0, "layout: the panel is t2 for vertex shader C4B4B334, t0 for the others");
+        ohp::SnapshotResult r;
+        r.info.list = 3;
+        r.info.kind = 'I';
+        r.info.own = 1;
+        r.info.place = ohp::kPlaceCinema;
+        r.info.viewBit = 0;
+        r.info.count = 3600;
+        r.info.instances = 1;
+        r.info.vs = 0xB10B032BDFD46700ull;
+        r.info.ps = 0x1234567800000000ull;
+        r.info.panel = {0x5000, 3564, 2140, 28, 1, 0};
+        r.info.panelSlot = 0;
+        r.info.target = {0x1000, 3408, 1917, 28, 1, 1};
+        r.layout = layoutOf(makeGrid(17, 2, 0.1f, 0.05f, 0.9f, 0.15f, true, 0.02f), 6);
+        r.panelState = ohp::kPanelRead;
+        char line[3000];
+        ohp::formatLayoutLine(r, 7, "s7_list39_B10B032B_3564x2140.csv, s7_list39_B10B032B_3564x2140.bmp", line, sizeof(line));
+        const std::string L = line;
+        check(L.find("layout snapshot #7: list 39 (_HUD), view bit 0, on foot in cinema, own context, DrawIndexed with count 3600 x 1 instance(s), vs B10B032B ps 12345678") !=
+                      std::string::npos &&
+                  L.find("panel t0 0x5000 3564x2140 aspect 1.665 fmt 28 (image read), target 3408x1917") != std::string::npos &&
+                  L.find("34 vertices, 0 dropped (w <= 0); screen frame x 0.100..0.900 y 0.050..0.170; panel visible u 0.000..1.000 v 0.000..1.000; grid 3x3") != std::string::npos &&
+                  L.find("bend 0.02") != std::string::npos && L.find("(2 of 5 points measured)") != std::string::npos &&
+                  L.find("; files: s7_list39_B10B032B_3564x2140.csv, s7_list39_B10B032B_3564x2140.bmp") != std::string::npos,
+              "layout: the line of a snapshot: list, view, place, context, draw, shaders, panel with aspect and format, target, frame, visible part, grid, bend, files");
+        std::printf("  line: %s\n", line);
+        r.layout = layoutOf(makeGrid(3, 3, 0.2f, 0.2f, 0.8f, 0.8f, false), 4);
+        r.info.panel = ohp::ShapeTexture{};
+        r.panelState = ohp::kPanelNone;
+        ohp::formatLayoutLine(r, 8, "", line, sizeof(line));
+        check(std::string(line).find("panel t0: none bound") != std::string::npos && std::string(line).find("no texture coordinate (positions only: no panel frame, grid or bend)") != std::string::npos &&
+                  std::string(line).find("files:") == std::string::npos,
+              "layout: no texture coordinate: the line says so and has no grid; no panel bound is said");
+        r.info.panel = {0x6000, 2412, 1449, 2, 1, 0};
+        r.panelState = ohp::kPanelFormat;
+        ohp::formatLayoutLine(r, 9, "", line, sizeof(line));
+        check(std::string(line).find("aspect 1.665 fmt 2 (no image: not 8-bit RGBA)") != std::string::npos, "layout: a panel of another format: the line says there is no image; 2412x1449 has the aspect of 3564x2140");
+        ohp::RefusalNote n{};
+        n.reason = ohp::kRefGsOrTess;
+        n.list = 3;
+        n.place = ohp::kPlaceStereo;
+        n.kind = 'I';
+        n.count = 6;
+        n.instances = 1;
+        n.vs = 0xB10B032BDFD46700ull;
+        n.ps = 0xAAAAAAAA00000000ull;
+        ohp::formatRefusalLine(n, line, sizeof(line));
+        check(std::string(line).find("layout snapshot refused (the first of its kind") != std::string::npos && std::string(line).find("a geometry shader or tessellation") != std::string::npos &&
+                  std::string(line).find("list 39 (_HUD), on foot in stereo, DrawIndexed with count 6 x 1 instance(s), vs B10B032B ps AAAAAAAA") != std::string::npos,
+              "layout: the line of a refusal");
+        bool distinct = true;
+        for (int a = 0; a < ohp::kRefusals; ++a) {
+            if (!ohp::refusalText(a)[0] || !ohp::refusalShort(a)[0]) distinct = false;
+            for (int b = a + 1; b < ohp::kRefusals; ++b)
+                if (std::strcmp(ohp::refusalText(a), ohp::refusalText(b)) == 0 || std::strcmp(ohp::refusalShort(a), ohp::refusalShort(b)) == 0) distinct = false;
+        }
+        check(distinct && std::string(ohp::refusalText(ohp::kRefTimeout)).find("readback timeout") == 0 && std::string(ohp::refusalText(ohp::kRefForeign)).find("foreign context") == 0,
+              "layout: every refusal has its own text, and 'readback timeout' and 'foreign context' are named");
+    }
+    // 5. The replay's order on a stand-in: the state after is the state before; refused without touching it.
+    {
+        FakeCtx c;
+        c.gs = 0;
+        c.so[1] = 5;
+        c.topology = 4;
+        FakeOps ops{c};
+        const FakeCtx before = c;
+        const int r = ohp::replaySequence(ops);
+        check(r == -1 && c.log == "check save bind draw restore copy" && c.boundAtDraw && c.gs == before.gs && c.so[0] == before.so[0] && c.so[1] == before.so[1] &&
+                  c.so[2] == before.so[2] && c.so[3] == before.so[3] && c.topology == before.topology,
+              "replay: check, save, bind, draw, restore, copy; own geometry shader, targets and point list at the draw; the state after is the state before");
+        FakeCtx g;
+        g.gs = 42;
+        FakeOps refused{g};
+        check(ohp::replaySequence(refused) == ohp::kRefGsOrTess && g.log == "check " && g.gs == 42 && g.topology == 4, "replay: a geometry shader standing: refused, nothing touched");
+        FakeCtx f;
+        FakeOps foreign{f};
+        foreign.foreign = true;
+        check(ohp::replaySequence(foreign) == ohp::kRefForeign && f.log == "check ", "replay: a foreign context: refused, nothing touched");
+    }
+    // 6. The read: still drawing -> later; 30 frames -> timeout; the ring of four.
+    {
+        check(ohp::pollVerdict(ohp::kMapBusy, 100, 110) == ohp::kPollWait && ohp::pollVerdict(ohp::kMapBusy, 100, 129) == ohp::kPollWait &&
+                  ohp::pollVerdict(ohp::kMapBusy, 100, 130) == ohp::kPollTimeout && ohp::pollVerdict(ohp::kMapOk, 100, 140) == ohp::kPollReady &&
+                  ohp::pollVerdict(ohp::kMapFailed, 100, 101) == ohp::kPollFailed,
+              "read: still drawing waits; 30 frames without an answer is a timeout; an answer after that is still taken; a failed Map is a failure");
+        ohp::SlotRing ring;
+        int got[5];
+        for (int i = 0; i < 5; ++i) got[i] = ring.acquire();
+        check(got[0] == 0 && got[1] == 1 && got[2] == 2 && got[3] == 3 && got[4] == -1 && ring.busy() == 4, "read: the ring of four: the fifth finds none free");
+        ring.set(2, ohp::SlotRing::kVertices, 55);
+        check(ring.state(2) == ohp::SlotRing::kVertices && ring.frame(2) == 55, "read: a slot waits with the frame it was issued in");
+        ring.release(2);
+        check(ring.acquire() == 2 && ring.busy() == 4, "read: a released slot is taken again");
+        ohp::ResultQueue<int, 8> q;
+        int items[9];
+        int pushed = 0;
+        for (int i = 0; i < 9; ++i) pushed += q.push(&items[i]) ? 1 : 0;
+        int popped = 0;
+        while (q.pop()) ++popped;
+        check(pushed == 8 && popped == 8 && q.pop() == nullptr, "read: the queue to the frame thread holds 8, the 9th is refused");
+    }
+    // 7. The panel image and the BMP.
+    {
+        check(ohp::rgba8Order(27) == 1 && ohp::rgba8Order(28) == 1 && ohp::rgba8Order(29) == 1 && ohp::rgba8Order(87) == 2 && ohp::rgba8Order(88) == 2 &&
+                  ohp::rgba8Order(90) == 2 && ohp::rgba8Order(91) == 2 && ohp::rgba8Order(2) == 0 && ohp::rgba8Order(10) == 0 && ohp::rgba8Order(0) == 0,
+              "bmp: 8-bit RGBA formats 27/28/29 and BGRA 87/88/90/91 are copied, others (float, 10-bit) are not");
+        const uint8_t px[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};  // 2x2, row 0 on top
+        std::vector<uint8_t> bmp, bmp2;
+        ohp::makeBmp32(px, 2, 2, false, &bmp);
+        ohp::makeBmp32(px, 2, 2, true, &bmp2);
+        uint32_t size = 0, off = 0, w = 0, h = 0;
+        uint16_t bits = 0;
+        std::memcpy(&size, bmp.data() + 2, 4);
+        std::memcpy(&off, bmp.data() + 10, 4);
+        std::memcpy(&w, bmp.data() + 18, 4);
+        std::memcpy(&h, bmp.data() + 22, 4);
+        std::memcpy(&bits, bmp.data() + 28, 2);
+        check(bmp.size() == 54 + 16 && bmp[0] == 'B' && bmp[1] == 'M' && size == 70 && off == 54 && w == 2 && h == 2 && bits == 32,
+              "bmp: a 32-bit BMP: header, size, offset, width, height");
+        check(bmp[54] == 11 && bmp[55] == 10 && bmp[56] == 9 && bmp[57] == 12 && bmp[70 - 4] == 7 && bmp[70 - 2] == 5,
+              "bmp: the bottom row first; R,G,B,A is written as B,G,R,A, the values as they are");
+        check(bmp2[54] == 9 && bmp2[55] == 10 && bmp2[56] == 11, "bmp: a B,G,R,A texture is written as it is");
+    }
+    // 8. The 30-second text, and the budget of shader code.
+    {
+        ohp::SnapCounters c;
+        ohp::SnapTable t;
+        ohp::LayoutSummary s;
+        uint64_t seconds = 0;
+        ohp::LayoutWindow w;
+        check(s.step(1000, c, t, &seconds, &w) == 0 && s.step(30999, c, t, &seconds, &w) == 0 && s.step(31000, c, t, &seconds, &w) == 1 && seconds == 30,
+              "summary: due 30 s after the first call");
+        char line[600];
+        ohp::formatLayoutSummaryHead(seconds, w, 0, line, sizeof(line));
+        check(std::string(line).find("30 s layout snapshots: no snapshot, and no refusal") != std::string::npos, "summary: nothing asked for a snapshot: 'no snapshot', and it says no refusal either");
+        c.refused[ohp::kPlaceCinema][ohp::kRefForeign].fetch_add(3);
+        c.refused[ohp::kPlaceCinema][ohp::kRefGsOrTess].fetch_add(1);
+        s.step(61000, c, t, &seconds, &w);
+        ohp::formatLayoutSummaryHead(seconds, w, 0, line, sizeof(line));
+        const std::string head = line;
+        ohp::formatLayoutSummaryRefusals(w, line, sizeof(line));
+        const std::string reasons = line;
+        check(head.find("30 s layout snapshots: no snapshot; 4 refused (by reason below)") != std::string::npos &&
+                  reasons.find("refused by reason: foreign context 3, geometry shader or tessellation 1") != std::string::npos,
+              "summary: every attempt refused: 'no snapshot', the refusals by reason");
+        c.snaps[ohp::kPlaceCinema].fetch_add(5);
+        c.lines[ohp::kPlaceCinema].fetch_add(2);
+        c.snaps[ohp::kPlaceStereo].fetch_add(1);
+        s.step(91000, c, t, &seconds, &w);
+        ohp::formatLayoutSummaryHead(seconds, w, 0, line, sizeof(line));
+        const std::string head2 = line;
+        ohp::formatLayoutSummaryPlace(ohp::kPlaceCinema, w, line, sizeof(line));
+        check(head2.find("30 s layout snapshots: 6 snapshot(s), 2 of them with a line; 0 refused") != std::string::npos &&
+                  std::string(line).find("on foot in cinema: 5 snapshot(s), 2 with a line, 0 refused") != std::string::npos,
+              "summary: snapshots and lines, by place");
+        ohp::LayoutFiles f;
+        f.csvWritten = 48;
+        f.csvOver = 2;
+        f.bmpWritten = 40;
+        f.bmpNone = 3;
+        ohp::formatLayoutSummaryFiles(f, 1234, 7, line, sizeof(line));
+        check(std::string(line).find("csv written 48, over the limit of 48 2, failed 0; bmp written 40, over the limit 0, failed 0, no image 3; vertex shader code kept: 7 shader(s), 1234 bytes of 67108864") !=
+                  std::string::npos,
+              "summary: the files written and skipped, the shader code kept");
+        ohp::CodeBudget code;
+        const uint64_t mb = 1024 * 1024;
+        check(code.add(60 * mb) == 0 && code.add(5 * mb) == 1 && code.bytes() == 60 * mb && code.add(1) == 2 && code.add(2 * mb) == 2 && code.shaders() == 1,
+              "code: 60 MB kept; the shader that crosses 64 MB is refused with the first (the line), later ones with 2; the bytes stay at 60 MB");
+        ohp::formatCodeLimit(code.bytes(), line, sizeof(line));
+        check(std::string(line).find("reached the limit of 67108864 bytes (62914560 kept)") != std::string::npos, "code: the line that says the limit was reached");
+    }
+}
+
+// ---- Part B22: the glue -- the queue, the files, the lines, the summary -------------------------------------------------------------------
+
+std::wstring tempFolder() {
+    wchar_t base[MAX_PATH];
+    GetTempPathW(MAX_PATH, base);
+    wchar_t dir[MAX_PATH];
+    _snwprintf_s(dir, _TRUNCATE, L"%sedvr_hud_layout_test_%lu", base, static_cast<unsigned long>(GetCurrentProcessId()));
+    return dir;
+}
+bool fileExists(const std::wstring& dir, const char* name) {
+    const std::wstring p = dir + L"\\" + std::wstring(name, name + std::strlen(name));
+    return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+std::vector<uint8_t> readFile(const std::wstring& dir, const char* name) {
+    std::vector<uint8_t> out;
+    const std::wstring p = dir + L"\\" + std::wstring(name, name + std::strlen(name));
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, p.c_str(), L"rb") != 0 || !f) return out;
+    uint8_t buf[4096];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) out.insert(out.end(), buf, buf + n);
+    std::fclose(f);
+    return out;
+}
+void removeFolder(const std::wstring& dir) {
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) DeleteFileW((dir + L"\\" + fd.cFileName).c_str());
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    RemoveDirectoryW(dir.c_str());
+}
+ohp::SnapshotResult* fakeResult(int list, uint64_t vs, bool withPanel) {
+    auto* r = new ohp::SnapshotResult();
+    r->info.list = static_cast<uint8_t>(list);
+    r->info.kind = 'I';
+    r->info.own = 1;
+    r->info.place = ohp::kPlaceCinema;
+    r->info.viewBit = 0;
+    r->info.count = 96;
+    r->info.instances = 1;
+    r->info.vs = vs;
+    r->info.ps = 0x11112222ull << 32;
+    r->info.panel = {0x5000, 4, 2, 28, 1, 0};
+    r->info.panelSlot = ohp::panelSlotOf(vs);
+    r->info.target = {0x1000, 3408, 1917, 28, 1, 1};
+    r->floatsPerVertex = 6;
+    r->vertices = makeGrid(3, 3, 0.2f, 0.2f, 0.8f, 0.8f);
+    r->layout = layoutOf(r->vertices, 6);
+    if (withPanel) {
+        r->panelState = ohp::kPanelRead;
+        r->panelW = 4;
+        r->panelH = 2;
+        r->pixels.assign(4 * 2 * 4, 0x7F);
+    }
+    return r;
+}
+
+void partB22() {
+    const std::wstring dir = tempFolder();
+    removeFolder(dir);
+    onFootHudProbeSetLayoutDirectory(dir.c_str());
+    onFootHudProbeSetRecording(false);
+    const uint64_t T = 50000000;
+    const uint64_t f0 = onFootHudProbeFrame();
+    g_lines.clear();
+    onFootHudProbeCameraDrain(T, 0, 1, nullptr, &sink, nullptr);
+    check(onFootHudProbeFrame() == f0 + 1, "layout glue: the frame number counts the camera drain");
+    check(countLines("layout snapshots: no snapshot, and no refusal") == 1, "layout glue: nothing asked for a snapshot: the summary says 'no snapshot'");
+
+    // The claim, through the probe's own table: at once, 2 s no, 6 s yes; a claim given back.
+    int row = -1;
+    uint64_t prior = 0;
+    check(onFootHudLayoutClaim(0xABCDEF, T, &row, &prior) && !onFootHudLayoutClaim(0xABCDEF, T + 2000, &row, &prior), "layout glue: a form is claimed once in 5 s");
+    int row2 = -1;
+    check(onFootHudLayoutClaim(0xABCDEF, T + 6000, &row2, &prior) && row2 == row, "layout glue: and again 6 s after the first");
+    onFootHudLayoutUnclaim(row2, prior);
+    check(onFootHudLayoutClaim(0xABCDEF, T + 6100, &row2, &prior), "layout glue: a claim given back leaves the form due");
+    ohp::Layout lay = layoutOf(makeGrid(3, 3, 0.2f, 0.2f, 0.8f, 0.8f), 6);
+    ohp::Layout moved = layoutOf(makeGrid(3, 3, 0.22f, 0.2f, 0.82f, 0.8f), 6);
+    check(onFootHudLayoutDecide(row, lay) && !onFootHudLayoutDecide(row, lay) && onFootHudLayoutDecide(row, moved), "layout glue: the line is for the first layout and a moved one");
+
+    // A result: one line, the CSV and the BMP in the folder.
+    g_lines.clear();
+    onFootHudLayoutSnapped(ohp::kPlaceCinema);
+    onFootHudLayoutSubmit(fakeResult(3, 0xB10B032BDFD46700ull, true));
+    onFootHudProbeCameraDrain(T + 1000, 0, 1, nullptr, &sink, nullptr);
+    check(countLines("layout snapshot #1: list 39 (_HUD)") == 1 && anyLine("files: s1_list39_B10B032B_4x2.csv, s1_list39_B10B032B_4x2.bmp"),
+          "layout glue: a result gives one line that names its two files");
+    const auto csv = readFile(dir, "s1_list39_B10B032B_4x2.csv");
+    const auto bmp = readFile(dir, "s1_list39_B10B032B_4x2.bmp");
+    size_t newlines = 0;
+    for (uint8_t b : csv) newlines += b == '\n' ? 1 : 0;
+    check(csv.size() > 12 && std::string(csv.begin(), csv.begin() + 12) == "i,x,y,w,u,v\n" && newlines == 10, "layout glue: the CSV: the header and a row for each of the 9 vertices");
+    check(bmp.size() == 54 + 4 * 2 * 4 && bmp[0] == 'B' && bmp[1] == 'M', "layout glue: the BMP: 32 bits, the panel's size");
+    std::printf("  line: %s\n", g_lines.empty() ? "" : g_lines.back().c_str());
+
+    // A result without an image: the CSV only. A result of list 38 with the highlight's vertex shader: its name.
+    g_lines.clear();
+    onFootHudLayoutSubmit(fakeResult(2, 0xC4B4B334B26E81A9ull, false));
+    onFootHudProbeCameraDrain(T + 2000, 0, 1, nullptr, &sink, nullptr);
+    check(countLines("layout snapshot #2: list 38") == 1 && anyLine("files: s2_list38_C4B4B334_4x2.csv") && !anyLine("s2_list38_C4B4B334_4x2.bmp") && fileExists(dir, "s2_list38_C4B4B334_4x2.csv") &&
+              !fileExists(dir, "s2_list38_C4B4B334_4x2.bmp"),
+          "layout glue: a panel with no image: the CSV is written, the BMP is not");
+
+    // A refusal: the first of its kind gets a line, the rest are counted.
+    g_lines.clear();
+    ohp::RefusalNote n{};
+    n.list = 3;
+    n.place = ohp::kPlaceStereo;
+    n.kind = 'I';
+    n.count = 6;
+    n.instances = 1;
+    n.vs = 0xB10B032BDFD46700ull;
+    onFootHudLayoutRefuse(ohp::kRefForeign, n);
+    onFootHudLayoutRefuse(ohp::kRefForeign, n);
+    onFootHudLayoutRefuse(ohp::kRefGsOrTess, n);
+    onFootHudProbeCameraDrain(T + 3000, 0, 1, nullptr, &sink, nullptr);
+    check(countLines("layout snapshot refused") == 2 && anyLine("foreign context: the draw is not on EDVR's own context") && anyLine("a geometry shader or tessellation"),
+          "layout glue: two kinds of refusal, two lines (the repeat only counted)");
+
+    // The queue holds 8; the 9th is deleted and counted as 'queue full'.
+    g_lines.clear();
+    for (int i = 0; i < 9; ++i) onFootHudLayoutSubmit(fakeResult(3, 0xB10B032BDFD46700ull, false));
+    onFootHudProbeCameraDrain(T + 4000, 0, 1, nullptr, &sink, nullptr);
+    check(countLines("layout snapshot #") == 8, "layout glue: the queue gives 8 of 9 results to the frame thread");
+
+    // The files: 48 of each kind; the 49th CSV is not written and is counted. #1 and #11..#49 have an image (40 BMP), #2..#10 none.
+    uint32_t number = 10;
+    g_lines.clear();
+    for (int batch = 0; number < 49; ++batch) {
+        for (int i = 0; i < 8 && number < 49; ++i, ++number) onFootHudLayoutSubmit(fakeResult(3, 0xB10B032BDFD46700ull, true));
+        onFootHudProbeCameraDrain(T + 5000 + 100 * static_cast<uint64_t>(batch), 0, 1, nullptr, &sink, nullptr);
+    }
+    check(fileExists(dir, "s48_list39_B10B032B_4x2.csv") && !fileExists(dir, "s49_list39_B10B032B_4x2.csv"), "layout glue: 48 CSV files are written; the 49th is not");
+    check(anyLine("layout snapshot #49: ") && anyLine("csv over the limit of 48, s49_list39_B10B032B_4x2.bmp"), "layout glue: the line of the 49th says its CSV is over the limit (its BMP is the 40th and is written)");
+    // #50..#57 bring the BMPs to 48; #58 is the 49th BMP.
+    g_lines.clear();
+    for (int i = 0; i < 8; ++i) onFootHudLayoutSubmit(fakeResult(3, 0xB10B032BDFD46700ull, true));
+    onFootHudProbeCameraDrain(T + 7000, 0, 1, nullptr, &sink, nullptr);
+    onFootHudLayoutSubmit(fakeResult(3, 0xB10B032BDFD46700ull, true));
+    onFootHudProbeCameraDrain(T + 7100, 0, 1, nullptr, &sink, nullptr);
+    check(fileExists(dir, "s57_list39_B10B032B_4x2.bmp") && !fileExists(dir, "s58_list39_B10B032B_4x2.bmp") && anyLine("layout snapshot #58: ") &&
+              anyLine("csv over the limit of 48, bmp over the limit of 48"),
+          "layout glue: 48 BMP files are written; the 49th is not, and its line says so");
+
+    // The code budget through the glue.
+    check(onFootHudProbeCodeAdd(10 * 1024 * 1024) == 0 && onFootHudProbeCodeAdd(60 * 1024 * 1024) == 1 && onFootHudProbeCodeAdd(1) == 2,
+          "layout glue: the shader code budget: kept, the first refusal (one line to the log), then refused");
+
+    // The 30-second summary: the window since the first drain of this part.
+    g_lines.clear();
+    onFootHudProbeCameraDrain(T + 31000, 0, 1, nullptr, &sink, nullptr);
+    check(anyLine("31 s layout snapshots: 1 snapshot(s), 58 of them with a line; 4 refused; 0 draw(s) in forms that did not fit"), "layout glue: the 30-second summary: snapshots, lines, refusals");
+    check(anyLine("on foot in cinema: 1 snapshot(s), 58 with a line, 1 refused") && anyLine("on foot in stereo: 0 snapshot(s), 0 with a line, 3 refused"), "layout glue: the summary by place");
+    check(anyLine("refused by reason: foreign context 2, geometry shader or tessellation 1, queue full 1"), "layout glue: the summary counts the refusals by reason");
+    check(anyLine("files since the launch: csv written 48, over the limit of 48 10, failed 0; bmp written 48, over the limit 1, failed 0, no image 9; vertex shader code kept: 1 shader(s), 10485760 bytes of 67108864"),
+          "layout glue: the summary counts the files written, over the limit and without an image, and the shader code");
+    std::printf("  summary lines:\n");
+    for (const auto& l : g_lines)
+        if (l.find("on-foot hud probe:") != std::string::npos && (l.find("layout snapshots") != std::string::npos || l.find("refused by reason") != std::string::npos ||
+                                                                  l.find("files since the launch") != std::string::npos || l.find("snapshot(s), ") != std::string::npos))
+            std::printf("    %s\n", l.c_str());
+    // A window with nothing in it.
+    g_lines.clear();
+    onFootHudProbeCameraDrain(T + 61000, 0, 1, nullptr, &sink, nullptr);
+    check(anyLine("30 s layout snapshots: no snapshot, and no refusal") && anyLine("vertex shader code kept: 10485760 bytes") && countLines("layout snapshots") == 1 && !anyLine("files since the launch"),
+          "layout glue: a quiet window says 'no snapshot' again, in one line, with the shader code kept");
+    onFootHudProbeSetLayoutDirectory(nullptr);
+    removeFolder(dir);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -3269,6 +3842,8 @@ int main(int argc, char** argv) {
     partB15();
     partB20();
     partB21();
+    partA22();
+    partB22();
     std::printf("%s: on_foot_hud_probe_test, %d checks, %d failed\n", g_failures ? "FAIL" : "PASS", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

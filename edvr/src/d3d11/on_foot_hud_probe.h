@@ -98,6 +98,16 @@
 //     part, off with a line when the part is out of the record for 2 s while the node is drawn, re-armed when the journal's on-foot
 //     changes, off with the key and for good (each) after 100 000 hits in 30 s. They replace .20's gate watch, which never stood: the
 //     gates are not the cause. The gate walk, its census and summaries stay.
+//
+// .22 (flight .21: where on the screen does each mesh of the HUD node lie, which part of which panel does it show, how is it curved?): the
+// draws of the window above are replayed once, without any output to the screen, with stream output (on_foot_hud_layout.cpp, the replay
+// in the draw path; the GPU's answer is read at the window's next draws without waiting). Per form of draw in a place: the first at once,
+// then at most every 5 s; the layout (vertices as fractions of the screen, the visible part of the panel, a 3x3 grid, the bend, the
+// panel's aspect) is a line when new or moved more than 0.01 of the screen, with a CSV of the vertices and a BMP of the panel (8-bit
+// RGBA) beside it in <logDir>\hud_layout\<launch time>\, at most 48 of each. The vertex shaders' code is kept at their creation
+// (device_hook.cpp) only when the key was on at the launch, 64 MB at most. The files and lines are the frame thread's
+// (onFootHudProbeCameraDrain); the 30-second summary counts snapshots and refusals by place and reason or says "no snapshot". Observation
+// only: the context's geometry shader, stream-output targets and topology are put back, the draw goes through the game's own draw function.
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -179,8 +189,45 @@ int onFootHudProbeDrawClass(uint64_t ownVsHash, ohp::DrawShape* shape);
 void onFootHudProbeNoteShape(const ohp::DrawShape& shape);
 
 struct DrawArgs;
+// The game's own draw by kind ('D', 'I', 'N', 'X') and arguments, NOT through EDVR's hooks (vscreen.cpp's pureDrawReissue: the saved
+// originals of the context's draw functions). .22's replay draws with it.
+using OnFootHudRealDraw = void (*)(ID3D11DeviceContext* ctx, char kind, unsigned count, unsigned instances, const DrawArgs& args);
 // vscreen.cpp's beginPanelOverride, above its foreign-context branch, while onFootHudProbeWantsDraws(): `own` is EDVR's own context.
-// Reads the context's state with its getters (vscreen.cpp) and calls onFootHudProbeNoteShape.
-void onFootHudProbeNoteDraw(ID3D11DeviceContext* ctx, char kind, unsigned count, unsigned instances, const DrawArgs& args, bool own);
+// Reads the context's state with its getters (vscreen.cpp) and calls onFootHudProbeNoteShape; a draw in the HUD node's window also goes
+// to .22's layout snapshot (on_foot_hud_layout.cpp), which replays it with `real`.
+void onFootHudProbeNoteDraw(ID3D11DeviceContext* ctx, char kind, unsigned count, unsigned instances, const DrawArgs& args, bool own, OnFootHudRealDraw real);
+
+// ---- .22: the layout snapshot (the D3D11 half is on_foot_hud_layout.cpp; the decisions, the text and the files are here) ---------------
+namespace ohp {
+struct Layout;
+struct RefusalNote;
+struct SnapshotResult;
+}  // namespace ohp
+// The frame number the frame thread counts (once a camera drain): the GPU's answer to a replay is given up on after 30 of them.
+uint64_t onFootHudProbeFrame();
+// A form's claim for a snapshot (any thread): true with its table row when it is due (the first in a place at once, then every 5 s);
+// `prior` is what the row held, for onFootHudLayoutUnclaim when the replay could not go on. A full table is counted.
+bool onFootHudLayoutClaim(uint64_t formKey, uint64_t nowMs, int* row, uint64_t* prior);
+void onFootHudLayoutUnclaim(int row, uint64_t prior);
+// The layout a row's snapshot gave: true when it is a line (the first, or the frame or the 3x3 grid moved more than 0.01 of the screen).
+bool onFootHudLayoutDecide(int row, const ohp::Layout& layout);
+// A snapshot read (by place, for the summary), a refusal (by reason, the first of its kind also gets a line), a result for the frame thread
+// (it takes the ownership; a full queue deletes it and counts "queue full").
+void onFootHudLayoutSnapped(int place);
+void onFootHudLayoutRefuse(int reason, const ohp::RefusalNote& note);
+void onFootHudLayoutSubmit(ohp::SnapshotResult* result);
+// Vertex shader code for the snapshots: the budget (64 MB; the first refusal says one line). 0 kept, 1 or 2 refused.
+int onFootHudProbeCodeAdd(uint64_t bytes);
+// Whether the key was on when the game began creating shaders (read once, the first time asked): hookedCreateVS's one check.
+namespace detail {
+extern std::atomic<int> g_onFootHudProbeKeepsCode;
+}
+bool onFootHudProbeKeepsCodeSlow();
+inline bool onFootHudProbeKeepsCode() {
+    const int v = detail::g_onFootHudProbeKeepsCode.load(std::memory_order_relaxed);
+    return v > 0 || (v < 0 && onFootHudProbeKeepsCodeSlow());
+}
+// The rig's: the folder the files go to (instead of <logDir>\hud_layout\<launch time>); null puts it back.
+void onFootHudProbeSetLayoutDirectory(const wchar_t* directory);
 
 }  // namespace edvr

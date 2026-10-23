@@ -9,7 +9,8 @@
 // the first gate a path that was open in cinema is closed on in stereo (".20: the _HUD provider's gates" below; .21 gave its watch to the
 // HUD part). .21 remembers the HUD part the cinema walk finds, reads it whole in every walk in any place, checks every distinct material of
 // the record for every view, keeps the draws made while the HUD node is drawn by shape, and watches the part's mesh array and count
-// (".21: the HUD part", ".21: the HUD node's draw shapes" and ".21: the HUD part's watches" below).
+// (".21: the HUD part", ".21: the HUD node's draw shapes" and ".21: the HUD part's watches" below). .22 replays the draws of the HUD node with stream
+// output and turns what comes out into a layout (frame on the screen, visible part of the panel, a 3x3 grid, the bend) (".22: the layout snapshot" below).
 //
 // What it answers: in headset stereo on foot the game builds its PostGUI pass (render lists 36-39 PostGui_FirstPerson_*, the HUD, and
 // 40-46) but the HUD never reaches the headset. Either the lists hold nothing, or they hold models the view's camera does not draw.
@@ -30,8 +31,10 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 namespace edvr {
 namespace ohp {
@@ -3341,6 +3344,758 @@ private:
     uint64_t m_since = 0, m_hits = 0, m_overflow = 0;
     uint64_t m_at[kSites][kPlaces] = {}, m_filled[kSites][kPlaces] = {};
 };
+
+// ---- .22: the layout snapshot of the HUD node's draws (docs: design 1-7 of native-vr-on-foot-hud-layout) --------------------------------
+// A draw in the HUD node's window (the shape table above) is replayed once without drawing anything: the vertex shader's own code becomes a
+// geometry shader with stream output (position, and the first TEXCOORD of two or more components), the topology is a point list, the same
+// draw goes through the game's own draw function, and every state it touched is put back. The positions that come out are the vertex
+// shader's output, so they are already in the space of the screen: x/w and y/w are fractions of the target, no matrix is read. The replay
+// (vscreen.cpp's onFootHudProbeNoteDraw -> on_foot_hud_layout.cpp) is the D3D11 half; everything it decides is here, so the rig drives it.
+constexpr int kLayoutRows = 256;                   // forms kept for snapshots, as the shapes
+constexpr uint64_t kLayoutEveryMs = 5000;          // one snapshot of a form in a place at most this often (the first at once)
+constexpr float kLayoutShift = 0.01f;              // a frame or a grid point that moved more is a new line
+constexpr uint32_t kReplayMaxVertices = 65536;     // indices x instances of a replayed draw
+constexpr int kReplayRing = 4;                     // staging buffers
+constexpr uint64_t kReplayTimeoutFrames = 30;      // frames without an answer from the GPU
+constexpr uint32_t kPanelMaxSide = 4096;           // a panel image bigger than this is not copied
+constexpr int kLayoutFiles = 48;                   // files of each kind per launch
+constexpr uint64_t kCodeLimitBytes = 64ull * 1024 * 1024;  // vertex shader code kept for snapshots
+constexpr uint64_t kLayoutSummaryMs = 30000;
+constexpr int kGridSide = 3, kGridPoints = 9;
+constexpr float kGridNear = 0.1f;                  // a grid point whose nearest vertex is farther than this (of the visible part) is not measured
+constexpr uint32_t kPanelAltVs = 0xC4B4B334u;      // this vertex shader samples its panel at t2, every other at t0 (design: the highlight)
+inline int panelSlotOf(uint64_t vsHash) { return static_cast<uint32_t>(vsHash >> 32) == kPanelAltVs ? 2 : 0; }
+
+// -- the output signature of a vertex shader, as the declaration of its stream output --
+struct SoEntry {
+    char name[32];
+    uint32_t semanticIndex;
+    uint8_t start, count;  // components of the register: from `start`, `count` of them
+};
+struct SoDecl {  // plain data: kept as the shader's private data
+    uint8_t ok;        // 1: a position was found and the declaration below is good
+    uint8_t hasUv;     // the second entry is the first TEXCOORD of two or more components
+    uint8_t gsFailed;  // the geometry shader could not be created from it (set by the caller)
+    uint8_t entries;   // 1 or 2
+    SoEntry e[2];
+    uint32_t stride;   // bytes per vertex: 16, or 24 with a texture coordinate
+};
+inline uint32_t rd32(const uint8_t* p) {
+    uint32_t v;
+    std::memcpy(&v, p, 4);
+    return v;
+}
+inline char lowerAscii(char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c; }
+inline bool equalNoCase(const char* a, const char* b) {
+    for (; *a && *b; ++a, ++b)
+        if (lowerAscii(*a) != lowerAscii(*b)) return false;
+    return *a == *b;
+}
+// The chunk of a DXBC container by its four-letter tag: no checksum (the code is what the game gave CreateVertexShader).
+inline bool findChunk(const uint8_t* d, size_t n, const char* tag, const uint8_t** chunk, size_t* len) {
+    if (!d || n < 36 || std::memcmp(d, "DXBC", 4) != 0) return false;
+    const uint32_t count = rd32(d + 28);
+    if (count > 128 || 32 + static_cast<size_t>(count) * 4 > n) return false;
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint32_t off = rd32(d + 32 + i * 4);
+        if (off > n || n - off < 8) return false;
+        const uint32_t size = rd32(d + off + 4);
+        if (size > n - off - 8) return false;
+        if (std::memcmp(d + off, tag, 4) == 0) {
+            *chunk = d + off + 8;
+            *len = size;
+            return true;
+        }
+    }
+    return false;
+}
+// SV_POSITION (4 components) and the first TEXCOORD with 2 or more components, from OSGN (24 bytes an element), OSG5 (28, the stream first)
+// or OSG1 (32). A signature that cannot be read, or has no whole position, gives ok 0.
+inline SoDecl parseSoDecl(const uint8_t* dxbc, size_t n) {
+    SoDecl out{};
+    const uint8_t* sig = nullptr;
+    size_t len = 0;
+    size_t elem = 24;
+    bool stream = false;
+    if (findChunk(dxbc, n, "OSGN", &sig, &len)) {
+        elem = 24;
+    } else if (findChunk(dxbc, n, "OSG5", &sig, &len)) {
+        elem = 28;
+        stream = true;
+    } else if (findChunk(dxbc, n, "OSG1", &sig, &len)) {
+        elem = 32;
+        stream = true;
+    } else {
+        return out;
+    }
+    if (len < 8) return out;
+    const uint32_t count = rd32(sig), first = rd32(sig + 4);
+    if (count > 128 || first > len || static_cast<uint64_t>(first) + static_cast<uint64_t>(count) * elem > len) return out;
+    bool havePos = false, haveUv = false;
+    char posName[32] = {}, uvName[32] = {};
+    uint32_t uvIndex = 0;
+    uint8_t uvStart = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint8_t* e = sig + first + static_cast<size_t>(i) * elem;
+        if (stream && rd32(e) != 0) continue;
+        const uint8_t* f = e + (stream ? 4 : 0);
+        const uint32_t nameOff = rd32(f), semIndex = rd32(f + 4), sysValue = rd32(f + 8);
+        const uint32_t mask = f[20] & 0xFu;
+        if (nameOff >= len) return SoDecl{};
+        char name[32] = {};
+        size_t k = 0;
+        while (nameOff + k < len && sig[nameOff + k] && k + 1 < sizeof(name)) {
+            name[k] = static_cast<char>(sig[nameOff + k]);
+            ++k;
+        }
+        if (nameOff + k >= len) return SoDecl{};
+        if (!havePos && semIndex == 0 && (sysValue == 1 || equalNoCase(name, "SV_Position")) && mask == 0xF) {
+            havePos = true;
+            std::memcpy(posName, name, sizeof(posName));
+        } else if (!haveUv && equalNoCase(name, "TEXCOORD") && mask) {
+            uint32_t s = 0;
+            while (!((mask >> s) & 1u)) ++s;
+            uint32_t run = 0;
+            while (s + run < 4 && ((mask >> (s + run)) & 1u)) ++run;
+            if (run >= 2) {
+                haveUv = true;
+                std::memcpy(uvName, name, sizeof(uvName));
+                uvIndex = semIndex;
+                uvStart = static_cast<uint8_t>(s);
+            }
+        }
+    }
+    if (!havePos) return SoDecl{};
+    out.ok = 1;
+    std::memcpy(out.e[0].name, posName, sizeof(posName));
+    out.e[0].semanticIndex = 0;
+    out.e[0].start = 0;
+    out.e[0].count = 4;
+    out.entries = 1;
+    out.stride = 16;
+    if (haveUv) {
+        out.hasUv = 1;
+        std::memcpy(out.e[1].name, uvName, sizeof(uvName));
+        out.e[1].semanticIndex = uvIndex;
+        out.e[1].start = uvStart;
+        out.e[1].count = 2;
+        out.entries = 2;
+        out.stride = 24;
+    }
+    return out;
+}
+
+// -- why a snapshot was not taken --
+enum Refusal : int {
+    kRefForeign = 0,  // the draw is on a context that is not EDVR's own
+    kRefIndirect,     // an indirect draw: its counts are in a buffer
+    kRefGsOrTess,     // a geometry shader or tessellation stands
+    kRefNoCode,       // no vertex shader code was kept for it
+    kRefNoOutput,     // its output signature has no whole position
+    kRefTooBig,       // more than 65536 vertices out
+    kRefRingBusy,     // all four staging buffers hold an answer not read yet
+    kRefCreate,       // the geometry shader or a buffer could not be made
+    kRefTimeout,      // the GPU did not answer in 30 frames
+    kRefRead,         // the staging buffer could not be mapped
+    kRefQueueFull,    // the frame thread has not taken the earlier results
+    kRefusals
+};
+inline const char* refusalShort(int r) {
+    static const char* const t[kRefusals] = {"foreign context", "indirect draw", "geometry shader or tessellation", "no shader code", "no position output",
+                                             "over 65536 vertices", "ring busy", "creation failed", "readback timeout", "readback failed", "queue full"};
+    return r >= 0 && r < kRefusals ? t[r] : "?";
+}
+inline const char* refusalText(int r) {
+    static const char* const t[kRefusals] = {
+        "foreign context: the draw is not on EDVR's own context (nothing to replay it on)",
+        "indirect draw: its counts are in a buffer",
+        "a geometry shader or tessellation (hull/domain) shader stands",
+        "no shader code: none was kept for the vertex shader (made before the key was on, or with class linkage)",
+        "no position output: the vertex shader's output signature has no whole SV_POSITION",
+        "over 65536 vertices: the replay would write more",
+        "ring busy: all four staging buffers are waiting for an answer",
+        "creation failed: the stream-output geometry shader or a buffer could not be created",
+        "readback timeout: the GPU gave no answer in 30 frames",
+        "readback failed: the staging buffer could not be mapped",
+        "queue full: the frame thread has not taken the earlier results"};
+    return r >= 0 && r < kRefusals ? t[r] : "?";
+}
+
+// -- the order of one replay of a draw, driven by the rig on a stand-in --
+// Ops: check() -> -1 to go, or a Refusal; save(); bind(); draw(); restore(); copyOut(). Returns -1 (done) or the refusal. Nothing is touched
+// before check() says go, and restore() always follows draw().
+template <class Ops>
+inline int replaySequence(Ops& ops) {
+    const int refusal = ops.check();
+    if (refusal >= 0) return refusal;
+    ops.save();
+    ops.bind();
+    ops.draw();
+    ops.restore();
+    ops.copyOut();
+    return -1;
+}
+
+// -- the answer of the GPU, read without waiting --
+enum ReadMap : int { kMapOk = 0, kMapBusy, kMapFailed };
+enum PollVerdict : int { kPollWait = 0, kPollReady, kPollTimeout, kPollFailed };
+inline PollVerdict pollVerdict(ReadMap m, uint64_t issuedFrame, uint64_t nowFrame) {
+    if (m == kMapOk) return kPollReady;
+    if (m == kMapFailed) return kPollFailed;
+    return nowFrame - issuedFrame >= kReplayTimeoutFrames ? kPollTimeout : kPollWait;
+}
+// The four staging slots: free, taken by a replay, waiting for the vertices, waiting for the panel image.
+class SlotRing {
+public:
+    enum State : uint8_t { kFree = 0, kVertices = 1, kPanel = 2, kTaken = 3 };
+    // A free slot, now yours (kTaken), or -1.
+    int acquire() noexcept {
+        for (int i = 0; i < kReplayRing; ++i) {
+            uint8_t free = kFree;
+            if (m_state[i].compare_exchange_strong(free, kTaken, std::memory_order_acq_rel)) return i;
+        }
+        return -1;
+    }
+    void set(int i, State s, uint64_t frame) noexcept {
+        m_frame[i] = frame;
+        m_state[i].store(s, std::memory_order_release);
+    }
+    State state(int i) const noexcept { return static_cast<State>(m_state[i].load(std::memory_order_acquire)); }
+    uint64_t frame(int i) const noexcept { return m_frame[i]; }
+    void release(int i) noexcept { m_state[i].store(kFree, std::memory_order_release); }
+    int busy() const noexcept {
+        int n = 0;
+        for (const auto& s : m_state) n += s.load(std::memory_order_relaxed) != kFree ? 1 : 0;
+        return n;
+    }
+
+private:
+    std::atomic<uint8_t> m_state[kReplayRing] = {};
+    uint64_t m_frame[kReplayRing] = {};
+};
+
+// -- the summary of one snapshot --
+struct GridPoint {
+    float x, y;       // the nearest vertex's place on the screen
+    uint32_t vertex;  // its index
+    uint8_t hit;      // 1: close enough in (u, v) to count as measured
+};
+struct Layout {
+    uint32_t vertices = 0, used = 0, dropped = 0;  // read; with w > 0; with w <= 0 (or not finite)
+    bool hasUv = false, valid = false;
+    float minX = 0, minY = 0, maxX = 0, maxY = 0;  // the frame of the vertices on the screen, fractions 0..1, the top 0
+    float minU = 0, minV = 0, maxU = 0, maxV = 0;  // the visible part of the panel
+    GridPoint g[kGridPoints] = {};                 // row-major: v rows (top first), u columns (left first)
+    int measured = 0;                              // of the five points that are not corners
+    bool bendKnown = false;
+    float bend = 0;                                // the largest distance of a measured point from the corners' bilinear plane, in screen fractions
+};
+// `vertices` records of `perVertex` floats (4 or 6): x, y, z, w [, u, v] as the vertex shader gave them.
+inline void summarizeLayout(const float* v, uint32_t vertices, uint32_t perVertex, Layout* out) {
+    Layout L;
+    L.vertices = vertices;
+    L.hasUv = perVertex >= 6;
+    bool any = false, uvAny = false;
+    auto usable = [&L](const float* p) {
+        return p[3] > 0.f && std::isfinite(p[3]) && std::isfinite(p[0]) && std::isfinite(p[1]) && (!L.hasUv || (std::isfinite(p[4]) && std::isfinite(p[5])));
+    };
+    for (uint32_t i = 0; i < vertices; ++i) {
+        const float* p = v + static_cast<size_t>(i) * perVertex;
+        if (!usable(p)) {
+            ++L.dropped;
+            continue;
+        }
+        const float x = 0.5f + 0.5f * p[0] / p[3], y = 0.5f - 0.5f * p[1] / p[3];
+        if (!any) {
+            L.minX = L.maxX = x;
+            L.minY = L.maxY = y;
+            any = true;
+        }
+        L.minX = x < L.minX ? x : L.minX;
+        L.maxX = x > L.maxX ? x : L.maxX;
+        L.minY = y < L.minY ? y : L.minY;
+        L.maxY = y > L.maxY ? y : L.maxY;
+        if (L.hasUv) {
+            if (!uvAny) {
+                L.minU = L.maxU = p[4];
+                L.minV = L.maxV = p[5];
+                uvAny = true;
+            }
+            L.minU = p[4] < L.minU ? p[4] : L.minU;
+            L.maxU = p[4] > L.maxU ? p[4] : L.maxU;
+            L.minV = p[5] < L.minV ? p[5] : L.minV;
+            L.maxV = p[5] > L.maxV ? p[5] : L.maxV;
+        }
+        ++L.used;
+    }
+    L.valid = any;
+    if (any && L.hasUv) {
+        const float ru = L.maxU - L.minU, rv = L.maxV - L.minV;
+        const float nu = ru > 1e-6f ? ru : 1.f, nv = rv > 1e-6f ? rv : 1.f;
+        for (int j = 0; j < kGridSide; ++j)
+            for (int i = 0; i < kGridSide; ++i) {
+                const float tu = L.minU + 0.5f * static_cast<float>(i) * ru, tv = L.minV + 0.5f * static_cast<float>(j) * rv;
+                float best = 1e30f;
+                GridPoint gp{};
+                for (uint32_t k = 0; k < vertices; ++k) {
+                    const float* p = v + static_cast<size_t>(k) * perVertex;
+                    if (!usable(p)) continue;
+                    const float du = (p[4] - tu) / nu, dv = (p[5] - tv) / nv, d = du * du + dv * dv;
+                    if (d < best) {
+                        best = d;
+                        gp.x = 0.5f + 0.5f * p[0] / p[3];
+                        gp.y = 0.5f - 0.5f * p[1] / p[3];
+                        gp.vertex = k;
+                    }
+                }
+                gp.hit = std::sqrt(best) <= kGridNear ? 1 : 0;
+                L.g[j * kGridSide + i] = gp;
+            }
+        // The bend: the four corners make a flat quadrilateral; the other five points' distance from its bilinear interpolation.
+        const GridPoint &c00 = L.g[0], &c20 = L.g[2], &c02 = L.g[6], &c22 = L.g[8];
+        L.bendKnown = c00.hit && c20.hit && c02.hit && c22.hit;
+        float worst = 0;
+        for (int j = 0; j < kGridSide; ++j)
+            for (int i = 0; i < kGridSide; ++i) {
+                if ((i == 0 || i == 2) && (j == 0 || j == 2)) continue;
+                const GridPoint& g = L.g[j * kGridSide + i];
+                if (!g.hit) continue;
+                ++L.measured;
+                if (!L.bendKnown) continue;
+                const float a = 0.5f * static_cast<float>(i), b = 0.5f * static_cast<float>(j);
+                const float px = (1 - a) * (1 - b) * c00.x + a * (1 - b) * c20.x + (1 - a) * b * c02.x + a * b * c22.x;
+                const float py = (1 - a) * (1 - b) * c00.y + a * (1 - b) * c20.y + (1 - a) * b * c02.y + a * b * c22.y;
+                const float d = std::sqrt((g.x - px) * (g.x - px) + (g.y - py) * (g.y - py));
+                worst = d > worst ? d : worst;
+            }
+        L.bend = worst;
+    }
+    *out = L;
+}
+// Moved: the frame or a grid point more than 0.01 of the screen away, or the sort of layout changed.
+inline bool layoutMoved(const Layout& a, const Layout& b) {
+    if (a.valid != b.valid || a.hasUv != b.hasUv) return true;
+    if (!a.valid) return false;
+    auto beyond = [](float p, float q) { return std::fabs(p - q) > kLayoutShift; };
+    if (beyond(a.minX, b.minX) || beyond(a.minY, b.minY) || beyond(a.maxX, b.maxX) || beyond(a.maxY, b.maxY)) return true;
+    if (a.hasUv)
+        for (int i = 0; i < kGridPoints; ++i)
+            if (beyond(a.g[i].x, b.g[i].x) || beyond(a.g[i].y, b.g[i].y)) return true;
+    return false;
+}
+
+// -- the forms that get snapshots: 256 rows, a claim for the 5 seconds, the last layout that gave a line --
+class SnapTable {
+public:
+    struct Row {
+        std::atomic<uint64_t> key{0};
+        std::atomic<uint64_t> claimed{0};  // the tick of the last snapshot, plus 1 (0: never)
+        bool hasPrev = false;              // the layout of the last line: one thread decides a form (its view's draw thread)
+        Layout prev;
+    };
+    static constexpr int kNotDue = -1, kFull = -2;
+    // Any thread. The row of the form when it is due (never snapshot, or last at least 5 s ago): the tick is taken, `prior` is what was
+    // there. kNotDue, or kFull when the table has no row for it (counted).
+    int claim(uint64_t key, uint64_t nowMs, uint64_t* prior) noexcept {
+        if (!key) key = 1;
+        for (int probe = 0; probe < kLayoutRows; ++probe) {
+            const int i = static_cast<int>((key + static_cast<uint64_t>(probe)) % kLayoutRows);
+            Row& r = m_rows[i];
+            uint64_t seen = r.key.load(std::memory_order_acquire);
+            if (seen == 0) {
+                uint64_t expected = 0;
+                seen = r.key.compare_exchange_strong(expected, key, std::memory_order_acq_rel) ? key : expected;
+            }
+            if (seen != key) continue;
+            uint64_t last = r.claimed.load(std::memory_order_acquire);
+            if (last != 0 && nowMs - (last - 1) < kLayoutEveryMs) return kNotDue;
+            if (!r.claimed.compare_exchange_strong(last, nowMs + 1, std::memory_order_acq_rel)) return kNotDue;
+            *prior = last;
+            return i;
+        }
+        m_full.fetch_add(1, std::memory_order_relaxed);
+        return kFull;
+    }
+    void unclaim(int row, uint64_t prior) noexcept { m_rows[row].claimed.store(prior, std::memory_order_release); }
+    // The row's form gave a layout: true when it is a line (the first, or moved), and then it is the new last.
+    bool decide(int row, const Layout& l) noexcept {
+        Row& r = m_rows[row];
+        if (r.hasPrev && !layoutMoved(r.prev, l)) return false;
+        r.prev = l;
+        r.hasPrev = true;
+        return true;
+    }
+    uint64_t full() const noexcept { return m_full.load(std::memory_order_relaxed); }
+    int kept() const noexcept {
+        int n = 0;
+        for (const Row& r : m_rows) n += r.key.load(std::memory_order_relaxed) ? 1 : 0;
+        return n;
+    }
+
+private:
+    Row m_rows[kLayoutRows];
+    std::atomic<uint64_t> m_full{0};
+};
+
+// -- what happened, by place and reason; the first of each kind of refusal for a line --
+class SnapCounters {
+public:
+    std::atomic<uint64_t> snaps[kPlaces] = {};  // snapshots read
+    std::atomic<uint64_t> lines[kPlaces] = {};  // of them, written as a line
+    std::atomic<uint64_t> refused[kPlaces][kRefusals] = {};
+};
+struct RefusalNote {
+    uint8_t reason, place, list, kind;
+    uint32_t count, instances;
+    uint64_t vs, ps;
+};
+class RefusalTable {
+public:
+    static constexpr int kRows = 32;
+    // Any thread: the first refusal of a (reason, place, vertex shader) is kept for a line; the rest are only counted by the caller.
+    void note(const RefusalNote& n) noexcept {
+        uint64_t key = (n.vs ^ (static_cast<uint64_t>(n.reason) << 56) ^ (static_cast<uint64_t>(n.place) << 48) ^ 0x9E3779B97F4A7C15ull) * 1099511628211ull;
+        if (!key) key = 1;
+        for (int probe = 0; probe < kRows; ++probe) {
+            Row& r = m_rows[(key + static_cast<uint64_t>(probe)) % kRows];
+            uint64_t seen = r.key.load(std::memory_order_acquire);
+            if (seen == 0) {
+                uint64_t expected = 0;
+                if (r.key.compare_exchange_strong(expected, key, std::memory_order_acq_rel)) {
+                    r.note = n;
+                    r.ready.store(1, std::memory_order_release);
+                    return;
+                }
+                seen = expected;
+            }
+            if (seen == key) return;
+        }
+        m_full.fetch_add(1, std::memory_order_relaxed);
+    }
+    // Frame thread: the next refusal not said yet, or false.
+    bool next(RefusalNote* out) noexcept {
+        for (Row& r : m_rows) {
+            if (!r.ready.load(std::memory_order_acquire) || r.said) continue;
+            r.said = true;
+            *out = r.note;
+            return true;
+        }
+        return false;
+    }
+    uint64_t full() const noexcept { return m_full.load(std::memory_order_relaxed); }
+
+private:
+    struct Row {
+        std::atomic<uint64_t> key{0};
+        std::atomic<uint8_t> ready{0};
+        bool said = false;
+        RefusalNote note{};
+    };
+    Row m_rows[kRows];
+    std::atomic<uint64_t> m_full{0};
+};
+
+// -- what the draw threads hand the frame thread --
+enum PanelState : uint8_t { kPanelNone = 0, kPanelRead, kPanelFormat, kPanelTooBig, kPanelNotRead };
+struct SnapInfo {
+    uint8_t list, kind, own, place;
+    int32_t viewBit;
+    uint32_t count, instances;
+    uint64_t vs, ps;
+    ShapeTexture panel;  // the texture at the panel's slot
+    int panelSlot;
+    ShapeTexture target;
+};
+struct SnapshotResult {
+    SnapInfo info{};
+    Layout layout;
+    uint32_t floatsPerVertex = 0;
+    std::vector<float> vertices;
+    uint8_t panelState = kPanelNone;
+    uint8_t panelBgra = 0;
+    uint32_t panelW = 0, panelH = 0;
+    std::vector<uint8_t> pixels;  // panelW x panelH x 4, tight, the channels as the texture has them
+};
+// Lock-free hand-over: any number of draw threads push, the frame thread pops. A full queue refuses.
+template <class T, int N>
+class ResultQueue {
+public:
+    bool push(T* p) noexcept {
+        for (auto& c : m_cells) {
+            T* none = nullptr;
+            if (c.compare_exchange_strong(none, p, std::memory_order_acq_rel)) return true;
+        }
+        return false;
+    }
+    T* pop() noexcept {
+        for (auto& c : m_cells) {
+            T* p = c.exchange(nullptr, std::memory_order_acq_rel);
+            if (p) return p;
+        }
+        return nullptr;
+    }
+
+private:
+    std::atomic<T*> m_cells[N] = {};
+};
+
+// -- the 64 MB of vertex shader code --
+class CodeBudget {
+public:
+    // 0 kept; 1 refused, the first time (say it); 2 refused.
+    int add(uint64_t bytes) noexcept {
+        if (m_over.load(std::memory_order_relaxed)) return 2;
+        const uint64_t before = m_bytes.fetch_add(bytes, std::memory_order_relaxed);
+        if (before + bytes > kCodeLimitBytes) {
+            m_bytes.fetch_sub(bytes, std::memory_order_relaxed);
+            return m_over.exchange(true, std::memory_order_acq_rel) ? 2 : 1;
+        }
+        m_shaders.fetch_add(1, std::memory_order_relaxed);
+        return 0;
+    }
+    uint64_t bytes() const noexcept { return m_bytes.load(std::memory_order_relaxed); }
+    uint64_t shaders() const noexcept { return m_shaders.load(std::memory_order_relaxed); }
+
+private:
+    std::atomic<uint64_t> m_bytes{0}, m_shaders{0};
+    std::atomic<bool> m_over{false};
+};
+
+// -- the panel image --
+// 1: 8 bits a channel in R, G, B, A order (27, 28, 29); 2: in B, G, R, A order (87, 88, 90, 91); 0: anything else.
+inline int rgba8Order(uint32_t dxgiFormat) {
+    if (dxgiFormat == 27 || dxgiFormat == 28 || dxgiFormat == 29) return 1;
+    if (dxgiFormat == 87 || dxgiFormat == 88 || dxgiFormat == 90 || dxgiFormat == 91) return 2;
+    return 0;
+}
+// A 32-bit BMP (BI_RGB, bottom-up rows): `pixels` is w x h x 4 tight; the channels are written as they are (an sRGB format is not
+// converted), in the BMP's B, G, R, A order.
+inline void makeBmp32(const uint8_t* pixels, uint32_t w, uint32_t h, bool bgra, std::vector<uint8_t>* out) {
+    const uint32_t bytes = w * h * 4, offset = 14 + 40;
+    out->assign(offset + bytes, 0);
+    uint8_t* b = out->data();
+    auto w16 = [&](size_t at, uint16_t v) { std::memcpy(b + at, &v, 2); };
+    auto w32 = [&](size_t at, uint32_t v) { std::memcpy(b + at, &v, 4); };
+    b[0] = 'B';
+    b[1] = 'M';
+    w32(2, offset + bytes);
+    w32(10, offset);
+    w32(14, 40);
+    w32(18, w);
+    w32(22, h);
+    w16(26, 1);
+    w16(28, 32);
+    w32(34, bytes);
+    for (uint32_t y = 0; y < h; ++y) {
+        const uint8_t* src = pixels + static_cast<size_t>(h - 1 - y) * w * 4;
+        uint8_t* dst = b + offset + static_cast<size_t>(y) * w * 4;
+        for (uint32_t x = 0; x < w; ++x) {
+            const uint8_t* s = src + x * 4;
+            uint8_t* d = dst + x * 4;
+            d[0] = bgra ? s[0] : s[2];
+            d[1] = s[1];
+            d[2] = bgra ? s[2] : s[0];
+            d[3] = s[3];
+        }
+    }
+}
+
+// -- text --
+inline int layoutAppend(char* out, size_t cap, int len, const char* fmt, ...) {
+    if (len < 0 || static_cast<size_t>(len) >= cap) return len;
+    va_list ap;
+    va_start(ap, fmt);
+    const int n = std::vsnprintf(out + len, cap - static_cast<size_t>(len), fmt, ap);
+    va_end(ap);
+    return n < 0 ? len : len + n;
+}
+inline int listNumber(int list) { return list >= 0 && list < static_cast<int>(kHudCount) ? 36 + list : -1; }
+// s<number>_list<list>_<vs8>_<WxH>.<ext>: the panel's size (0x0 when it has none).
+inline int layoutFileName(uint32_t number, int list, uint64_t vs, uint32_t w, uint32_t h, const char* ext, char* out, size_t cap) {
+    const int ln = listNumber(list);
+    if (ln < 0) return std::snprintf(out, cap, "s%u_listx_%08X_%ux%u.%s", number, static_cast<unsigned>(vs >> 32), w, h, ext);
+    return std::snprintf(out, cap, "s%u_list%d_%08X_%ux%u.%s", number, ln, static_cast<unsigned>(vs >> 32), w, h, ext);
+}
+inline int formatCsvHeader(char* out, size_t cap) { return std::snprintf(out, cap, "i,x,y,w,u,v"); }
+// One vertex: x and y as fractions of the screen (empty when w <= 0), w, u and v (empty without a texture coordinate).
+inline int formatCsvRow(uint32_t i, const float* p, uint32_t perVertex, char* out, size_t cap) {
+    int len = layoutAppend(out, cap, 0, "%u,", i);
+    const float w = p[3];
+    if (w > 0.f && std::isfinite(w) && std::isfinite(p[0]) && std::isfinite(p[1]))
+        len = layoutAppend(out, cap, len, "%.5f,%.5f,", 0.5 + 0.5 * static_cast<double>(p[0]) / static_cast<double>(w),
+                           0.5 - 0.5 * static_cast<double>(p[1]) / static_cast<double>(w));
+    else
+        len = layoutAppend(out, cap, len, ",,");
+    len = layoutAppend(out, cap, len, "%.5g,", static_cast<double>(w));
+    if (perVertex >= 6) len = layoutAppend(out, cap, len, "%.5f,%.5f", static_cast<double>(p[4]), static_cast<double>(p[5]));
+    else len = layoutAppend(out, cap, len, ",");
+    return len;
+}
+inline const char* panelStateText(int s) {
+    switch (s) {
+        case kPanelRead: return "image read";
+        case kPanelFormat: return "no image: not 8-bit RGBA";
+        case kPanelTooBig: return "no image: bigger than 4096x4096";
+        case kPanelNotRead: return "no image: the copy was not read in time";
+        default: return "no image: no panel texture";
+    }
+}
+// The line of a snapshot that gave one. `files` names what was written ("" when none).
+inline int formatLayoutLine(const SnapshotResult& r, uint32_t number, const char* files, char* out, size_t cap) {
+    const SnapInfo& s = r.info;
+    const Layout& L = r.layout;
+    int len = layoutAppend(out, cap, 0, "on-foot hud probe: layout snapshot #%u: %s, view bit %d, %s, %s context, %s with count %u x %u instance(s), vs %08X ps %08X", number,
+                           shapeListName(s.list), s.viewBit, placeName(s.place), s.own ? "own" : "foreign", drawKindName(static_cast<char>(s.kind)), s.count,
+                           s.instances, static_cast<unsigned>(s.vs >> 32), static_cast<unsigned>(s.ps >> 32));
+    if (s.panel.resource && s.panel.height)
+        len = layoutAppend(out, cap, len, ", panel t%d 0x%llX %ux%u aspect %.3f fmt %u (%s)", s.panelSlot, static_cast<unsigned long long>(s.panel.resource), s.panel.width,
+                           s.panel.height, static_cast<double>(s.panel.width) / static_cast<double>(s.panel.height), s.panel.format, panelStateText(r.panelState));
+    else
+        len = layoutAppend(out, cap, len, ", panel t%d: none bound", s.panelSlot);
+    if (s.target.resource) len = layoutAppend(out, cap, len, ", target %ux%u", s.target.width, s.target.height);
+    len = layoutAppend(out, cap, len, "; %u vertices, %u dropped (w <= 0)", L.vertices, L.dropped);
+    if (!L.valid) {
+        len = layoutAppend(out, cap, len, "; no vertex in front of the screen");
+    } else {
+        len = layoutAppend(out, cap, len, "; screen frame x %.3f..%.3f y %.3f..%.3f", static_cast<double>(L.minX), static_cast<double>(L.maxX), static_cast<double>(L.minY),
+                           static_cast<double>(L.maxY));
+        if (!L.hasUv) {
+            len = layoutAppend(out, cap, len, "; no texture coordinate (positions only: no panel frame, grid or bend)");
+        } else {
+            len = layoutAppend(out, cap, len,
+                               "; panel visible u %.3f..%.3f v %.3f..%.3f; grid 3x3 (rows v top..bottom, columns u left..right, x,y on screen; ~ = no vertex near):",
+                               static_cast<double>(L.minU), static_cast<double>(L.maxU), static_cast<double>(L.minV), static_cast<double>(L.maxV));
+            for (int j = 0; j < kGridSide; ++j) {
+                len = layoutAppend(out, cap, len, " [");
+                for (int i = 0; i < kGridSide; ++i) {
+                    const GridPoint& g = L.g[j * kGridSide + i];
+                    len = layoutAppend(out, cap, len, "%s%.3f,%.3f%s", i ? " " : "", static_cast<double>(g.x), static_cast<double>(g.y), g.hit ? "" : "~");
+                }
+                len = layoutAppend(out, cap, len, "]");
+            }
+            if (L.bendKnown) len = layoutAppend(out, cap, len, "; bend %.4f (%d of 5 points measured)", static_cast<double>(L.bend), L.measured);
+            else len = layoutAppend(out, cap, len, "; bend unknown (a corner has no vertex near)");
+        }
+    }
+    if (files && files[0]) len = layoutAppend(out, cap, len, "; files: %s", files);
+    return len;
+}
+inline int formatRefusalLine(const RefusalNote& n, char* out, size_t cap) {
+    return std::snprintf(out, cap,
+                         "on-foot hud probe: layout snapshot refused (the first of its kind; the rest are counted in the summary): %s; %s, %s, %s with count %u x %u "
+                         "instance(s), vs %08X ps %08X",
+                         refusalText(n.reason), shapeListName(n.list), placeName(n.place), drawKindName(static_cast<char>(n.kind)), n.count, n.instances,
+                         static_cast<unsigned>(n.vs >> 32), static_cast<unsigned>(n.ps >> 32));
+}
+// The files written, per kind, since the launch; the frame thread's.
+struct LayoutFiles {
+    uint64_t csvWritten = 0, csvOver = 0, csvFailed = 0;
+    uint64_t bmpWritten = 0, bmpOver = 0, bmpFailed = 0, bmpNone = 0;
+};
+struct LayoutWindow {
+    uint64_t snaps[kPlaces] = {}, lines[kPlaces] = {};
+    uint64_t refused[kPlaces][kRefusals] = {};
+    uint64_t tableFull = 0;
+    uint64_t total() const {
+        uint64_t s = 0;
+        for (uint64_t v : snaps) s += v;
+        return s;
+    }
+    uint64_t totalLines() const {
+        uint64_t s = 0;
+        for (uint64_t v : lines) s += v;
+        return s;
+    }
+    uint64_t totalRefused(int place = -1) const {
+        uint64_t s = 0;
+        for (int p = 0; p < kPlaces; ++p)
+            if (place < 0 || place == p)
+                for (uint64_t v : refused[p]) s += v;
+        return s;
+    }
+};
+class LayoutSummary {
+public:
+    int step(uint64_t nowMs, const SnapCounters& c, const SnapTable& t, uint64_t* seconds, LayoutWindow* win) {
+        if (!m_started) {
+            m_started = true;
+            m_since = nowMs;
+            take(c, t);
+            return 0;
+        }
+        if (nowMs - m_since < kLayoutSummaryMs) return 0;
+        *seconds = (nowMs - m_since) / 1000;
+        m_since = nowMs;
+        for (int p = 0; p < kPlaces; ++p) {
+            win->snaps[p] = c.snaps[p].load(std::memory_order_relaxed) - m_base.snaps[p];
+            win->lines[p] = c.lines[p].load(std::memory_order_relaxed) - m_base.lines[p];
+            for (int r = 0; r < kRefusals; ++r) win->refused[p][r] = c.refused[p][r].load(std::memory_order_relaxed) - m_base.refused[p][r];
+        }
+        win->tableFull = t.full() - m_full;
+        take(c, t);
+        return 1;
+    }
+
+private:
+    void take(const SnapCounters& c, const SnapTable& t) {
+        for (int p = 0; p < kPlaces; ++p) {
+            m_base.snaps[p] = c.snaps[p].load(std::memory_order_relaxed);
+            m_base.lines[p] = c.lines[p].load(std::memory_order_relaxed);
+            for (int r = 0; r < kRefusals; ++r) m_base.refused[p][r] = c.refused[p][r].load(std::memory_order_relaxed);
+        }
+        m_full = t.full();
+    }
+    bool m_started = false;
+    uint64_t m_since = 0, m_full = 0;
+    LayoutWindow m_base;
+};
+// The head of the 30-second summary. With no snapshot and no refusal it is the whole summary (one line, with the shader code kept so far).
+inline int formatLayoutSummaryHead(uint64_t seconds, const LayoutWindow& w, uint64_t codeBytes, char* out, size_t cap) {
+    const unsigned long long refused = w.totalRefused();
+    if (!w.total() && !refused)
+        return std::snprintf(out, cap,
+                             "on-foot hud probe: %llu s layout snapshots: no snapshot, and no refusal (no draw of the HUD node on EDVR's context asked for one in these "
+                             "seconds); vertex shader code kept: %llu bytes",
+                             static_cast<unsigned long long>(seconds), static_cast<unsigned long long>(codeBytes));
+    if (!w.total())
+        return std::snprintf(out, cap, "on-foot hud probe: %llu s layout snapshots: no snapshot; %llu refused (by reason below)", static_cast<unsigned long long>(seconds),
+                             refused);
+    return std::snprintf(out, cap, "on-foot hud probe: %llu s layout snapshots: %llu snapshot(s), %llu of them with a line; %llu refused; %llu draw(s) in forms that did not fit",
+                         static_cast<unsigned long long>(seconds), static_cast<unsigned long long>(w.total()), static_cast<unsigned long long>(w.totalLines()), refused,
+                         static_cast<unsigned long long>(w.tableFull));
+}
+inline int formatLayoutSummaryPlace(int place, const LayoutWindow& w, char* out, size_t cap) {
+    return std::snprintf(out, cap, "on-foot hud probe:   %s: %llu snapshot(s), %llu with a line, %llu refused", placeName(place),
+                         static_cast<unsigned long long>(w.snaps[place]), static_cast<unsigned long long>(w.lines[place]),
+                         static_cast<unsigned long long>(w.totalRefused(place)));
+}
+inline int formatLayoutSummaryRefusals(const LayoutWindow& w, char* out, size_t cap) {
+    int len = layoutAppend(out, cap, 0, "on-foot hud probe:   refused by reason:");
+    bool any = false;
+    for (int r = 0; r < kRefusals; ++r) {
+        uint64_t n = 0;
+        for (int p = 0; p < kPlaces; ++p) n += w.refused[p][r];
+        if (!n) continue;
+        len = layoutAppend(out, cap, len, "%s %s %llu", any ? "," : "", refusalShort(r), static_cast<unsigned long long>(n));
+        any = true;
+    }
+    if (!any) len = layoutAppend(out, cap, len, " none");
+    return len;
+}
+inline int formatLayoutSummaryFiles(const LayoutFiles& f, uint64_t codeBytes, uint64_t codeShaders, char* out, size_t cap) {
+    return std::snprintf(out, cap,
+                         "on-foot hud probe:   files since the launch: csv written %llu, over the limit of %d %llu, failed %llu; bmp written %llu, over the limit %llu, "
+                         "failed %llu, no image %llu; vertex shader code kept: %llu shader(s), %llu bytes of %llu",
+                         static_cast<unsigned long long>(f.csvWritten), kLayoutFiles, static_cast<unsigned long long>(f.csvOver), static_cast<unsigned long long>(f.csvFailed),
+                         static_cast<unsigned long long>(f.bmpWritten), static_cast<unsigned long long>(f.bmpOver), static_cast<unsigned long long>(f.bmpFailed),
+                         static_cast<unsigned long long>(f.bmpNone), static_cast<unsigned long long>(codeShaders), static_cast<unsigned long long>(codeBytes),
+                         static_cast<unsigned long long>(kCodeLimitBytes));
+}
+inline int formatCodeLimit(uint64_t bytes, char* out, size_t cap) {
+    return std::snprintf(out, cap,
+                         "on-foot hud probe: vertex shader code for layout snapshots reached the limit of %llu bytes (%llu kept): later shaders are not kept (said once)",
+                         static_cast<unsigned long long>(kCodeLimitBytes), static_cast<unsigned long long>(bytes));
+}
 
 }  // namespace ohp
 }  // namespace edvr

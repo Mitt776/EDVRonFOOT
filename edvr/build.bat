@@ -535,6 +535,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\native_vr_probe.cpp" ^
     "src\d3d11\on_foot_hud.cpp" ^
     "src\d3d11\on_foot_hud_probe.cpp" ^
+    "src\d3d11\on_foot_hud_layout.cpp" ^
     "src\d3d11\on_foot_markers.cpp" ^
     "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" "src\d3d11\vscreen_footprint.cpp" ^
     "src\d3d11\binding_shadow.cpp" ^
@@ -3083,6 +3084,14 @@ REM part, moved with a line when it learns another, taken off with a line when t
 REM when it is back), set again when on foot changes, taken off with the key, the number's by the fuse alone. The D3D11 reading of a draw
 REM (onFootHudProbeNoteDraw in vscreen.cpp) needs the binding shadow and the shader registry and is not linked here; the class and shape
 REM calls it makes into the probe are, exercised directly by Part B21.
+REM .22: the layout snapshot of the HUD node's draws (the replay itself, on_foot_hud_layout.cpp, needs a device and is not linked here): the output
+REM signature of a fake DXBC read into the stream-output declaration (position and the first TEXCOORD of two components or more; none: position
+REM only; no whole position refused), the layout of fake vertices (a flat rectangle: frame, visible part of the panel, 3x3 grid, bend 0; a bowed
+REM strip: bend above 0; w <= 0 dropped and counted), the 5-second claim of a form (2 s no, 6 s yes, 256 forms and the 257th counted), a line only
+REM for a new layout or a shift of 0.02 of the screen, the order of a replay on a stand-in context (the state after is the state before; a geometry
+REM shader standing or a foreign context refused untouched), the read without waiting (still drawing later, 30 frames a timeout, the ring of four),
+REM the CSV rows, file names and 32-bit BMP, every line's text; and the real glue: a result gives one line and a CSV and a BMP in a temporary
+REM folder, 48 files of each kind and the 49th not written but counted, the 30-second summary by place and reason or "no snapshot".
 if not exist "%OBJ%\onfoothudprobe" mkdir "%OBJ%\onfoothudprobe"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^
