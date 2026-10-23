@@ -6,7 +6,7 @@ EliteDangerous64.exe, SHA-256 `e6be8bbe04e6a7ae226d4318945af7f367de13dc5a007a261
 
 ## Status
 
-*Обновлено 2026-10-23, сборка `.20` (`native-vr-on-foot-hud-gates`): прогулка `.20` — исход Q8, сеток `_HUD` в стерео нет.*
+*Обновлено 2026-10-23, сборка `.21` (`native-vr-on-foot-hud-part`): зонд HUD-части и текстур листов готов, следующий шаг — прогулка `.21`.*
 
 **Состояние: нативный VR на ногах РАБОТАЕТ.** С ключом `native_vr_on_foot` EDVR ставит байт `0x5E82B3E` = 0, и игра
 сама держит шлемовое стерео на ногах. Голова, глаза, устройства, персонажи, инвентарь, гаджеты, оружие и прицел (зажатием) работают;
@@ -32,14 +32,11 @@ HUD — частично, см. ниже. Подробности: «Экспер
 - ruled out: «держать `+0x9D4` в `0x2866C90`», потому что запрос остаётся 5 и `0x2890B30` пересобирал бы
   конвейер каждый кадр.
 - ruled out: «подмены на время пересборки хватит», потому что полёт Б показал сплюснутые глаза.
-- ruled out: «сплюснутость — от правок EDVR (H2)», потому что с удержанием источника пропорции нормальные при тех же
-  правках и том же размере цели `3408x1917`.
+- ruled out: «сплюснутость — от правок EDVR (H2)», потому что с удержанием источника пропорции нормальные (те же правки).
 - ruled out: «игра ставит кинотеатр один раз при выходе», потому что 5 пишется в источник каждый кадр.
-- ruled out: «камеру на ногах выбирает `0x2DFC7A0` при смене режима», потому что за сеанс она не вызывалась.
-- ruled out: «на ногах голова уже отслеживается (полёт Б)», потому что Дима уточнил: и в полёте Б картинка была
-  приклеена к лицу. Слежения на ногах не было ни в одном полёте.
+- ruled out: «`0x2DFC7A0` выбирает камеру на ногах», потому что это сброс камеры в Camera Suite, за сеанс не вызывался.
+- ruled out: «на ногах голова уже отслеживается (полёт Б)», потому что, по словам Димы, и там картинка была у лица.
 - ruled out: «поза головы включается флагом `TrackHMDActive`», потому что это параметр шейдера, 1.0 при режимах 3..6.
-- ruled out: «`0x2DFC7A0` — выбор камеры на ногах», потому что это сброс камеры в Camera Suite.
 - ruled out: «глаза просто перепутаны», потому что с `native_vr_swap_eyes` глаза не сводятся так же (полёт разведки).
 - ruled out: «писатель 5 не найден», потому что это сеттер `0x28723C0`, его зовёт `0x2887B3E` по условию выше.
 
@@ -61,7 +58,8 @@ HUD — частично, см. ниже. Подробности: «Экспер
 **`.18`:** `stereo` без ключа, точки по узору — прогулка подтвердила. **`.19`** («Прогулка `.19`», «Статика: поставщик
 `_HUD`»): `_HUD` даёт поставщик B (`+0x5A72D58`), в стерео подписан, но без `0x8` (P2) — его ворота элементов
 (`0x4C82940`). **`.20`** («Прогулка `.20`»): запись и привязка B те же, ворота ни при чём — в стерео HUD-часть не даёт сеток с
-проходом `_HUD` (Q8). **Дальше:** различить «сеток нет» и «новые материалы без прохода `_HUD`».
+проходом `_HUD` (Q8). **`.21`** («Зонд `.21`»): HUD-часть кинотеатра в стерео целиком (R1–R5), текстуры листов узла
+(T1–T3), сторожа «кто наполняет часть». **Дальше: прогулка `.21`.**
 
 **Обновление игры 2026-10-20:** `2026.10.13.334473`. Байт кинотеатра теперь `0x5E85B8A`, он ищется по узору (`.8`).
 Дверца Oculus перенесена (`.9`). Полёт `.9` подтвердил оба. Отказавшиеся на 334473 части EDVR — в разделе «Полёт `.9`».
@@ -1561,3 +1559,84 @@ bnd:   +0x10 камера, +0x18 набор листов S (= *(node+0x108)), +0
 нет прохода `_HUD` для вида 3 (G6). Зонд узнаёт путь `_HUD` только по материалу, хоть раз давшему `0x8`, поэтому такие
 сетки он не отличит от прочих. Различить это и «сеток нет» можно, только читая саму HUD-часть кинотеатра
 (`0x1B9E0E36A30`) в стерео.
+
+## Зонд `.21`: HUD-часть и текстуры листов узла HUD (2026-10-23, заявка `native-vr-on-foot-hud-part`)
+
+Ключ тот же, `on_foot_hud_probe`. Обход `.20` с его переписью и сводками остался; сторож ворот снят (Q8), слоты 2 и
+3 — у сторожей HUD-части. Новый перехват — `0x592090` (начало `41 56 41 57 48 83 EC 38 …`, без относительных
+адресов), новый вызов в пути рисований EDVR (`beginPanelOverride`, до ветки чужого контекста).
+
+**Как узел рисует листы** (`0x58F0F0`, билд 334473):
+
+```
+ctx = *(S+0x60), S = *(node+0x108);  для каждого листа L узла (L = *(S+0x70)[i]):
+    0x592090(ctx, L, 0)    -- если L+0x30 & ctx+0x270: константы листа (отображение буфера), камера
+    0x594EF0(ctx, L)
+    если L+0x30 & ctx+0x270:  (ctx+0x188)->vt[0x38](L)       -- рисование листа
+L+0x30 = 1 << i, i = 0..3 — листы 36–39
+```
+
+Перехват узла открывает «окно» (поток, вид, место) на время рисования узла HUD; перехват `0x592090` ставит в окне
+текущий лист. Каждое рисование D3D11 на потоке окна — «форма»: лист, шейдеры, цель, текстуры PS 0–7 (размер,
+формат, «цель рисования» или нет), свой или чужой контекст. Вне окна считаются только рисования шейдерами сеток HUD
+`B10B032B…`/`C4B4B334…` (свой контекст).
+
+**HUD-часть.** В кинотеатре кадровый поток берёт часть с наибольшим числом открытых путей `_HUD` и запоминает её
+группу, элемент и часть (адреса и места в массивах). Дальше каждый обход в любом месте читает её целиком: сетки,
+записи проходов, по каждому материалу — виды 0–15 с проходом, с `on=1` и с листом `_HUD`. Итог: пуста / нет `_HUD` /
+`_HUD` только для другого вида / `_HUD` для вида набора. Плюс все разные материалы записи (до 1024) по всем видам —
+счёт по элементам: это закрывает слепое пятно `.20` и там, где HUD-часть другая. Сторожа: слот 2 — адрес массива
+сеток части (`+0x10`), слот 3 — их число (`+0x08`).
+
+Строки в логе (`on-foot hud probe:`):
+- `hooked list prep at EliteDangerous64.exe+0x592090 …` / `NOT installed: the list prep … does not begin with build
+  334473's 16 bytes …` — новая точка;
+- `HUD part learned in cinema: part 0x… (part #k of item 0x…, item #j of group 0x…, group #i) … with N open _HUD
+  path(s); generation G` и `HUD part changed in cinema: … -> …` — часть узнана или сменилась;
+- `HUD part read: view bit N, <место>, set view V, slot S: part 0x… is in the record at group #i item #j part #k
+  (learned at …); its flag …, slots with a flag 0x…; counts of the collectors' lists 0-6 …; M mesh(es) in the array
+  0x…; … pass entr(ies) …; the _HUD list in views 0x…, … open _HUD path(s) in this walk: <итог>`. Итоги: `the part is
+  empty …` (R1), `no _HUD pass …` (R3), `_HUD pass only for another view (views 0x…, the set's view is V)` (R2),
+  `_HUD pass for the set's view` (как в кинотеатре). Под ней `  part mesh #i at 0x…: resource …, … section(s), …
+  instance(s) (… their OR 0x…), mesh mask 0x…` и `    entry #e: number …, material 0x…: pass in views 0x…, on in
+  0x…, the _HUD list in 0x…; lists of the set's view 0x…, of all views 0x…` (маски видов — бит v = вид v);
+- `HUD part not read: … : the part is not in the record | the walk was cut short before the part | no record … | the
+  part could not be read[; at those places now: group #i 0x…, item #j 0x…, part #k 0x… …]` — R4;
+- `record elements: view bit N, <место>, …: … distinct material(s): … checked for views 0-15, … not checked …; the
+  _HUD list for the set's view in a, only for another view in b`, под ней до 16 строк `  element #j of group #i at
+  0x…, its flag …: … part(s), … mesh(es); materials with the _HUD list for the set's view …, only for another view …[
+  (holds the HUD part)]` и до 8 строк `  the _HUD list only for another view: material 0x… (first met in item 0x…, part
+  0x…), views 0x…`;
+- `HUD node draw shapes: view bit N, <место>: K shape(s), … draw(s) in them` и `draw shapes outside the HUD node
+  (vertex shader B10B032B or C4B4B334, EDVR's own context), <место>: …`, под ними до 16 строк `  <list 36|37|38|list 39
+  (_HUD)|list not known|outside the node>: own|foreign context, <вид рисования> with count … (the first: instances …,
+  ia=…, #… in the list), vs … ps …, target 0: 0x… WxH fmt F mips M[, a render target], pixel shader textures: tI 0x…
+  WxH fmt F mips M[, a render target]; …; N draw(s)` — ответ T1/T2: размер текстуры и «a render target»;
+- раз в 30 с: `… s HUD part 0x… (generation G): … read(s) …` (или `not learned yet …`, или `no reads …`), по строке на
+  место (`… empty, … without a _HUD pass, … _HUD only for another view, … _HUD for the set's view; … not in the
+  record …`); `… s HUD node draws: the HUD node was drawn … time(s), … draw(s) in it on its thread …` (или `… no draw
+  of it reached EDVR's draw path on its thread …` — T3, или `… was not drawn in these seconds …`), по листам и месту
+  (`list 39 (_HUD) own/foreign`), и всегда — `outside the node, draws with the HUD meshes' vertex shaders … in the ship
+  …, on foot in stereo …, on foot in cinema …`;
+- сторожа: `watch on: hud part meshes | hud part mesh count 0x… …`, `writer #N of the hud part meshes|mesh count of
+  0x… (the part): at EliteDangerous64.exe+0x… (after the write), value 0x… (fills it) | (clears it), <место>, thread
+  …, from …`, `30 s watch …` по месту, `watch moves: … (the cinema walk learned another HUD part)`, `watch off: … (the
+  HUD part has been out of the record for 2 s | the key is off | over 100000 hits in 30 s …)`.
+
+Строки сторожа ворот `.20` (`hud gate …`, `no _HUD path has been open in cinema …`) ушли; обход ворот и его переписи
+остались.
+
+**Как читать — исходы:**
+
+| Исход | Признак | Дальше |
+|---|---|---|
+| R1 — часть в стерео пуста | часть в записи, 0 сеток или 0 записей | писатель из строки сторожа в кинотеатре; статика: почему в стерео не зовётся |
+| R2 — `_HUD` только для другого вида | у материалов части `0x8` для вида ≠ вида набора | кто строит проходы материала по видам (`mat+0xB8`) |
+| R3 — сетки без прохода `_HUD` | сетки есть, ни у одного материала `0x8` ни для какого вида | куда идут эти сетки (листы их проходов) |
+| R4 — части нет в записи | «части нет в записи», на её месте другой адрес | перепись элементов: где теперь HUD |
+| R5 — зонд читает не то | в кинотеатре итог части не «`_HUD` для вида набора» | исправить разбор, ещё круг |
+| T1 — лист `_HUD` = скрытые панели | текстура рисований листа 39 в кинотеатре — цель рисования размера панели (2008x1206, 2304x1984, 1800x1600) | панели в стерео есть: чинить сетки или класть панели самим по месту сеток |
+| T2 — у листа `_HUD` свои текстуры | текстуры листа 39 — не цели рисования или не размера панелей | HUD — своя геометрия; панели — у листов 37/38 |
+| T3 — рисования не в узле | 0 рисований в окне; формы `B10B032B`/`C4B4B334` вне узла | текстуры из форм «вне узла»; привязка к листу — статикой `vt[0x38]` |
+
+Прогулка — как `.20`: кинотеатр, затем два выхода в стерео.

@@ -57,6 +57,8 @@
 #include "scheduler_stack_probe.h"  // schedulerStackProbeShutdown
 #include "ui_depth.h"
 #include "on_foot_hud.h"  // EDVRonFOOT: the on-foot HUD's panel census
+#include "on_foot_hud_probe.h"  // EDVRonFOOT: onFootHudProbeWantsDraws / NoteDraw, the HUD probe's draw window
+#include "on_foot_hud_probe_core.h"  // EDVRonFOOT: ohp::DrawShape, for NoteDraw below
 #include "ui_layer.h"
 #include "ui_layer_math.h"
 #include "vr_world_route.h"  // VrWorldInternalScope: the world route's own D3D calls step past these hooks
@@ -1894,6 +1896,9 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     }
 
     s->glareClamp = 0;
+    // EDVRonFOOT: the on-foot HUD probe's draws (on_foot_hud_probe.h): the HUD node's own and foreign alike, so above the branch below. One
+    // relaxed load while the probe is off.
+    if (onFootHudProbeWantsDraws()) onFootHudProbeNoteDraw(self, kind, count, instances, args, !foreignContext(self));
     if (foreignContext(self)) {
         noteForeignDraw(self);
         // Round seventeen: recorded before the decline, every token read
@@ -5011,6 +5016,87 @@ uint32_t readDistanceIndex(Config& cfg) {
 }
 
 }  // namespace
+
+// EDVRonFOOT: the on-foot HUD probe's draws (on_foot_hud_probe.h). Called from beginPanelOverride, above its foreign-context branch,
+// only while the probe wants draws. The decision (which draw, which list) and the table are the probe's; this is the D3D11 reading of the
+// draw with the context's own getters -- the same for EDVR's context and a foreign one. It lives here because it needs the binding shadow
+// and the shader registry, which the probe's test rig does not link. The hashes: the shadow's for EDVR's own context (set with the
+// shader), the registry's for the shader object a foreign context reports; a shadow that holds nothing (a slot never set) falls back to
+// the getter, as the draw path's other readers do.
+void onFootHudProbeNoteDraw(ID3D11DeviceContext* ctx, char kind, unsigned count, unsigned instances, const DrawArgs& args, bool own) {
+    static FaultBudget drawBudget("onFootHudProbe.draw", 5);
+    if (!ctx) return;
+    // Not zeroed up front: most draws on most frames are not the probe's, and the class (a thread-id compare, a hash compare) says so.
+    ohp::DrawShape s;
+    const uint64_t ownVs = own ? bindingShaderHash(BindSlot::Vs) : 0;
+    if (!onFootHudProbeDrawClass(ownVs, &s)) return;
+    s.rt = ohp::ShapeTexture{};
+    for (ohp::ShapeTexture& t : s.tex) t = ohp::ShapeTexture{};
+    s.kind = static_cast<uint8_t>(kind);
+    s.own = own ? 1 : 0;
+    s.count = count;
+    s.instances = instances;
+    s.start = args.start;
+    s.base = args.base;
+    s.startInstance = args.startInstance;
+    s.vs = ownVs;
+    s.ps = own ? bindingShaderHash(BindSlot::Ps) : 0;
+    // A resource as the draw's texture: its address is the identity, then its size, format, mips and whether it can be drawn into. The
+    // reference GetResource took is dropped by the caller.
+    const auto describe = [](ID3D11Resource* res, ohp::ShapeTexture* out) {
+        if (!res) return;
+        out->resource = reinterpret_cast<uint64_t>(res);
+        ID3D11Texture2D* tex = nullptr;
+        if (SUCCEEDED(res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex))) && tex) {
+            D3D11_TEXTURE2D_DESC d{};
+            tex->GetDesc(&d);
+            out->width = d.Width;
+            out->height = d.Height;
+            out->format = static_cast<uint32_t>(d.Format);
+            out->mips = d.MipLevels;
+            out->target = (d.BindFlags & D3D11_BIND_RENDER_TARGET) != 0 ? 1 : 0;
+            tex->Release();
+        }
+    };
+    guardedBudget(drawBudget, [&] {
+        if (!s.vs) {
+            ID3D11VertexShader* vs = nullptr;
+            ctx->VSGetShader(&vs, nullptr, nullptr);
+            if (vs) {
+                s.vs = lookupShaderHash(vs);
+                vs->Release();
+            }
+        }
+        if (!s.ps) {
+            ID3D11PixelShader* ps = nullptr;
+            ctx->PSGetShader(&ps, nullptr, nullptr);
+            if (ps) {
+                s.ps = lookupShaderHash(ps);
+                ps->Release();
+            }
+        }
+        ID3D11RenderTargetView* rtv = nullptr;
+        ctx->OMGetRenderTargets(1, &rtv, nullptr);
+        if (rtv) {
+            ID3D11Resource* res = nullptr;
+            rtv->GetResource(&res);
+            describe(res, &s.rt);
+            if (res) res->Release();
+            rtv->Release();
+        }
+        ID3D11ShaderResourceView* srv[ohp::kShapeTextures] = {};
+        ctx->PSGetShaderResources(0, ohp::kShapeTextures, srv);
+        for (int i = 0; i < ohp::kShapeTextures; ++i) {
+            if (!srv[i]) continue;
+            ID3D11Resource* res = nullptr;
+            srv[i]->GetResource(&res);
+            describe(res, &s.tex[i]);
+            if (res) res->Release();
+            srv[i]->Release();
+        }
+    });
+    onFootHudProbeNoteShape(s);
+}
 
 bool vScreenPanelSize(uint32_t* width, uint32_t* height) {
     const State* s = g_state;

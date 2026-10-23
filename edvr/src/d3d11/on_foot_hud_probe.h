@@ -27,7 +27,7 @@
 //   - The graph add and remove hooks (+0x6BFC60, +0x6BFE60), after the original, put a PostGUI node's event with the game's callers in
 //     a ring; the frame thread writes a line per event.
 //   - Hardware write watches on the HUD node's flag (debug slot 2) and its graph's flag +0x14 (slot 3) found the one writer (H1);
-//     .16 gave both slots to new targets, .19 slot 2 to the provider subscription, .20 slot 2 to a gate and left slot 3 free (below).
+//     .16 gave both slots to new targets, .19 slot 2 to the provider subscription, .20 slot 2 to a gate, .21 slots 2 and 3 to the HUD part (below).
 // Each point checks its own 16 bytes: wrong bytes refuse that one hook with one line and leave the others.
 //
 // .15 (flight .14: the lists 36-39 node is drawn on foot in stereo, but only the crosshair and the prompts, sliding off their objects
@@ -55,7 +55,7 @@
 //     and did not, or that there were none (the node not drawn -- not the providers silent), and per provider that was ever subscribed
 //     or answered its three counts by place and its last subscription and answer.
 //   - (.19's hardware write watch on the first _HUD provider's subscription answered its question -- flight .19, outcome P2: the
-//     subscription is on every camera -- and is gone; its slot is .20's gate watch below.)
+//     subscription is on every camera -- and is gone; its slot became .20's gate watch, then .21's part watch, below.)
 //
 // .20 (flight .19: the _HUD provider B answers 0x8 in cinema and not in stereo on foot, subscribed either way; its answer is its record's
 // for the node's camera and set, made of the gates of its meshes' passes): two things on the _HUD provider only.
@@ -70,14 +70,39 @@
 //   - The frame thread writes a view's census (head, first closed gates counted, up to 16 _HUD paths) when its picture changed or the
 //     place did, at most every 5 s per view; every 30 s the walks by place and each view's last matched census; the first walk that did
 //     not match and the seven collectors' addresses, once. It remembers each _HUD path's last cinema state.
-//   - One hardware write watch, debug slot 2, on the word of the first closed gate of the first _HUD path that was open in cinema and
-//     is closed in a matched stereo walk (1, 4 or 8 bytes by the gate, every thread; the target and its name `hud gate <gate>` come
-//     from the table in on_foot_hud_probe_core.h). Each distinct writing instruction gives one line: the value, whether it opens the
-//     gate, where the commander was, the callers. Every 30 s the watch gives its writes per site and place or that it stood quiet. It is
-//     re-armed when the journal's on-foot changes (threads started since), comes off with a line when its path stays out of its view's
-//     walks for 2 s while the node is drawn, comes off with the key, and for good after 100 000 hits in 30 s. Slot 3 is not used.
+//   - (.20's hardware write watch on the word of a gate never stood: flight .20 answered Q8, the gates are not the cause. It is gone; its
+//     slot is .21's below.)
+//
+// .21 (flight .20, Q8: in cinema the main HUD is two meshes of one part of the _HUD provider's record, in stereo no mesh gives _HUD -- is
+// the part empty there, or are its materials without a _HUD pass for the view? and what are the textures of list 39?): three things.
+//   - The cinema walk learns the HUD part (the part with the most open _HUD paths: its group, item and part, their places in the arrays).
+//     Every walk after it, in any place, reads that part whole -- whether it is in the record (if not, what stands at its places), its
+//     flags, its meshes, their pass entries and, for each entry's material, the pass of every view 0-15 -- and says the part is empty,
+//     has no _HUD pass, has it only for another view, or has it for the set's view. The same walk checks every distinct material of the
+//     record (at most 1024) for every view and counts, per item (the record's "element"), those with the _HUD list for the set's view
+//     and those with it only for another view. The frame thread writes the part's read and the elements when their picture changes (no
+//     address of a mesh or a material is in it), at most every 5 s per view, and every 30 s the reads by verdict and place -- or that no
+//     part was learned yet.
+//   - A sixth hook, on the game's list prep (EliteDangerous64.exe+0x592090, BEFORE the original, which it calls unchanged with
+//     its three registers): the node draw hook opens a window for its thread while the HUD node (lists 36-39) is drawn, the prep hook
+//     sets the window's list from the list's bit. EDVR's draw path (vscreen.cpp, above the foreign-context branch) calls
+//     onFootHudProbeNoteDraw for every draw while onFootHudProbeWantsDraws() (one relaxed load): a draw in the window is kept by its
+//     shape -- list, view, place, own or foreign context, kind and count, vertex and pixel shader hashes, target 0, the textures of the
+//     pixel shader slots 0-7 with size, format, mips and whether they can be drawn into -- and a draw outside the window with one of the
+//     HUD meshes' vertex shaders (B10B032B, C4B4B334; own context only) is kept as "outside the node". Up to 256 shapes; the census by
+//     view and place is written when it changes (at most every 5 s), the 30-second line counts the draws by place, list and context, or
+//     says the node was not drawn / drew nothing on its thread.
+//   - Two hardware write watches, set as soon as the part is learned: debug slot 2 on the part's array of meshes (part+0x10), slot 3 on
+//     their number (part+0x8), 8 bytes each, every thread. One line per distinct writing instruction (the value, whether it was not 0, the
+//     place, the callers), the writes by place in the 30-second line (0 when quiet), moved with a line when the cinema walk learns another
+//     part, off with a line when the part is out of the record for 2 s while the node is drawn, re-armed when the journal's on-foot
+//     changes, off with the key and for good (each) after 100 000 hits in 30 s. They replace .20's gate watch, which never stood: the
+//     gates are not the cause. The gate walk, its census and summaries stay.
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+
+struct ID3D11DeviceContext;
 
 namespace edvr {
 
@@ -95,34 +120,29 @@ bool onFootHudProbeInstall(uintptr_t base, uintptr_t targetOverride, bool checkI
 // Hook one of the other points (ohp::kPointWalk, kPointAdd, kPointRemove, kPointPass) at base + its RVA, or at `targetOverride`. No identity check:
 // the frame boundary calls it only once onFootHudProbeInstall passed it. One line either way; true once hooked. Frame thread.
 bool onFootHudProbeInstallPoint(int point, uintptr_t base, uintptr_t targetOverride, OnFootHudProbeSink sink, void* ctx);
-// The write watch (watch: ohp::kWatchGate on debug slot 2), exposed for the rig. What it watches: the gate (ohp::Gate: its name), the
-// word (`address`, aligned to `length`: 1, 4 or 8 bytes) of the structure `object`, whether the written value is a mask (it opens the
-// gate when it meets `other`) or a flag (when it is not 0), and `note` (or null) at the end of the line.
-struct OnFootHudProbeGateWatch {
-    int gate;
+// The two write watches (ohp::kWatchMeshes on debug slot 2, ohp::kWatchMeshCount on slot 3), exposed for the rig. What one watches: the
+// word (`address`, 8 bytes, aligned to its length: 1, 4 or 8 are accepted) of the structure `object` (the HUD part), and `note` (or
+// null) at the end of the line.
+struct OnFootHudProbeWatch {
     uintptr_t address;
     unsigned length;
-    bool mask;
-    uint64_t other;
     uint64_t object;
     const char* note;
 };
 // Arm puts the slot on every thread of the process that does not hold it already and says one line; returns the threads armed. Drain
 // writes the new writers' lines; Disarm takes the slot off them, drains and says why with the totals. Frame thread. SetPlace: where the
 // commander is (ohp::Place) for the writes and the provider snapshots that come next; the camera drain sets it every frame. Any thread.
-int onFootHudProbeWatchArm(int watch, const OnFootHudProbeGateWatch& target, OnFootHudProbeSink sink, void* ctx);
+int onFootHudProbeWatchArm(int watch, const OnFootHudProbeWatch& target, OnFootHudProbeSink sink, void* ctx);
 bool onFootHudProbeWatchOn(int watch);
 uintptr_t onFootHudProbeWatchAddress(int watch);
 void onFootHudProbeWatchDrain(int watch, OnFootHudProbeSink sink, void* ctx);
 void onFootHudProbeWatchDisarm(int watch, const char* why, OnFootHudProbeSink sink, void* ctx);
 void onFootHudProbeStopWatches(const char* why, OnFootHudProbeSink sink, void* ctx);
 void onFootHudProbeSetPlace(int place);
-// The mask a written mask is met against (the gate watch's `other`): the frame thread sets it when it arms the watch and each time a
-// walk gives the path again. Any thread.
-void onFootHudProbeSetGateOther(uint64_t other);
 // How often a view's _HUD provider record is walked, in ms (kWalkEveryMs, 1000); the rig sets 0 to walk at every draw. Any thread.
 void onFootHudProbeSetWalkInterval(uint64_t ms);
-// While false the hook only forwards. Any thread.
+// While false the hook only forwards. Any thread. The draw path's flag (onFootHudProbeWantsDraws) is up only while this is true and the
+// node draw is hooked.
 void onFootHudProbeSetRecording(bool on);
 // Calls of PostGUI nodes the hook saw while recording, and snapshots dropped because a field could not be read.
 uint64_t onFootHudProbeCalls();
@@ -133,10 +153,34 @@ uint64_t onFootHudProbeFaults();
 void onFootHudProbeDrain(uint64_t nowMs, int onFoot, OnFootHudProbeSink sink, void* ctx);
 // .15, after onFootHudProbeDrain (which notes each HUD node's frame mask and draw context by its camera): the passes the switch hook
 // noted -- a new one's line, a retired one, the pose lines when due, the follow lines and the switch's line every 30 s; then .19's
-// providers (the place, the HUD nodes' lists from the ring, the 30-second summary) and .20's gates and watch (the _HUD provider's
-// walks from the ring: each view's census, the 30-second walks, the watch's target in the latest stereo walk, the writers, the watch's
-// 30-second line, the fuse). `stereo` is
+// providers (the place, the HUD nodes' lists from the ring, the 30-second summary), .20's gates (the _HUD provider's walks from the ring:
+// each view's census, the 30-second walks) and .21's HUD part (learning it, its read and the elements when their picture changes, the
+// 30-second reads, the watches: their targets, writers, 30-second lines and the fuse) and draw shapes (the census by view and place, the
+// 30-second draws). `stereo` is
 // experimental.native_vr_on_foot (1, 0); `head12` the head pose in headPose's layout, or null. Frame thread.
 void onFootHudProbeCameraDrain(uint64_t nowMs, int onFoot, int stereo, const float* head12, OnFootHudProbeSink sink, void* ctx);
+
+// ---- .21: the draws of the HUD node ------------------------------------------------------------------------------------------------
+// The draw path's one load: up while the key is on and the node draw is hooked (onFootHudProbeSetRecording).
+namespace detail {
+extern std::atomic<bool> g_onFootHudProbeWantsDraws;
+}
+inline bool onFootHudProbeWantsDraws() { return detail::g_onFootHudProbeWantsDraws.load(std::memory_order_relaxed); }
+
+namespace ohp {
+struct DrawShape;
+}
+// What a draw is to the probe: 0 not its business, 1 inside the HUD node's draw window of the calling thread, 2 outside it with one of the
+// HUD meshes' vertex shaders. `ownVsHash`: the vertex shader's content hash when the draw is on EDVR's own context (the shadow's), else 0.
+// For 1 and 2 the list, view bit, place and the draw's order in the list are filled in `shape` (the rest is the caller's).
+// Any thread; the draw path's.
+int onFootHudProbeDrawClass(uint64_t ownVsHash, ohp::DrawShape* shape);
+// A shape the caller filled: counted by place, list and context, and kept in the table (or counted when the table is full). Any thread.
+void onFootHudProbeNoteShape(const ohp::DrawShape& shape);
+
+struct DrawArgs;
+// vscreen.cpp's beginPanelOverride, above its foreign-context branch, while onFootHudProbeWantsDraws(): `own` is EDVR's own context.
+// Reads the context's state with its getters (vscreen.cpp) and calls onFootHudProbeNoteShape.
+void onFootHudProbeNoteDraw(ID3D11DeviceContext* ctx, char kind, unsigned count, unsigned instances, const DrawArgs& args, bool own);
 
 }  // namespace edvr

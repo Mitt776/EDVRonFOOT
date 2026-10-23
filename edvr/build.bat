@@ -3067,11 +3067,22 @@ REM every path and names the first closed one (each of the seven closed alone, f
 REM the remembered pass shown), recomputes the lists and checks them against the record's answer and the provider's (the collectors'
 REM rest named, a bit the paths give and the record has not, an answer that differs, no record, an unreadable element, the budgets,
 REM the 65th _HUD path only counted, a slot or view not believed), the census, the 30-second walks by place and the collectors' table
-REM through the real glue (one walk a second, a changed census after 5 s); the one write watch on the word of the first closed gate of
-REM a path open in cinema and closed in stereo (slot 2; 1, 4 or 8 bytes; the mesh's mask that changed, else the binding's): sites by
-REM place with whether a write opens the gate, armed for real on the rig's threads, armed by the camera drain in the first stereo
-REM walk, moved to the next closed path or taken off with a line when its path leaves the walks for 2 s, taken off with the key and by
-REM the fuse.
+REM through the real glue (one walk a second, a changed census after 5 s). .21: the HUD part (the part of the record with the most open
+REM _HUD paths, learned in cinema) read whole on that fake record in every place: in the record or not (what stands at its place named,
+REM the old address not read), its flags, meshes, pass entries and the passes of all 16 views of their materials; the verdict (a _HUD
+REM pass for the set's view, only for another view with the view named, none, empty with no mesh or no entry, the walk cut short, no
+REM record, unreadable, none learned); the picture the same for meshes rebuilt at new addresses; every distinct material of the record
+REM checked for every view and counted per item (1025 distinct: 1024 checked, one counted; one with _HUD only for another view named);
+REM the draw shapes of the HUD node (a window for the node's thread, the list from the list prep hook that is hooked on its own
+REM synthetic function with the right bytes and refused with one line on wrong ones, the shapes kept by list, context, shaders, target
+REM and textures with their size, the draws outside the node with the HUD meshes' vertex shaders, 256 shapes and the 257th counted,
+REM a draw from another thread or after the window not kept, the flag of the draw path up only while hooked and recording) and their
+REM census and 30-second lines; the two write watches on the part's array of meshes (slot 2) and their number (slot 3), 8 bytes each:
+REM sites by place with whether the value was not 0, armed for real on the rig's threads, set at once when the cinema walk learns the
+REM part, moved with a line when it learns another, taken off with a line when the part is out of the record for 2 s (and set again
+REM when it is back), set again when on foot changes, taken off with the key, the number's by the fuse alone. The D3D11 reading of a draw
+REM (onFootHudProbeNoteDraw in vscreen.cpp) needs the binding shadow and the shader registry and is not linked here; the class and shape
+REM calls it makes into the probe are, exercised directly by Part B21.
 if not exist "%OBJ%\onfoothudprobe" mkdir "%OBJ%\onfoothudprobe"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^
