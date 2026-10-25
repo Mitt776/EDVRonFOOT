@@ -10,6 +10,11 @@
 // vs B10B032BDFD46700 and vs C4B4B334B26E81A9; in headset stereo it skips that step and nobody reads the HUD panel. The glue shows the
 // HUD panel -- the one with the HUD's proportions, 1.665 -- as a sheet bent round the head, in the eye, at the door, the way the F8
 // menu is drawn (.24: the panel by its shape, not by its draw count; held through the frames the game does not redraw it).
+//
+// .25 (the menus): the game draws its lift and ship-door menu, the NPC's answers and the dialog's second panel in stereo into panels
+// of their own (1029x949, 1410x245; .24) and lays them into the picture only in the cinema. Each is a layer of its own -- found by its
+// proportions, held, stopped by the game's own composite -- shown at the place the cinema's frame gives it (.22), sized from the
+// HUD's width, over the HUD.
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -47,19 +52,53 @@ struct Panel {
 };
 constexpr int kMaxPanels = 8;
 
-// The HUD panel is the one with the HUD's proportions, width over height 1.665 +- 0.01 (cinema 3564x2140, stereo 2412x1449: one scale
-// for both, so HMD quality does not move it; the draw count does jump on a station). Of several, the largest.
-constexpr float kHudAspect = 1.665f, kHudAspectTol = 0.01f;
-inline bool isHudShape(uint32_t w, uint32_t h) {
+// The sheet's distance and the HUD's bend: curve 1.0 is a radius equal to the distance (below, "The sheet's place").
+constexpr float kDistance = 1.4f;
+constexpr float kCurve = 1.0f;
+// The menus bend less: in the cinema's frame (.22) their bend is a quarter to a fifth of the HUD's, and they are narrower, so a
+// cylinder round the eye would bend them twice the game's. 0.4 is a radius of 3.5 m, the axis behind the head; one number, the
+// flight judges it.
+constexpr float kMenuCurve = 0.4f;
+
+// The layers: what each panel is, by its proportions (width over height +- 0.01, in double: in float 1.655 would fall a hair outside),
+// and its place in the cinema's 3408x1917 frame as fractions, x right, y down (.22's census; the menus lie the HUD's side up). The HUD
+// is the measure: its width is the key's, the frame is as many degrees as the HUD's width over its 0.956. Of several panels of one
+// shape, the largest. The order is the compositing order: the HUD first, the menus over it.
+enum class Layer : int { Hud = 0, Lift = 1, Answers = 2, Dialog = 3 };
+constexpr int kLayers = 4;
+struct LayerSpec {
+    double aspect;
+    float x0, x1, y0, y1;
+    float curve;
+    const char* name;   // in the lines
+    const char* brief;  // in the summary
+};
+constexpr LayerSpec kLayerSpecs[kLayers] = {
+    {1.665, 0.022f, 0.978f, -0.017f, 1.017f, kCurve, "the HUD panel", "hud"},                    // stereo 2412x1449, cinema 3564x2140
+    {1.084, 0.185f, 0.815f, -0.045f, 0.987f, kMenuCurve, "the lift and door menu", "lift"},       // stereo 1029x949, cinema 1521x1402
+    {5.755, 0.17f, 0.83f, 0.69f, 0.93f, kMenuCurve, "the answers", "answers"},                   // stereo 1410x245, cinema 2083x362
+    {1.882, 0.32f, 0.99f, 0.03f, 0.70f, kMenuCurve, "the second dialog panel", "dialog"},        // stereo 1410x749, cinema 2083x1107
+};
+inline const LayerSpec& specOf(Layer l) { return kLayerSpecs[int(l)]; }
+inline bool isLayerShape(Layer l, uint32_t w, uint32_t h) {
     if (!w || !h) return false;
-    return std::fabs(double(w) / double(h) - 1.665) <= 0.01 + 1e-9;  // in double: the floats above would put 1.655 a hair outside
+    return std::fabs(double(w) / double(h) - specOf(l).aspect) <= 0.01 + 1e-9;
 }
-inline int findHud(const Panel* p, int n) {
+inline int findLayer(Layer l, const Panel* p, int n) {
     int best = -1;
     for (int i = 0; i < n; ++i)
-        if (isHudShape(p[i].w, p[i].h) && (best < 0 || uint64_t(p[i].w) * p[i].h > uint64_t(p[best].w) * p[best].h)) best = i;
+        if (isLayerShape(l, p[i].w, p[i].h) && (best < 0 || uint64_t(p[i].w) * p[i].h > uint64_t(p[best].w) * p[best].h)) best = i;
     return best;
 }
+// Every layer's panel in the frame, -1 for none.
+inline void findLayers(const Panel* p, int n, int out[kLayers]) {
+    for (int k = 0; k < kLayers; ++k) out[k] = findLayer(Layer(k), p, n);
+}
+
+// The HUD panel is the one with the HUD's proportions, 1.665 (cinema 3564x2140, stereo 2412x1449: one scale for both, so HMD quality
+// does not move it; the draw count does jump on a station).
+inline bool isHudShape(uint32_t w, uint32_t h) { return isLayerShape(Layer::Hud, w, h); }
+inline int findHud(const Panel* p, int n) { return findLayer(Layer::Hud, p, n); }
 
 // Most interface draws first; equal counts, the larger area first; equal both, the order they were met (stable).
 inline void rankPanels(Panel* p, int n) {
@@ -75,16 +114,18 @@ inline void rankPanels(Panel* p, int n) {
     }
 }
 
-// Does a draw of the game's composite shaders read the HUD panel? `read` is the resources behind its texture slots (null for an empty
-// slot), `hud` this frame's HUD panel and the last frame's (null when not known yet). A match is the game laying its own HUD into the
-// picture; a read of anything else (the crosshair's and markers' atlas, the captions) is not.
-inline bool readsHudPanel(const void* const* read, int n, const void* hudNow, const void* hudLast) {
+// Which layers' panels does a draw of the game's composite shaders read? `read` is the resources behind its texture slots (null for an
+// empty slot), `now` and `last` each layer's panel this frame and the last (null when not known yet). Bit k set: the game lays layer
+// k's panel into the picture itself; a read of anything else (the crosshair's and markers' atlas, the captions) sets nothing.
+inline uint32_t readsPanels(const void* const* read, int n, const void* const now[kLayers], const void* const last[kLayers]) {
+    uint32_t mask = 0;
     for (int i = 0; i < n; ++i)
-        if (read[i] && (read[i] == hudNow || read[i] == hudLast)) return true;
-    return false;
+        for (int k = 0; k < kLayers; ++k)
+            if (read[i] && (read[i] == now[k] || read[i] == last[k])) mask |= 1u << k;
+    return mask;
 }
 
-// The scouting order: the HUD panel first (when the frame has one), then the others by draw count.
+// The summary's order: the HUD panel first (when the frame has one), then the others by draw count.
 inline void orderPanels(Panel* p, int n) {
     rankPanels(p, n);
     const int h = findHud(p, n);
@@ -101,7 +142,7 @@ struct FrameTally {
     Panel panels[kMaxPanels];
     int count = 0;
     uint32_t dropped = 0;
-    bool gameComposites = false;
+    uint32_t composites = 0;  // readsPanels' bits: the layers the game laid into the picture itself this frame
     int note(const void* id, uint32_t w, uint32_t h, uint32_t format) {
         for (int i = 0; i < count; ++i)
             if (panels[i].id == id) {
@@ -123,30 +164,9 @@ struct FrameTally {
     void clear() { *this = FrameTally{}; }
 };
 
-// The scouting key's choice over the ordered panels: 0 the HUD panel, 1 the next, 2 the one after... A press steps to the next panel
-// the frame has and from the last back to the first. A choice the frame no longer has (fewer panels than before) reads as the first,
-// and the next press steps on from there. pressed tells a key that has been used from the default: without a press only the HUD
-// panel is shown, and a frame without one shows none (the hold below decides how long the last copy stays).
-struct Selector {
-    int index = 0;
-    bool pressed = false;
-    int effective(int count) const { return index < count ? index : 0; }
-    int press(int count) {
-        pressed = true;
-        index = count > 0 ? (effective(count) + 1) % count : 0;
-        return index;
-    }
-};
-// The panel to show out of the ordered panels, -1 for none. By default the HUD panel only; once the key is pressed, the choice.
-inline int shownIndex(const Panel* ordered, int n, const Selector& s) {
-    if (n <= 0) return -1;
-    if (!s.pressed) return isHudShape(ordered[0].w, ordered[0].h) ? 0 : -1;
-    return s.effective(n);
-}
-
 // Copy only from a frame that drew into the panel; otherwise keep showing the last copy, and give up after kHoldFrames in a row
 // without one (the game clears the panel at the start of a frame and on a station redraws it every other frame: a copy of the
-// cleared frame was the flicker of .10). step() once per frame the door decides.
+// cleared frame was the flicker of .10). step() once per frame the door decides; one per layer.
 constexpr uint32_t kHoldFrames = 30;
 enum class HoldStep : int { Fresh = 0, Held = 1, Expired = 2 };
 struct Hold {
@@ -235,9 +255,8 @@ inline float parseWidth(float raw, bool* valid) {
 // The sheet's place: a cylinder round the head, 1.4 m out. curve 1.0 is a radius equal to the distance, so the cylinder's axis is the
 // anchor's own point -- the head -- and every point of the sheet is 1.4 m from the eyes. The half-width is the ARC, as menuPanelHit
 // reads it (u = (theta * R - shift + halfW) / 2halfW, R = dist / curve): dist * half the angle in radians, so that the edge stands at
-// half the angle from the centre. The height follows the panel's proportions.
-constexpr float kDistance = 1.4f;
-constexpr float kCurve = 1.0f;
+// half the angle from the centre. The height follows the panel's proportions. (kDistance and kCurve are at the layers above.) A menu's
+// flatter cylinder takes the same half-width: an approximation, a fraction of a degree off at its edge.
 inline float halfWidth(float widthDeg) { return kDistance * widthDeg * 0.5f * 0.0174532925f; }
 inline float aspectOf(uint32_t w, uint32_t h) { return w ? float(h) / float(w) : 0.0f; }
 inline float ratioOf(uint32_t w, uint32_t h) { return h ? float(w) / float(h) : 0.0f; }  // the lines' spect: width over height
@@ -251,6 +270,44 @@ inline void bodyAnchor(const float head[12], float out[12]) {
     out[3] = head[3];
     out[7] = head[7];
     out[11] = head[11];
+}
+
+// A layer's place from the HUD's width: the cinema's frame is hudWidthDeg / 0.956 degrees of arc across, and 1917/3408 of that high at
+// the sheet's distance; a layer stands at its centre's fraction of it, its width the frame's times its own. The HUD is the measure:
+// exactly the key's width, straight ahead, not moved. A positive yaw is to the right, a positive down below the anchor.
+constexpr float kRadPerDeg = 0.0174532925f;
+constexpr float kCinemaHeightOverWidth = 1917.0f / 3408.0f;
+struct Place {
+    float widthDeg = 0.0f, yawDeg = 0.0f, downM = 0.0f, curve = kCurve;
+};
+inline Place placeOf(Layer l, float hudWidthDeg) {
+    Place p;
+    p.curve = specOf(l).curve;
+    if (l == Layer::Hud) {
+        p.widthDeg = hudWidthDeg;
+        return p;
+    }
+    const LayerSpec& h = specOf(Layer::Hud);
+    const LayerSpec& s = specOf(l);
+    const float frameDeg = hudWidthDeg / (h.x1 - h.x0);
+    const float frameHeightM = kDistance * frameDeg * kRadPerDeg * kCinemaHeightOverWidth;
+    p.widthDeg = frameDeg * (s.x1 - s.x0);
+    p.yawDeg = frameDeg * ((s.x0 + s.x1) * 0.5f - 0.5f);
+    p.downM = ((s.y0 + s.y1) * 0.5f - 0.5f) * frameHeightM;
+    return p;
+}
+
+// The anchor turned about its own vertical axis by yawDeg (right positive, headLockAnchor's sense) and lowered along its own up by
+// downM. The cylinder still stands round the vertical through the head and the sheet stays upright: no tilt, the rotation stays
+// rigid. Poses are 3x4 rows, [R | t].
+inline void placeAnchor(const float anchor[12], float yawDeg, float downM, float out[12]) {
+    const float y = -yawDeg * kRadPerDeg, c = std::cos(y), s = std::sin(y);
+    const float r[9] = {c, 0.0f, s, 0.0f, 1.0f, 0.0f, -s, 0.0f, c};
+    for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 3; ++col)
+            out[row * 4 + col] = anchor[row * 4] * r[col] + anchor[row * 4 + 1] * r[3 + col] + anchor[row * 4 + 2] * r[6 + col];
+        out[row * 4 + 3] = anchor[row * 4 + 3] - downM * anchor[row * 4 + 1];
+    }
 }
 
 // Shown this frame, or why not. Order: the keys, then where the commander is, then the game's own composite, then the panels.
@@ -280,30 +337,49 @@ inline Reason decide(const DecisionIn& in) {
     return Reason::Showing;
 }
 
-// A decision line only when the decision changes: the reason, and while showing also the panel's number and size and the anchor. A
-// flicker cannot flood the log: past kChangeBudget change lines in one summary window the rest are counted, not written, and the
-// summary says how many.
+// One layer's frame: the decision (in.gameComposites is this layer's own bit), then the hold -- a layer whose panel the frame did not
+// draw keeps its copy up to kHoldFrames, then stops for no panels. Each layer steps its own hold: the HUD's frames never keep a menu
+// alive, nor a menu's the HUD.
+inline Reason stepLayer(DecisionIn in, bool drew, Hold& hold, HoldStep* step) {
+    in.panels = 1;  // the panels are the hold's to judge
+    Reason r = decide(in);
+    HoldStep st = HoldStep::Expired;
+    if (r == Reason::Showing) {
+        st = hold.step(drew);
+        if (st == HoldStep::Expired) r = Reason::NoPanels;
+    } else {
+        hold.reset();
+    }
+    if (step) *step = st;
+    return r;
+}
+
+// A decision line only when the decision changes: the reason, and while showing also the panel's size and the anchor. A flicker
+// cannot flood the log: past kChangeBudget change lines in one summary window the rest are counted, not written, and the summary says
+// how many. A menu's latch is quiet until shown: a menu that was never open writes no stop line, so the log carries only its opening
+// and its closing.
 constexpr uint32_t kChangeBudget = 20;
 struct DecisionLatch {
     bool said = false;
     Reason reason = Reason::KeyOff;
-    int index = -1;
     uint32_t w = 0, h = 0;
     Mode mode = Mode::Visor;
+    bool quietUntilShown = false;
     uint32_t windowLines = 0, unwritten = 0;
-    bool changed(Reason r, int idx, uint32_t pw, uint32_t ph, Mode m) const {
+    bool changed(Reason r, uint32_t pw, uint32_t ph, Mode m) const {
         if (!said || r != reason) return true;
-        return r == Reason::Showing && (idx != index || pw != w || ph != h || m != mode);
+        return r == Reason::Showing && (pw != w || ph != h || m != mode);
     }
     // True when the change is to be written.
-    bool admit(Reason r, int idx, uint32_t pw, uint32_t ph, Mode m) {
-        if (!changed(r, idx, pw, ph, m)) return false;
+    bool admit(Reason r, uint32_t pw, uint32_t ph, Mode m) {
+        if (!changed(r, pw, ph, m)) return false;
+        const bool wasShowing = said && reason == Reason::Showing;
         said = true;
         reason = r;
-        index = idx;
         w = pw;
         h = ph;
         mode = m;
+        if (quietUntilShown && r != Reason::Showing && !wasShowing) return false;
         if (windowLines >= kChangeBudget) {
             ++unwritten;
             return false;
@@ -314,10 +390,15 @@ struct DecisionLatch {
     void newWindow() { windowLines = 0; }
 };
 
-// The 30-second summary's counters.
+// The 30-second summary's counters: the HUD's shown and held as on .24, each menu's in menus[] by its Layer ([0] unused), the
+// game's composites and the failed copies of all layers.
 constexpr uint64_t kSummaryMs = 30000;
+struct LayerCount {
+    uint64_t shown = 0, held = 0;
+};
 struct Summary {
     uint64_t frames = 0, shown = 0, held = 0, gameComposites = 0, copyFail = 0, noPanels = 0;
+    LayerCount menus[kLayers];
     void clear() { *this = Summary{}; }
 };
 
@@ -339,17 +420,28 @@ inline int formatKey(Mode mode, bool modeValid, const char* modeText, float widt
                          double(width), bad);
 }
 
-// The HUD panel by name; a scouting choice of another panel by its number.
-inline int formatShowing(int index, int count, const Panel& p, Mode mode, float width, char* out, size_t cap) {
-    if (isHudShape(p.w, p.h))
-        return std::snprintf(out, cap,
-                             "on-foot hud: showing the HUD panel (%ux%u, aspect %.3f, %u interface draws), anchor %s, %.0f deg, cylinder "
-                             "around the head",
-                             p.w, p.h, double(ratioOf(p.w, p.h)), p.draws, modeName(mode), double(width));
+// The HUD panel's start, as on .24.
+inline int formatShowing(const Panel& p, Mode mode, float width, char* out, size_t cap) {
     return std::snprintf(out, cap,
-                         "on-foot hud: showing panel %d of %d (%ux%u, aspect %.3f, %u interface draws), anchor %s, %.0f deg, cylinder "
+                         "on-foot hud: showing the HUD panel (%ux%u, aspect %.3f, %u interface draws), anchor %s, %.0f deg, cylinder "
                          "around the head",
-                         index + 1, count, p.w, p.h, double(ratioOf(p.w, p.h)), p.draws, modeName(mode), double(width));
+                         p.w, p.h, double(ratioOf(p.w, p.h)), p.draws, modeName(mode), double(width));
+}
+
+// A menu's start, with the place it was given.
+inline int formatMenuShowing(Layer l, const Panel& p, const Place& at, Mode mode, char* out, size_t cap) {
+    return std::snprintf(out, cap,
+                         "on-foot hud: showing %s (%ux%u, aspect %.3f, %u interface draws) at its place: %.0f deg wide, %.0f deg %s, "
+                         "%.2f m %s, curve %.1f, anchor %s",
+                         specOf(l).name, p.w, p.h, double(ratioOf(p.w, p.h)), p.draws, double(at.widthDeg),
+                         double(std::fabs(at.yawDeg)), at.yawDeg < -0.05f ? "left" : "right", double(std::fabs(at.downM)),
+                         at.downM > 0.005f ? "down" : "up", double(at.curve), modeName(mode));
+}
+
+// A menu's end: closed when the game stopped drawing it, else the reason.
+inline int formatMenuStopped(Layer l, Reason r, char* out, size_t cap) {
+    return std::snprintf(out, cap, "on-foot hud: %s stopped (%s)", specOf(l).name,
+                         r == Reason::NoPanels ? "closed: not drawn for 30 frames" : reasonText(r));
 }
 
 // A size met for the first time this session while the sheet is needed.
@@ -362,14 +454,8 @@ inline int formatStopped(Reason r, char* out, size_t cap) {
     return std::snprintf(out, cap, "on-foot hud: stopped (%s)", reasonText(r));
 }
 
-inline int formatSelected(int index, int count, const Panel* p, char* out, size_t cap) {
-    if (!p || count <= 0)
-        return std::snprintf(out, cap, "on-foot hud: panel key pressed, but this frame drew no interface panel; the HUD panel is shown "
-                                       "when there is one");
-    return std::snprintf(out, cap, "on-foot hud: panel %d of %d selected (%ux%u, aspect %.3f, %u draws)", index + 1, count, p->w, p->h,
-                         double(ratioOf(p->w, p->h)), p->draws);
-}
-
+// The 30-second summary: the frame's panels, the HUD's counters, then the menus that were shown in the window (none: no menus field,
+// the line is .24's).
 inline int formatSummary(const Summary& s, const Panel* p, int count, uint32_t dropped, uint32_t unwritten, const SeenSizes& seen, char* out,
                          size_t cap) {
     char list[400] = "";
@@ -387,13 +473,25 @@ inline int formatSummary(const Summary& s, const Panel* p, int count, uint32_t d
         e += std::snprintf(extra + e, sizeof(extra) - size_t(e), " changes-unwritten=%u", unwritten);
     if (seen.unrecorded && e >= 0 && size_t(e) < sizeof(extra))
         std::snprintf(extra + e, sizeof(extra) - size_t(e), " new-panels-unrecorded=%u", seen.unrecorded);
+    char menus[200] = "";
+    int m = 0;
+    for (int k = 1; k < kLayers && m >= 0 && size_t(m) < sizeof(menus); ++k) {
+        const LayerCount& c = s.menus[k];
+        if (!c.shown && !c.held) continue;
+        m += std::snprintf(menus + m, sizeof(menus) - size_t(m), "%s%s shown=%llu held=%llu", m ? ", " : " menus=[",
+                           kLayerSpecs[k].brief, static_cast<unsigned long long>(c.shown), static_cast<unsigned long long>(c.held));
+    }
+    if (m > 0 && size_t(m) + 1 < sizeof(menus)) {
+        menus[m] = ']';
+        menus[m + 1] = '\0';
+    }
     return std::snprintf(out, cap,
                          "on-foot hud 30s: frames=%llu shown=%llu held=%llu panels=[%s]%s game-composites=%llu no-panels=%llu "
-                         "copy-fail=%llu new-panels=[%s]%s",
+                         "copy-fail=%llu%s new-panels=[%s]%s",
                          static_cast<unsigned long long>(s.frames), static_cast<unsigned long long>(s.shown),
                          static_cast<unsigned long long>(s.held), list, count ? "" : " (no panels found)",
                          static_cast<unsigned long long>(s.gameComposites), static_cast<unsigned long long>(s.noPanels),
-                         static_cast<unsigned long long>(s.copyFail), fresh, extra);
+                         static_cast<unsigned long long>(s.copyFail), menus, fresh, extra);
 }
 
 }  // namespace ofh

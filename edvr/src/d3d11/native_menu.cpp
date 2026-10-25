@@ -129,18 +129,26 @@ HRESULT WINAPI treat(void* context, uint32_t eye, ID3D11Texture2D* source,
     return S_OK;
   };
   // EDVRonFOOT: the game's on-foot interface first (on_foot_hud.h), under the menu: the menu below composites over its result. The
-  // sheet is a cylinder round the anchor (curve 1.0, the arc as the half-width, ofh::halfWidth).
+  // sheets one by one, each over the one before -- the HUD, then the menus at their places: the anchor (body or head) turned and
+  // lowered by placeAnchor, a cylinder round it (the sheet's curve, the arc as the half-width, ofh::halfWidth). A sheet out of this
+  // eye's view gives nothing and the next goes over the one before it.
+  static_assert(edvr::kMenuSheetLayers == edvr::ofh::kLayers, "menu_panel keeps one set of textures per layer");
   ID3D11Texture2D* hud = nullptr;
-  edvr::OnFootHudSheet sheet;
-  if (edvr::onFootHudSheetForEye(s->device, eye, &sheet)) {
-    float hudAnchor[12]{}, hudTransform[12]{};
-    if (sheet.anchor == 1) edvr::ofh::bodyAnchor(s->head, hudAnchor);
-    else headLockAnchor(s->head, 0, 0, hudAnchor);
+  edvr::OnFootHudSheet sheets[edvr::kOnFootHudSheets];
+  const int sheetCount = edvr::onFootHudSheetsForEye(s->device, eye, sheets);
+  for (int i = 0; i < sheetCount; ++i) {
+    const edvr::OnFootHudSheet& sheet = sheets[i];
+    float base[12]{}, hudAnchor[12]{}, hudTransform[12]{};
+    if (sheet.anchor == 1) edvr::ofh::bodyAnchor(s->head, base);
+    else headLockAnchor(s->head, 0, 0, base);
+    edvr::ofh::placeAnchor(base, sheet.yawDeg, sheet.downM, hudAnchor);
     toEye(hudAnchor, hudTransform);
     edvr::MenuGeometry g;
-    g.dist = edvr::ofh::kDistance; g.curve = edvr::ofh::kCurve; g.halfW = edvr::ofh::halfWidth(sheet.widthDeg);
+    g.dist = edvr::ofh::kDistance; g.curve = sheet.curve; g.halfW = edvr::ofh::halfWidth(sheet.widthDeg);
     g.shift = 0.f; g.alpha = 1.f;
-    hud = static_cast<ID3D11Texture2D*>(edvr::menuPanelCompositeSheet(source, int(eye), box, hudTransform, sheet.srv, sheet.aspect, g));
+    auto* layered = static_cast<ID3D11Texture2D*>(edvr::menuPanelCompositeSheet(
+        sheet.layer, hud ? hud : source, int(eye), hud ? treatedBox : box, hudTransform, sheet.srv, sheet.aspect, g));
+    if (layered) hud = layered;
   }
   ID3D11Texture2D* menuSource = hud ? hud : source;
   const float* menuBox = hud ? treatedBox : box;

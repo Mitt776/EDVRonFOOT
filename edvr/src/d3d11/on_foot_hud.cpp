@@ -5,7 +5,6 @@
 #include "journal_watch.h"
 #include "../common/config.h"
 #include "../common/guard.h"
-#include "../common/hotkey.h"
 #include "../common/log.h"
 #include <windows.h>
 #include <d3d11.h>
@@ -49,34 +48,36 @@ std::atomic<int> g_mode{int(ofh::Mode::Body)};
 std::atomic<float> g_width{ofh::kWidthDefault};
 std::atomic<bool> g_nativeOnFoot{true};
 std::atomic<int> g_onFoot{-1};
-std::atomic<int> g_selected{0};
-std::atomic<bool> g_selectedPressed{false};
 std::atomic<uint64_t> g_frameSeq{1};
 
-// The door's: the copy the sheet reads, and this frame's decision for the second eye. Under g_mutex with the latch and the summary.
-ID3D11Texture2D* g_copy = nullptr;
-ID3D11ShaderResourceView* g_copySrv = nullptr;
-ID3D11Device* g_copyDevice = nullptr;  // identity only
-uint32_t g_copyW = 0, g_copyH = 0, g_copyFmt = 0;
+// The door's, one per layer (the HUD, then the menus): the copy its sheet reads, its hold and its line, and this frame's decision for
+// the second eye. Under g_mutex with the summary.
+struct LayerState {
+    ID3D11Texture2D* copy = nullptr;
+    ID3D11ShaderResourceView* srv = nullptr;
+    ID3D11Device* device = nullptr;  // identity only
+    uint32_t w = 0, h = 0, fmt = 0;
+    bool show = false;  // this frame's decision
+    float aspect = 0.0f;
+    ofh::Place place;
+    ofh::Hold hold;          // the copy is kept up to 30 frames without a fresh panel of the layer's shape
+    ofh::DecisionLatch latch;
+    ofh::Panel heldPanel;    // the panel the copy was made from, for the showing line while it is held
+    bool copyFailSaid = false;
+    void releaseCopy() {
+        if (srv) srv->Release();
+        if (copy) copy->Release();
+        srv = nullptr;
+        copy = nullptr;
+        device = nullptr;
+        w = h = fmt = 0;
+    }
+};
+LayerState g_layers[ofh::kLayers];
 uint64_t g_doorSeq = 0;
-bool g_doorShow = false;
-float g_doorAspect = 0.0f;
-ofh::DecisionLatch g_latch;
 ofh::Summary g_summary;
-ofh::Hold g_hold;          // the copy is kept up to 30 frames without a fresh HUD panel
 ofh::SeenSizes g_seen;     // the boundary's: panel sizes met, one line each
-int g_heldIndex = -1, g_heldCount = 0;  // the panel the copy was made from, for the showing line while it is held
-ofh::Panel g_heldPanel;
-bool g_copyFailSaid = false;
-
-void releaseCopy() {
-    if (g_copySrv) g_copySrv->Release();
-    if (g_copy) g_copy->Release();
-    g_copySrv = nullptr;
-    g_copy = nullptr;
-    g_copyDevice = nullptr;
-    g_copyW = g_copyH = g_copyFmt = 0;
-}
+static_assert(kOnFootHudSheets == ofh::kLayers, "one sheet per layer");
 
 // The bound target: a 2D, single-sample texture of the panels' format. One resolve and one GetDesc per binding generation.
 void resolveTarget() {
@@ -122,20 +123,26 @@ void rankInto(const Frame& from, Frame& to) {
 
 void say(const char* line) { Log::get().note("%s", line); }
 
-// Does this draw of the game's composite shaders read the HUD panel (this frame's, or last frame's while this one's is not drawn yet)
-// as a texture in slots 0-2? The game's own crosshair, markers and captions in stereo come through the same shaders from their own
-// atlases and must not stop the sheet. The references the calls take are all given back before the return.
-bool compositeReadsHud(ID3D11DeviceContext* ctx) {
-    if (!ctx) return false;
-    const void* ids[2] = {};
+// Which layers' panels (this frame's, or last frame's while this one's are not drawn yet) does this draw of the game's composite
+// shaders read as a texture in slots 0-2? Bit k: layer k. The game's own crosshair, markers and captions in stereo come through the
+// same shaders from their own atlases and must not stop a sheet. The references the calls take are all given back before the return.
+uint32_t compositeReads(ID3D11DeviceContext* ctx) {
+    if (!ctx) return 0;
+    const void* now[ofh::kLayers] = {};
+    const void* last[ofh::kLayers] = {};
+    bool any = false;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
-        const int c = ofh::findHud(g_cur.tally.panels, g_cur.tally.count);
-        const int l = ofh::findHud(g_last.tally.panels, g_last.tally.count);
-        if (c >= 0) ids[0] = g_cur.tally.panels[c].id;
-        if (l >= 0) ids[1] = g_last.tally.panels[l].id;
+        int c[ofh::kLayers], l[ofh::kLayers];
+        ofh::findLayers(g_cur.tally.panels, g_cur.tally.count, c);
+        ofh::findLayers(g_last.tally.panels, g_last.tally.count, l);
+        for (int k = 0; k < ofh::kLayers; ++k) {
+            if (c[k] >= 0) now[k] = g_cur.tally.panels[c[k]].id;
+            if (l[k] >= 0) last[k] = g_last.tally.panels[l[k]].id;
+            any = any || now[k] || last[k];
+        }
     }
-    if (!ids[0] && !ids[1]) return false;  // no HUD panel known: nothing to compare with, no COM call
+    if (!any) return 0;  // no layer's panel known: nothing to compare with, no COM call
     ID3D11ShaderResourceView* srv[3] = {};
     const void* read[3] = {};
     ctx->PSGetShaderResources(0, 3, srv);
@@ -148,7 +155,7 @@ bool compositeReadsHud(ID3D11DeviceContext* ctx) {
             res->Release();
         }
     }
-    const bool reads = ofh::readsHudPanel(read, 3, ids[0], ids[1]);
+    const uint32_t reads = ofh::readsPanels(read, 3, now, last);
     for (auto*& v : srv)
         if (v) {
             v->Release();
@@ -163,9 +170,10 @@ void onFootHudNoteDraw(ID3D11DeviceContext* ctx, bool eye) {
     if (!vs) return;
     if (ofh::isGameCompositeVs(vs)) {
         guardedBudget(g_budget, [&] {
-            if (!compositeReadsHud(ctx)) return;
+            const uint32_t reads = compositeReads(ctx);
+            if (!reads) return;
             std::lock_guard<std::mutex> lock(g_mutex);
-            g_cur.tally.gameComposites = true;
+            g_cur.tally.composites |= reads;
         });
         return;
     }
@@ -198,9 +206,6 @@ void onFootHudFrameBoundary() {
     static bool saidKey = false;
     static ofh::Mode lastMode = ofh::Mode::Body;
     static float lastWidth = -1.0f;
-    static Hotkey key;
-    static std::string keyText = "\x01";
-    static ofh::Selector selector;
     static uint64_t windowStart = 0;
     const Config& cfg = Config::get();
     if (cfg.generation() != generation) {
@@ -221,12 +226,6 @@ void onFootHudFrameBoundary() {
         g_mode.store(int(mode), std::memory_order_relaxed);
         g_width.store(width, std::memory_order_relaxed);
         g_nativeOnFoot.store(cfg.getBool("experimental.native_vr_on_foot", true), std::memory_order_relaxed);
-        const std::string text = cfg.getString("hotkey.on_foot_hud_panel", "");
-        if (text != keyText) {
-            keyText = text;
-            key.setBinding(text.c_str());
-            if (key.bound()) Log::get().note("on-foot hud: the panel key is %s: each press shows the next panel the frame drew", text.c_str());
-        }
     }
     const int onFoot = journalOnFootKnown() ? (journalOnFoot() ? 1 : 0) : -1;
     g_onFoot.store(onFoot, std::memory_order_relaxed);
@@ -247,10 +246,10 @@ void onFootHudFrameBoundary() {
     g_cur.tally.clear();
     if (wants) {
         ++g_summary.frames;
-        if (g_last.tally.gameComposites) ++g_summary.gameComposites;
+        if (g_last.tally.composites) ++g_summary.gameComposites;
         if (!g_last.tally.count) ++g_summary.noPanels;
         // A size met for the first time while the sheet is needed, in stereo (the game's own composite is the cinema): one line.
-        if (!g_last.tally.gameComposites)
+        if (!g_last.tally.composites)
             for (int i = 0; i < g_last.tally.count; ++i)
                 if (g_seen.note(g_last.tally.panels[i].w, g_last.tally.panels[i].h)) {
                     char line[200];
@@ -259,165 +258,166 @@ void onFootHudFrameBoundary() {
                     say(line);
                 }
     }
-    if (key.bound() && key.pressed()) {
-        const int count = g_last.tally.count;
-        const int index = selector.press(count);
-        g_selected.store(index, std::memory_order_relaxed);
-        g_selectedPressed.store(true, std::memory_order_relaxed);
-        char line[300];
-        ofh::formatSelected(index, count, count ? &g_last.tally.panels[index] : nullptr, line, sizeof(line));
-        say(line);
-    }
     if (now - windowStart >= ofh::kSummaryMs) {
+        uint32_t unwritten = 0;
+        for (const LayerState& L : g_layers) unwritten += L.latch.unwritten;
         if (g_summary.frames || g_summary.shown) {
-            char line[700];
-            ofh::formatSummary(g_summary, g_last.tally.panels, g_last.tally.count, g_last.tally.dropped, g_latch.unwritten, g_seen, line,
+            char line[1200];
+            ofh::formatSummary(g_summary, g_last.tally.panels, g_last.tally.count, g_last.tally.dropped, unwritten, g_seen, line,
                                sizeof(line));
             say(line);
         }
         g_summary.clear();
-        g_latch.unwritten = 0;
-        g_latch.newWindow();
+        for (LayerState& L : g_layers) {
+            L.latch.unwritten = 0;
+            L.latch.newWindow();
+        }
         g_seen.newWindow();
         windowStart = now;
     }
     g_frameSeq.fetch_add(1, std::memory_order_relaxed);
 }
 
-bool onFootHudSheetForEye(ID3D11Device* device, uint32_t eye, OnFootHudSheet* out) {
-    if (!device || !out || eye > 1) return false;
+namespace {
+// The layer's panel into the layer's own texture: made (or remade) to the panel's size, then copied. False when the panel's texture is
+// gone or of another kind, or a texture of EDVR's could not be made.
+bool copyInto(LayerState& L, ID3D11Device* device, ID3D11Texture2D* tex) {
+    bool copied = false;
+    guardedBudget(g_budget, [&] {
+        if (!tex) return;
+        D3D11_TEXTURE2D_DESC d{};
+        tex->GetDesc(&d);
+        if (d.SampleDesc.Count != 1 || d.ArraySize != 1 || d.MipLevels != 1) return;
+        if (!L.copy || L.device != device || L.w != d.Width || L.h != d.Height || L.fmt != uint32_t(d.Format)) {
+            L.releaseCopy();
+            D3D11_TEXTURE2D_DESC c{};
+            c.Width = d.Width;
+            c.Height = d.Height;
+            c.MipLevels = 1;
+            c.ArraySize = 1;
+            c.Format = d.Format;
+            c.SampleDesc.Count = 1;
+            c.Usage = D3D11_USAGE_DEFAULT;
+            c.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            if (FAILED(device->CreateTexture2D(&c, nullptr, &L.copy)) || !L.copy) {
+                L.copy = nullptr;
+                return;
+            }
+            D3D11_SHADER_RESOURCE_VIEW_DESC v{};
+            v.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            v.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            v.Texture2D.MipLevels = 1;
+            if (FAILED(device->CreateShaderResourceView(L.copy, &v, &L.srv)) || !L.srv) {
+                L.releaseCopy();
+                return;
+            }
+            L.device = device;
+            L.w = d.Width;
+            L.h = d.Height;
+            L.fmt = uint32_t(d.Format);
+        }
+        ID3D11DeviceContext* ctx = nullptr;
+        device->GetImmediateContext(&ctx);
+        if (!ctx) return;
+        ctx->CopyResource(L.copy, tex);
+        ctx->Release();
+        copied = true;
+    });
+    return copied;
+}
+
+// Eye 0's decision for every layer, its copies and its lines. Under g_mutex.
+void decideLayers(ID3D11Device* device, ofh::Mode mode, float width) {
+    // Each layer's panel: this frame's when the Submit comes after its draws, else the one of the frame that just ended. A frame that
+    // drew none leaves the layer's last copy to be held.
+    Frame ranked;
+    if (g_cur.tally.count) rankInto(g_cur, ranked);
+    int cur[ofh::kLayers], last[ofh::kLayers];
+    ofh::findLayers(ranked.tally.panels, ranked.tally.count, cur);
+    ofh::findLayers(g_last.tally.panels, g_last.tally.count, last);
+    const uint32_t composites = g_cur.tally.composites | g_last.tally.composites;
+    ofh::DecisionIn base;
+    base.onFoot = g_onFoot.load(std::memory_order_relaxed);
+    base.nativeOnFoot = g_nativeOnFoot.load(std::memory_order_relaxed);
+    base.mode = mode;
+    for (int k = 0; k < ofh::kLayers; ++k) {
+        LayerState& L = g_layers[k];
+        const ofh::Layer layer = ofh::Layer(k);
+        L.show = false;
+        L.latch.quietUntilShown = layer != ofh::Layer::Hud;
+        const Frame* use = cur[k] >= 0 ? &ranked : last[k] >= 0 ? &g_last : nullptr;
+        const int index = cur[k] >= 0 ? cur[k] : last[k];
+        ofh::DecisionIn in = base;
+        in.gameComposites = ((composites >> k) & 1u) != 0;
+        ofh::HoldStep step = ofh::HoldStep::Expired;
+        const ofh::Reason reason = ofh::stepLayer(in, use != nullptr, L.hold, &step);
+        uint64_t& shown = layer == ofh::Layer::Hud ? g_summary.shown : g_summary.menus[k].shown;
+        uint64_t& held = layer == ofh::Layer::Hud ? g_summary.held : g_summary.menus[k].held;
+        ofh::Panel panel;
+        if (reason == ofh::Reason::Showing && step == ofh::HoldStep::Held) {
+            // No fresh panel of the layer's shape this frame: the last copy stays.
+            L.show = L.srv != nullptr;
+            panel = L.heldPanel;
+            if (L.show) {
+                ++held;
+                ++shown;
+            }
+        } else if (reason == ofh::Reason::Showing) {
+            panel = use->tally.panels[index];
+            if (copyInto(L, device, use->tex[index])) {
+                L.show = true;
+                L.aspect = ofh::aspectOf(L.w, L.h);
+                L.heldPanel = panel;
+                ++shown;
+            } else {
+                L.hold.reset();  // a copy that did not happen is not one to hold
+                ++g_summary.copyFail;
+                if (!L.copyFailSaid) {
+                    L.copyFailSaid = true;
+                    Log::get().note("on-foot hud: the %ux%u panel (%s) could not be copied (its texture is gone or of another shape, or "
+                                    "a texture of EDVR's could not be made); it is not shown while that lasts, the summary counts it "
+                                    "as copy-fail. Said once.",
+                                    panel.w, panel.h, ofh::specOf(layer).name);
+                }
+            }
+        }
+        if (L.show) L.place = ofh::placeOf(layer, width);
+        // A panel that could not be copied is not shown and not said as shown: the line stays what it was, the summary counts copy-fail.
+        if ((reason != ofh::Reason::Showing || L.show) && L.latch.admit(reason, panel.w, panel.h, mode)) {
+            char line[400];
+            if (layer == ofh::Layer::Hud && reason == ofh::Reason::Showing)
+                ofh::formatShowing(panel, mode, width, line, sizeof(line));
+            else if (layer == ofh::Layer::Hud)
+                ofh::formatStopped(reason, line, sizeof(line));
+            else if (reason == ofh::Reason::Showing)
+                ofh::formatMenuShowing(layer, panel, L.place, mode, line, sizeof(line));
+            else
+                ofh::formatMenuStopped(layer, reason, line, sizeof(line));
+            say(line);
+        }
+    }
+    for (auto*& t : ranked.tex) t = nullptr;  // g_cur's, not this copy's to release
+}
+}  // namespace
+
+int onFootHudSheetsForEye(ID3D11Device* device, uint32_t eye, OnFootHudSheet out[kOnFootHudSheets]) {
+    if (!device || !out || eye > 1) return 0;
     const uint64_t seq = g_frameSeq.load(std::memory_order_relaxed);
     const ofh::Mode mode = ofh::Mode(g_mode.load(std::memory_order_relaxed));
     const float width = g_width.load(std::memory_order_relaxed);
     std::lock_guard<std::mutex> lock(g_mutex);
-    if (eye == 1 && g_doorSeq == seq) {
-        if (!g_doorShow) return false;
-        *out = {g_copySrv, g_doorAspect, width, mode == ofh::Mode::Body ? 1 : 0};
-        return true;
+    if (eye == 0 || g_doorSeq != seq) {
+        g_doorSeq = seq;
+        decideLayers(device, mode, width);
     }
-    g_doorSeq = seq;
-    g_doorShow = false;
-    ofh::Selector selector;
-    selector.index = g_selected.load(std::memory_order_relaxed);
-    selector.pressed = g_selectedPressed.load(std::memory_order_relaxed);
-    // The panel to show: this frame's HUD panel when the Submit comes after its draws, else the one of the frame that just ended. A
-    // frame that drew none leaves the last copy to be held.
-    Frame ranked;
-    const Frame* use = nullptr;
-    int index = -1;
-    if (g_cur.tally.count) {
-        rankInto(g_cur, ranked);
-        index = ofh::shownIndex(ranked.tally.panels, ranked.tally.count, selector);
-        if (index >= 0) use = &ranked;
+    // The HUD first, the menus over it: the door composites them in this order.
+    int n = 0;
+    for (int k = 0; k < ofh::kLayers; ++k) {
+        const LayerState& L = g_layers[k];
+        if (!L.show) continue;
+        out[n++] = {L.srv, L.aspect, L.place.widthDeg, L.place.yawDeg, L.place.downM, L.place.curve, mode == ofh::Mode::Body ? 1 : 0, k};
     }
-    if (index < 0) {
-        index = ofh::shownIndex(g_last.tally.panels, g_last.tally.count, selector);
-        if (index >= 0) use = &g_last;
-    }
-    ofh::DecisionIn in;
-    in.onFoot = g_onFoot.load(std::memory_order_relaxed);
-    in.nativeOnFoot = g_nativeOnFoot.load(std::memory_order_relaxed);
-    in.mode = mode;
-    in.gameComposites = g_cur.tally.gameComposites || g_last.tally.gameComposites;
-    in.panels = 1;  // the panels are the hold's to judge below
-    ofh::Reason reason = ofh::decide(in);
-    ofh::HoldStep step = ofh::HoldStep::Expired;
-    if (reason == ofh::Reason::Showing) {
-        step = g_hold.step(index >= 0);
-        if (step == ofh::HoldStep::Expired) reason = ofh::Reason::NoPanels;
-    } else {
-        g_hold.reset();
-    }
-    int shownIndex = -1, shownCount = 0;
-    ofh::Panel panel;
-    if (reason == ofh::Reason::Showing && step == ofh::HoldStep::Held) {
-        // No fresh HUD panel this frame: the last copy stays.
-        g_doorShow = g_copySrv != nullptr;
-        shownIndex = g_heldIndex;
-        shownCount = g_heldCount;
-        panel = g_heldPanel;
-        if (g_doorShow) {
-            ++g_summary.held;
-            ++g_summary.shown;
-        }
-    } else if (reason == ofh::Reason::Showing) {
-        shownIndex = index;
-        shownCount = use->tally.count;
-        panel = use->tally.panels[index];
-        ID3D11Texture2D* tex = use->tex[index];
-        bool copied = false;
-        guardedBudget(g_budget, [&] {
-            if (!tex) return;
-            D3D11_TEXTURE2D_DESC d{};
-            tex->GetDesc(&d);
-            if (d.SampleDesc.Count != 1 || d.ArraySize != 1 || d.MipLevels != 1) return;
-            if (!g_copy || g_copyDevice != device || g_copyW != d.Width || g_copyH != d.Height || g_copyFmt != uint32_t(d.Format)) {
-                releaseCopy();
-                D3D11_TEXTURE2D_DESC c{};
-                c.Width = d.Width;
-                c.Height = d.Height;
-                c.MipLevels = 1;
-                c.ArraySize = 1;
-                c.Format = d.Format;
-                c.SampleDesc.Count = 1;
-                c.Usage = D3D11_USAGE_DEFAULT;
-                c.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-                if (FAILED(device->CreateTexture2D(&c, nullptr, &g_copy)) || !g_copy) {
-                    g_copy = nullptr;
-                    return;
-                }
-                D3D11_SHADER_RESOURCE_VIEW_DESC v{};
-                v.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-                v.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-                v.Texture2D.MipLevels = 1;
-                if (FAILED(device->CreateShaderResourceView(g_copy, &v, &g_copySrv)) || !g_copySrv) {
-                    releaseCopy();
-                    return;
-                }
-                g_copyDevice = device;
-                g_copyW = d.Width;
-                g_copyH = d.Height;
-                g_copyFmt = uint32_t(d.Format);
-            }
-            ID3D11DeviceContext* ctx = nullptr;
-            device->GetImmediateContext(&ctx);
-            if (!ctx) return;
-            ctx->CopyResource(g_copy, tex);
-            ctx->Release();
-            copied = true;
-        });
-        if (copied) {
-            g_doorShow = true;
-            g_doorAspect = ofh::aspectOf(g_copyW, g_copyH);
-            g_heldIndex = shownIndex;
-            g_heldCount = shownCount;
-            g_heldPanel = panel;
-            ++g_summary.shown;
-        } else {
-            g_hold.reset();  // a copy that did not happen is not one to hold
-            ++g_summary.copyFail;
-            if (!g_copyFailSaid) {
-                g_copyFailSaid = true;
-                Log::get().note("on-foot hud: the %ux%u panel could not be copied (its texture is gone or of another shape, or a "
-                                "texture of EDVR's could not be made); nothing is shown while that lasts, the summary counts it as "
-                                "copy-fail. Said once.",
-                                panel.w, panel.h);
-            }
-        }
-    }
-    // A panel that could not be copied is not shown and not said as shown: the line stays what it was, the summary counts copy-fail.
-    if ((reason != ofh::Reason::Showing || g_doorShow) && g_latch.admit(reason, shownIndex, panel.w, panel.h, mode)) {
-        char line[300];
-        if (reason == ofh::Reason::Showing)
-            ofh::formatShowing(shownIndex, shownCount, panel, mode, width, line, sizeof(line));
-        else
-            ofh::formatStopped(reason, line, sizeof(line));
-        say(line);
-    }
-    for (auto*& t : ranked.tex) t = nullptr;  // g_cur's, not this copy's to release
-    if (!g_doorShow) return false;
-    *out = {g_copySrv, g_doorAspect, width, mode == ofh::Mode::Body ? 1 : 0};
-    return true;
+    return n;
 }
 
 }  // namespace edvr

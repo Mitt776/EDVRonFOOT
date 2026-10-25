@@ -1146,12 +1146,13 @@ bool makeTex(ID3D11Device* dev, uint32_t w, uint32_t h, DXGI_FORMAT texFmt, DXGI
     return true;
 }
 
-// EDVRonFOOT: the on-foot HUD's sheet (on_foot_hud.h) goes through the same
-// pass with the game's panel in place of the raster. Its own output textures,
-// so the menu can composite over the sheet's result; its own failure lines;
-// none of the menu's side effects (its timer ring, its census section, its
-// drawn flag, its first-composite line).
-EyeState g_sheetEye[2];
+// EDVRonFOOT: the on-foot HUD's and menus' sheets (on_foot_hud.h) go through
+// the same pass with the game's panel in place of the raster. Each layer its
+// own output textures, so each sheet composites over the one before and the
+// menu over the last; their own failure lines; none of the menu's side
+// effects (its timer ring, its census section, its drawn flag, its
+// first-composite line).
+EyeState g_sheetEye[kMenuSheetLayers][2];
 bool     g_sheetFailNoted = false;
 FaultBudget g_sheetBudget("onFootHudSheet", 8);
 
@@ -1504,12 +1505,14 @@ void* menuPanelCompositeNative(ID3D11Texture2D* src, int eye, const float* bound
     guardedBudget(g_budget, [&] { out = compositeInner(src, eye, bounds, xf); });
     return out;
 }
-void* menuPanelCompositeSheet(ID3D11Texture2D* src, int eye, const float* bounds, const float xf[12],
+void* menuPanelCompositeSheet(int layer, ID3D11Texture2D* src, int eye, const float* bounds, const float xf[12],
                               ID3D11ShaderResourceView* sheet, float aspect, const MenuGeometry& g) {
-    if (graphicsRuntimeDisabled() || !src || !xf || !sheet || eye < 0 || eye > 1 || !(aspect > 0.0f) ||
-        !(g.alpha > 0.0f) || !(g.halfW > 0.0f)) return nullptr;
+    if (graphicsRuntimeDisabled() || layer < 0 || layer >= kMenuSheetLayers || !src || !xf || !sheet || eye < 0 || eye > 1 ||
+        !(aspect > 0.0f) || !(g.alpha > 0.0f) || !(g.halfW > 0.0f)) return nullptr;
     void* out = nullptr;
-    guardedBudget(g_sheetBudget, [&] { out = compositeSheet(src, eye, bounds, xf, false, g, sheet, aspect, g_sheetEye, false); });
+    guardedBudget(g_sheetBudget, [&] {
+        out = compositeSheet(src, eye, bounds, xf, false, g, sheet, aspect, g_sheetEye[layer], false);
+    });
     return out;
 }
 
@@ -1825,7 +1828,8 @@ void menuPanelShutdown() {
     if (g_w.started && g_w.thread.joinable()) g_w.thread.join();
     g_w.started = false;
     for (EyeState& e : g_eye) releaseEye(e);
-    for (EyeState& e : g_sheetEye) releaseEye(e);
+    for (auto& layer : g_sheetEye)
+        for (EyeState& e : layer) releaseEye(e);
     releaseQueries();
     if (g_panelSrv) { g_panelSrv->Release(); g_panelSrv = nullptr; }
     if (g_panelTex) { g_panelTex->Release(); g_panelTex = nullptr; }

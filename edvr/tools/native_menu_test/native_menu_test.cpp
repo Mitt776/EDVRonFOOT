@@ -41,7 +41,7 @@ bool gpuCensusBegin(ID3D11DeviceContext*, GpuCensusSection) noexcept { return fa
 void gpuCensusEnd(ID3D11DeviceContext*, GpuCensusSection) noexcept {}
 // EDVRonFOOT: the on-foot HUD (on_foot_hud.cpp: the draw census, the journal) is not linked here. With no sheet, treat is the menu's
 // alone, which is what this rig pins.
-bool onFootHudSheetForEye(ID3D11Device*, uint32_t, OnFootHudSheet*) { return false; }
+int onFootHudSheetsForEye(ID3D11Device*, uint32_t, OnFootHudSheet*) { return 0; }
 }
 
 static bool readPixels(ID3D11Device* d, ID3D11DeviceContext* c,

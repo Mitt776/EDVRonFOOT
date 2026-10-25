@@ -2,15 +2,18 @@
 //
 // Drives the pure half on synthetic frames: the .9 census's panels (headset stereo: 2412x1449 takes most interface draws, then
 // 2768x2383 and 2162x1922; the census counted 88-122 font draws a snapshot, the split here is the fixture's), a frame with the game's
-// own composite (B10B032B) shown nothing, no panels, equal counts, the scouting key stepping 1 -> 2 -> 3 -> 1 and a panel count that
-// changes in the middle of it, the body anchor after a head turn and after a seated-space turn, the decision order, the change latch
-// and its budget, the two keys' wrong values, and the text of every line.
+// own composite (B10B032B) shown nothing, no panels, equal counts, the body anchor after a head turn and after a seated-space turn,
+// the decision order, the change latch and its budget, the two keys' wrong values, and the text of every line.
 //
 // .24 (the HUD cylinder): the HUD panel is picked by its proportions 1.665 (stereo 2412x1449 beside 2162x1922 with more draws, the
 // cinema's 3564x2140, the larger of two, none), the copy is held through frames the game did not redraw it (every other frame, 29 and
 // 30 in a row), a composite draw counts only when it reads the HUD panel, the sheet is a cylinder round the head (a 90 degree sheet
-// ends 45 degrees from the centre, the way menuPanelHit reads it), the keys read empty as body and 85, the scouting order has the HUD
+// ends 45 degrees from the centre, the way menuPanelHit reads it), the keys read empty as body and 85, the summary's order has the HUD
 // panel first, and a new panel size gets one line.
+//
+// .25 (the menus): the four layers by their shapes (the lift 1029x949, the answers 1410x245, the dialog 1410x749, the HUD; the atlas,
+// the captions and the landing's one-off panels none), their places from the HUD's width (85 and 50 degrees), placeAnchor's turn and
+// drop, each layer's own hold and its own composite bit, a menu's quiet latch, and the menu lines and the summary's menus field.
 #include "../../src/d3d11/on_foot_hud_core.h"
 #include <cmath>
 #include <cstdio>
@@ -95,7 +98,7 @@ void partRank() {
     for (int i = 0; i <= kMaxPanels; ++i) slots[i] = m.note(&slots[i], 10, 10, 27);
     check(m.count == kMaxPanels && m.dropped == 1 && slots[kMaxPanels] == -1, "a ninth target is dropped and counted");
     m.clear();
-    check(m.count == 0 && m.dropped == 0 && !m.gameComposites, "clear empties the tally");
+    check(m.count == 0 && m.dropped == 0 && !m.composites, "clear empties the tally");
 }
 
 void partHud() {
@@ -142,36 +145,164 @@ void partHud() {
     e.note(&g_res[0], 1665, 1000, 27);
     orderPanels(e.panels, e.count);
     check(e.panels[0].w == 1665 && e.panels[1].w == 300 && e.panels[2].w == 100, "the HUD panel first, the others ranked after it");
-
-    // The default shows only the HUD panel; a frame without one shows none.
-    Selector sel;
-    check(shownIndex(s.panels, s.count, sel) == 0, "default: the HUD panel is shown");
-    check(shownIndex(none.panels, none.count, sel) == -1, "default, no HUD panel: nothing to show (the hold decides)");
-    check(shownIndex(nullptr, 0, sel) == -1, "default, no panels: nothing");
-    sel.press(s.count);
-    check(shownIndex(s.panels, s.count, sel) == 1 && s.panels[1].w == 2162, "after a press: the next panel, by the order");
-    sel.press(s.count);
-    check(shownIndex(s.panels, s.count, sel) == 0, "after the last: the HUD panel again");
-    Selector scouting;
-    scouting.press(none.count);
-    check(shownIndex(none.panels, none.count, scouting) == 0, "scouting with no HUD panel: by draws, as before");
 }
 
 void partComposite() {
-    int a, b, atlas, now, last;
-    const void* hudNow = &now;
-    const void* hudLast = &last;
+    int a, b, atlas, now, last, lift;
+    const void* none[kLayers] = {};
+    const void* hudNow[kLayers] = {&now};
+    const void* hudLast[kLayers] = {&last};
     const void* readsHud[3] = {&atlas, &now, nullptr};
-    check(readsHudPanel(readsHud, 3, hudNow, hudLast), "a composite draw that reads the HUD panel: the game shows it");
+    check(readsPanels(readsHud, 3, hudNow, hudLast) == 1u, "a composite draw that reads the HUD panel: the game shows it");
     const void* readsOld[3] = {nullptr, nullptr, &last};
-    check(readsHudPanel(readsOld, 3, hudNow, hudLast), "it reads the last frame's HUD panel (this one's is not drawn yet): the same");
-    check(readsHudPanel(readsOld, 3, nullptr, hudLast) && !readsHudPanel(readsOld, 3, hudNow, nullptr), "either id may be unknown");
+    check(readsPanels(readsOld, 3, hudNow, hudLast) == 1u, "it reads the last frame's HUD panel (this one's is not drawn yet): the same");
+    check(readsPanels(readsOld, 3, none, hudLast) == 1u && readsPanels(readsOld, 3, hudNow, none) == 0u, "either id may be unknown");
     const void* readsAtlas[3] = {&atlas, &a, &b};
-    check(!readsHudPanel(readsAtlas, 3, hudNow, hudLast), "a composite draw that reads the crosshair atlas: the sheet stays");
+    check(readsPanels(readsAtlas, 3, hudNow, hudLast) == 0u, "a composite draw that reads the crosshair atlas: the sheet stays");
     const void* empty[3] = {};
-    check(!readsHudPanel(empty, 3, nullptr, nullptr) && !readsHudPanel(empty, 3, hudNow, hudLast),
+    check(readsPanels(empty, 3, none, none) == 0u && readsPanels(empty, 3, hudNow, hudLast) == 0u,
           "no textures: nothing, and null is never a match");
-    check(!readsHudPanel(readsHud, 3, nullptr, nullptr), "no HUD panel known: no match");
+    check(readsPanels(readsHud, 3, none, none) == 0u, "no panel known: no match");
+    // .25: the bit is the layer's whose panel is read; the HUD's is not set by a read of the lift menu.
+    const void* both[kLayers] = {&now, &lift};
+    const void* readsLift[3] = {&atlas, &lift, nullptr};
+    check(readsPanels(readsLift, 3, both, none) == (1u << int(Layer::Lift)), "a composite draw that reads the lift menu: the lift's bit only");
+    const void* readsTwo[3] = {&lift, &now, nullptr};
+    check(readsPanels(readsTwo, 3, both, none) == ((1u << int(Layer::Lift)) | 1u), "reading both: both bits");
+}
+
+void partLayers() {
+    // The menus' stereo shapes, from .24's lines.
+    check(isLayerShape(Layer::Lift, 1029, 949) && findLayer(Layer::Lift, nullptr, 0) == -1, "1029x949 is the lift and door menu");
+    check(isLayerShape(Layer::Answers, 1410, 245), "1410x245 is the answers");
+    check(isLayerShape(Layer::Dialog, 1410, 749), "1410x749 is the second dialog panel");
+    check(isLayerShape(Layer::Hud, 2412, 1449) && isHudShape(2412, 1449), "2412x1449 is the HUD");
+    // The cinema's sizes are the same shapes.
+    check(isLayerShape(Layer::Lift, 1521, 1402) && isLayerShape(Layer::Answers, 2083, 362) && isLayerShape(Layer::Dialog, 2083, 1107),
+          "the cinema's menus are the same shapes");
+    // Each size is one layer at most, and the atlas, the captions and the landing's one-off panels none.
+    const uint32_t sizes[][2] = {{2412, 1449}, {1029, 949}, {1410, 245}, {1410, 749}};  // in Layer's order
+    for (int i = 0; i < 4; ++i) {
+        int layers = 0;
+        for (int k = 0; k < kLayers; ++k) layers += isLayerShape(Layer(k), sizes[i][0], sizes[i][1]) ? 1 : 0;
+        check(layers == 1 && isLayerShape(Layer(i), sizes[i][0], sizes[i][1]), "each menu size is its own layer only");
+    }
+    const uint32_t strangers[][2] = {{2768, 2383}, {2162, 1922}, {961, 961}, {1321, 1081}, {1600, 1400}, {2000, 1636},
+                                     {2329, 500},  {1000, 1497}, {1599, 1000}, {918, 1000}};
+    for (const auto& s : strangers)
+        for (int k = 0; k < kLayers; ++k) check(!isLayerShape(Layer(k), s[0], s[1]), "the atlas, the captions and the one-off panels: no layer");
+    check(!isLayerShape(Layer::Lift, 0, 1) && !isLayerShape(Layer::Lift, 1, 0), "an empty size is no layer");
+
+    // A frame of the dialog: the HUD, the answers and the captions; two answers-shaped panels, the larger taken.
+    FrameTally t;
+    for (int i = 0; i < 9; ++i) t.note(&g_res[0], 2412, 1449, kFormatTypeless);
+    for (int i = 0; i < 20; ++i) t.note(&g_res[1], 2162, 1922, kFormatTypeless);
+    for (int i = 0; i < 7; ++i) t.note(&g_res[2], 705, 122, kFormatTypeless);
+    int other;
+    for (int i = 0; i < 3; ++i) t.note(&other, 1410, 245, kFormatTypeless);
+    int found[kLayers];
+    findLayers(t.panels, t.count, found);
+    check(found[int(Layer::Hud)] == 0 && found[int(Layer::Answers)] == 3 && found[int(Layer::Lift)] == -1 &&
+              found[int(Layer::Dialog)] == -1,
+          "a dialog frame: the HUD and the answers, no lift, no second panel");
+    check(t.panels[found[int(Layer::Answers)]].w == 1410, "two answers-shaped panels: the larger, not the one with more draws");
+}
+
+void partPlaces() {
+    // The HUD is the measure: the key's width, straight ahead, not moved, curve 1.
+    const Place hud = placeOf(Layer::Hud, 85);
+    check(near(hud.widthDeg, 85) && hud.yawDeg == 0.0f && hud.downM == 0.0f && near(hud.curve, kCurve), "the HUD: 85 deg, 0, 0, curve 1");
+    // At 85 degrees the cinema's frame is 85 / 0.956 = 88.9 degrees across, 1.22 m high at 1.4 m.
+    const Place lift = placeOf(Layer::Lift, 85);
+    check(std::fabs(lift.widthDeg - 56.0f) < 0.5f && std::fabs(lift.yawDeg) < 0.01f, "the lift: about 56 deg wide, straight ahead");
+    check(lift.downM < 0.0f && lift.downM > -0.06f, "the lift: a few centimetres up (its centre is at 0.471 of the frame)");
+    check(near(lift.curve, kMenuCurve) && near(kMenuCurve, 0.4f), "the menus: curve 0.4");
+    const Place answers = placeOf(Layer::Answers, 85);
+    check(std::fabs(answers.downM - 0.38f) < 0.01f && std::fabs(answers.yawDeg) < 0.01f, "the answers: about 0.38 m down, centred");
+    check(std::fabs(std::atan2(answers.downM, kDistance) / kRadPerDeg - 15.0f) < 0.5f, "the answers: about 15 deg below the eyes");
+    check(std::fabs(answers.widthDeg - 58.7f) < 0.5f, "the answers: about two thirds of the HUD wide");
+    const Place dialog = placeOf(Layer::Dialog, 85);
+    check(std::fabs(dialog.yawDeg - 13.8f) < 0.3f && dialog.downM < -0.1f, "the dialog's second panel: about 14 deg right, above");
+    // At 50 degrees everything is smaller in proportion.
+    const Place lift50 = placeOf(Layer::Lift, 50), answers50 = placeOf(Layer::Answers, 50), dialog50 = placeOf(Layer::Dialog, 50);
+    const float r = 50.0f / 85.0f;
+    check(std::fabs(lift50.widthDeg - lift.widthDeg * r) < 1e-3f && std::fabs(answers50.downM - answers.downM * r) < 1e-4f &&
+              std::fabs(dialog50.yawDeg - dialog.yawDeg * r) < 1e-3f && near(placeOf(Layer::Hud, 50).widthDeg, 50),
+          "50 deg: the width, the turn and the drop all in proportion");
+}
+
+bool rigid(const float* p) {
+    for (int a = 0; a < 3; ++a)
+        for (int b = a; b < 3; ++b) {
+            float dot = 0;
+            for (int c = 0; c < 3; ++c) dot += p[a * 4 + c] * p[b * 4 + c];
+            if (std::fabs(dot - (a == b ? 1.f : 0.f)) > 1e-4f) return false;
+        }
+    return true;
+}
+
+void partPlaceAnchor() {
+    const float unit[12] = {1, 0, 0, 0.2f, 0, 1, 0, 1.7f, 0, 0, 1, -0.4f};
+    float a[12];
+    placeAnchor(unit, 0, 0, a);
+    bool same = true;
+    for (int i = 0; i < 12; ++i) same = same && a[i] == unit[i];
+    check(same, "no turn and no drop: the anchor exactly (the HUD's sheet is .24's)");
+    // Forward is -Z (menuPanelHit's sheet stands at z = -dist): a positive turn takes it to +x.
+    placeAnchor(unit, 30, 0, a);
+    check(-a[2] > 0.49f && -a[2] < 0.51f && std::fabs(a[6]) < 1e-6f && rigid(a), "30 deg: forward goes right (+x), stays level, rigid");
+    check(near(a[3], 0.2f) && near(a[7], 1.7f) && near(a[11], -0.4f), "a turn does not move the anchor");
+    placeAnchor(unit, 0, 0.38f, a);
+    check(near(a[7], 1.7f - 0.38f) && near(a[3], 0.2f) && near(a[11], -0.4f) && rigid(a), "a drop lowers y, nothing else");
+    // On a head turned 90 degrees left the turn and the drop are the head's own.
+    const float head[12] = {0, 0, 1, 0.1f, 0, 1, 0, 1.7f, -1, 0, 0, -0.3f};
+    placeAnchor(head, 14, 0.2f, a);
+    check(rigid(a) && near(a[7], 1.5f) && std::fabs(a[5] - 1.0f) < 1e-6f, "a turned anchor: still upright and rigid, lowered along its up");
+}
+
+void partLayerSteps() {
+    DecisionIn in;
+    in.onFoot = 1;
+    Hold hud, lift;
+    HoldStep st;
+    // The HUD is drawn every frame, the lift once and then not: the lift's hold runs out on its own count, the HUD's never.
+    check(stepLayer(in, true, hud, &st) == Reason::Showing && st == HoldStep::Fresh, "the HUD fresh");
+    check(stepLayer(in, true, lift, &st) == Reason::Showing && st == HoldStep::Fresh, "the lift fresh");
+    Reason liftReason = Reason::Showing;
+    for (uint32_t i = 0; i < kHoldFrames; ++i) {
+        check(stepLayer(in, true, hud, &st) == Reason::Showing && st == HoldStep::Fresh, "the HUD's frames go on");
+        liftReason = stepLayer(in, false, lift, &st);
+    }
+    check(liftReason == Reason::NoPanels && st == HoldStep::Expired, "the lift closed: stopped after 30 frames, the HUD's frames notwithstanding");
+    // And the other way: the HUD not drawn while a menu is open (.24) -- the menu goes on, the HUD's copy runs out.
+    Hold hud2, lift2;
+    stepLayer(in, true, hud2, &st);
+    for (uint32_t i = 0; i < kHoldFrames; ++i) {
+        stepLayer(in, false, hud2, &st);
+        check(stepLayer(in, true, lift2, &st) == Reason::Showing, "the lift shown while the HUD is not drawn");
+    }
+    check(st == HoldStep::Fresh && !hud2.have, "the HUD's copy ran out, the lift's frames did not keep it");
+    // The game composites the lift menu (the cinema): the lift stops, the HUD does not.
+    DecisionIn liftIn = in;
+    liftIn.gameComposites = true;
+    check(stepLayer(liftIn, true, lift, &st) == Reason::GameComposites && !lift.have, "the game lays the lift itself: the lift stops, its copy dropped");
+    check(stepLayer(in, true, hud, &st) == Reason::Showing, "the HUD shown all the same");
+    DecisionIn ship = in;
+    ship.onFoot = 0;
+    check(stepLayer(ship, true, hud, &st) == Reason::InTheShip && !hud.have, "in the ship: stopped, the copy dropped");
+}
+
+void partMenuLatch() {
+    DecisionLatch l;
+    l.quietUntilShown = true;
+    check(!l.admit(Reason::InTheShip, 0, 0, Mode::Body), "a menu never shown: its stop is not written");
+    check(!l.admit(Reason::NoPanels, 0, 0, Mode::Body), "nor its no-panels");
+    check(l.admit(Reason::Showing, 1029, 949, Mode::Body), "its opening is");
+    check(l.admit(Reason::NoPanels, 1029, 949, Mode::Body), "its closing is");
+    check(!l.admit(Reason::InTheShip, 0, 0, Mode::Body), "after the closing, nothing more until it opens again");
+    check(l.admit(Reason::Showing, 1029, 949, Mode::Body) && l.windowLines == 3, "it opens again: written, and every line counted");
+    DecisionLatch h;
+    check(h.admit(Reason::InTheShip, 0, 0, Mode::Body), "the HUD's latch writes its stops as on .24");
 }
 
 void partHold() {
@@ -233,22 +364,6 @@ void partNewPanels() {
     check(!f.note(100, 50) && f.unrecorded == 8, "a kept size is not counted again");
     f.newWindow();
     check(f.windowFrom == kMaxSeenSizes && f.unrecorded == 0, "a new window: the list starts over, the memory stays");
-}
-
-void partSelector() {
-    Selector s;
-    check(s.effective(3) == 0, "no press: the first panel");
-    check(s.press(3) == 1 && s.effective(3) == 1, "press 1: the second panel");
-    check(s.press(3) == 2 && s.effective(3) == 2, "press 2: the third panel");
-    check(s.press(3) == 0 && s.effective(3) == 0, "press 3: back to the first panel");
-    // The count changes in the middle: the third panel is chosen, then the frame has two.
-    s.press(3);
-    s.press(3);
-    check(s.index == 2 && s.effective(2) == 0, "the third panel gone: the first panel is shown");
-    check(s.press(2) == 1, "the next press steps on from the first panel");
-    check(s.press(0) == 0 && s.effective(0) == 0, "no panels: the choice returns to the first panel");
-    Selector one;
-    check(!one.pressed && one.press(1) == 0 && one.pressed, "one panel: every press stays on it, and the key counts as used");
 }
 
 void partDecision() {
@@ -327,26 +442,26 @@ void partKeys() {
 
 void partLatch() {
     DecisionLatch l;
-    check(l.admit(Reason::InTheShip, -1, 0, 0, Mode::Visor), "the first decision is written");
-    check(!l.admit(Reason::InTheShip, -1, 0, 0, Mode::Visor), "the same decision is not");
-    check(l.admit(Reason::Showing, 0, 2412, 1449, Mode::Visor), "showing is written");
-    check(!l.admit(Reason::Showing, 0, 2412, 1449, Mode::Visor), "showing again is not");
-    check(l.admit(Reason::Showing, 1, 2768, 2383, Mode::Visor), "another panel is written");
-    check(l.admit(Reason::Showing, 1, 2768, 2383, Mode::Body), "another anchor is written");
-    check(l.admit(Reason::InTheShip, 1, 2768, 2383, Mode::Body), "the stop is written");
-    check(!l.admit(Reason::InTheShip, 0, 1, 1, Mode::Visor), "a stopped decision ignores the panel");
+    check(l.admit(Reason::InTheShip, 0, 0, Mode::Visor), "the first decision is written");
+    check(!l.admit(Reason::InTheShip, 0, 0, Mode::Visor), "the same decision is not");
+    check(l.admit(Reason::Showing, 2412, 1449, Mode::Visor), "showing is written");
+    check(!l.admit(Reason::Showing, 2412, 1449, Mode::Visor), "showing again is not");
+    check(l.admit(Reason::Showing, 3564, 2140, Mode::Visor), "another size is written");
+    check(l.admit(Reason::Showing, 3564, 2140, Mode::Body), "another anchor is written");
+    check(l.admit(Reason::InTheShip, 3564, 2140, Mode::Body), "the stop is written");
+    check(!l.admit(Reason::InTheShip, 1, 1, Mode::Visor), "a stopped decision ignores the panel");
     // The budget: a flicker past it is counted, not written.
     DecisionLatch f;
     int written = 0;
     for (uint32_t i = 0; i < kChangeBudget + 10; ++i)
-        written += f.admit(i % 2 ? Reason::NoPanels : Reason::Showing, 0, 10, 10, Mode::Visor) ? 1 : 0;
+        written += f.admit(i % 2 ? Reason::NoPanels : Reason::Showing, 10, 10, Mode::Visor) ? 1 : 0;
     check(written == int(kChangeBudget) && f.unwritten == 10, "a flicker: the budget's lines written, the rest counted");
     f.newWindow();
-    check(f.admit(Reason::InTheShip, 0, 0, 0, Mode::Visor), "a new window writes again");
+    check(f.admit(Reason::InTheShip, 0, 0, Mode::Visor), "a new window writes again");
 }
 
 void partLines() {
-    char line[700];
+    char line[1200];
     formatKey(Mode::Visor, true, "visor", 70, true, 70, line, sizeof(line));
     check(has(line, "on-foot hud: visor:") && has(line, "experimental.native_vr_on_foot_hud = visor, size 70 deg") &&
               has(line, "crosshair follows the head"),
@@ -364,14 +479,34 @@ void partLines() {
 
     FrameTally t = census9();
     rankPanels(t.panels, t.count);
-    formatShowing(0, t.count, t.panels[0], Mode::Body, 85, line, sizeof(line));
+    formatShowing(t.panels[0], Mode::Body, 85, line, sizeof(line));
     check(std::strcmp(line, "on-foot hud: showing the HUD panel (2412x1449, aspect 1.665, 70 interface draws), anchor body, 85 deg, "
                             "cylinder around the head") == 0,
           "the showing line");
-    formatShowing(1, t.count, t.panels[1], Mode::Visor, 70, line, sizeof(line));
-    check(std::strcmp(line, "on-foot hud: showing panel 2 of 3 (2768x2383, aspect 1.162, 30 interface draws), anchor visor, 70 deg, "
-                            "cylinder around the head") == 0,
-          "the showing line of a scouted panel");
+    Panel lift;
+    lift.w = 1029;
+    lift.h = 949;
+    lift.draws = 40;
+    formatMenuShowing(Layer::Lift, lift, placeOf(Layer::Lift, 85), Mode::Body, line, sizeof(line));
+    check(std::strcmp(line, "on-foot hud: showing the lift and door menu (1029x949, aspect 1.084, 40 interface draws) at its place: "
+                            "56 deg wide, 0 deg right, 0.04 m up, curve 0.4, anchor body") == 0,
+          "the lift's showing line, with its place");
+    Panel answers;
+    answers.w = 1410;
+    answers.h = 245;
+    answers.draws = 12;
+    formatMenuShowing(Layer::Answers, answers, placeOf(Layer::Answers, 85), Mode::Visor, line, sizeof(line));
+    check(has(line, "showing the answers (1410x245, aspect 5.755") && has(line, "0.38 m down") && has(line, "anchor visor"),
+          "the answers' showing line: below");
+    Panel dialog;
+    dialog.w = 1410;
+    dialog.h = 749;
+    formatMenuShowing(Layer::Dialog, dialog, placeOf(Layer::Dialog, 85), Mode::Body, line, sizeof(line));
+    check(has(line, "the second dialog panel") && has(line, "14 deg right") && has(line, "m up"), "the dialog's line: right, above");
+    formatMenuStopped(Layer::Lift, Reason::NoPanels, line, sizeof(line));
+    check(std::strcmp(line, "on-foot hud: the lift and door menu stopped (closed: not drawn for 30 frames)") == 0, "the lift closed");
+    formatMenuStopped(Layer::Answers, Reason::GameComposites, line, sizeof(line));
+    check(std::strcmp(line, "on-foot hud: the answers stopped (the game composites its panels)") == 0, "the answers: the game lays them");
     formatStopped(Reason::InTheShip, line, sizeof(line));
     check(std::strcmp(line, "on-foot hud: stopped (in the ship)") == 0, "the stopped line");
     formatStopped(Reason::GameComposites, line, sizeof(line));
@@ -382,10 +517,6 @@ void partLines() {
     check(std::strcmp(line, "on-foot hud: stopped (no panels: no HUD panel for 30 frames)") == 0, "stopped: no panels");
     formatNewPanel(2083, 362, 14, line, sizeof(line));
     check(std::strcmp(line, "on-foot hud: new panel 2083x362 (aspect 5.754) with 14 interface draws") == 0, "the new panel line");
-    formatSelected(1, t.count, &t.panels[1], line, sizeof(line));
-    check(std::strcmp(line, "on-foot hud: panel 2 of 3 selected (2768x2383, aspect 1.162, 30 draws)") == 0, "the panel key line");
-    formatSelected(0, 0, nullptr, line, sizeof(line));
-    check(has(line, "no interface panel"), "the panel key line with no panels");
 
     Summary s;
     s.frames = 2700;
@@ -402,6 +533,16 @@ void partLines() {
     seen.note(1521, 1402);
     formatSummary(s, t.panels, t.count, 0, 0, seen, line, sizeof(line));
     check(has(line, "held=40") && has(line, "new-panels=[2083x362, 1521x1402]"), "the summary lists the sizes new in this window only");
+    // The menus that were shown in the window; one with zeros is not written.
+    Summary withMenus = s;
+    withMenus.menus[int(Layer::Lift)].shown = 900;
+    withMenus.menus[int(Layer::Lift)].held = 12;
+    withMenus.menus[int(Layer::Dialog)].shown = 30;
+    SeenSizes quiet;
+    formatSummary(withMenus, t.panels, t.count, 0, 0, quiet, line, sizeof(line));
+    check(has(line, "copy-fail=0 menus=[lift shown=900 held=12, dialog shown=30 held=0] new-panels=[]") && !has(line, "answers"),
+          "the summary's menus: the lift and the dialog, not the answers that were never shown");
+    check(has(line, "frames=2700 shown=2690 held=40"), "the HUD's own counters as on .24");
     Summary empty;
     empty.frames = 10;
     empty.noPanels = 10;
@@ -424,10 +565,14 @@ int main(int argc, char** argv) {
     partRank();
     partHud();
     partComposite();
+    partLayers();
+    partPlaces();
+    partPlaceAnchor();
+    partLayerSteps();
+    partMenuLatch();
     partHold();
     partArc();
     partNewPanels();
-    partSelector();
     partDecision();
     partAnchor();
     partKeys();

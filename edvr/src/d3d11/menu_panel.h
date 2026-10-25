@@ -45,11 +45,14 @@ void* menuPanelCompositeNative(ID3D11Texture2D* src, int eye, const float* bound
                                const float xf[12]);
 struct MenuGeometry;
 // EDVRonFOOT: the same composite for any premultiplied sheet -- the on-foot
-// HUD's copy of the game's interface panel (on_foot_hud.h). `aspect` is the
-// sheet's height over its width; `g` places it (shift 0 for a sheet that is
-// all card). Its own output textures, so the menu can be composited over the
-// result in the same treat; the native frustum must be set, as for the menu.
-void* menuPanelCompositeSheet(ID3D11Texture2D* src, int eye, const float* bounds,
+// HUD's and menus' copies of the game's interface panels (on_foot_hud.h).
+// `layer` 0..kMenuSheetLayers-1 picks the sheet's own output textures, so
+// each sheet can composite over the one before it, and the menu over the
+// last, in the same treat. `aspect` is the sheet's height over its width; `g`
+// places it (shift 0 for a sheet that is all card). The native frustum must
+// be set, as for the menu.
+constexpr int kMenuSheetLayers = 4;
+void* menuPanelCompositeSheet(int layer, ID3D11Texture2D* src, int eye, const float* bounds,
                               const float xf[12], ID3D11ShaderResourceView* sheet,
                               float aspect, const MenuGeometry& g);
 
