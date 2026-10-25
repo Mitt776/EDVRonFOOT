@@ -3,16 +3,18 @@
 // on_foot_hud_core.h for the pure half and its reasons).
 //
 // With native VR on foot the game draws its whole on-foot interface into hidden panels and, in headset stereo, never lays them into
-// the picture. This shows the panel with most interface draws as a curved sheet in front of the eyes (visor) or in front of the body
-// (body), composited at the door by native_menu.cpp's treat, under the F8 menu, with menu_panel's pass.
+// the picture. This shows the HUD panel (the one with the HUD's proportions, 1.665) as a sheet bent round the head, in front of the eyes
+// (visor) or in front of the body (body), composited at the door by native_menu.cpp's treat, under the F8 menu, with menu_panel's pass.
 //
 // THREE PLACES, THREE THREADS AT MOST.
 //   onFootHudNoteDraw      the draw hook (vscreen.cpp), every draw while onFootHudWantsDraws(): counts the interface draws per target
-//                          that is not an eye and notes the game's own composite. While the flag is down it is not called at all.
+//                          that is not an eye and notes the game's own composite -- only when that draw reads the HUD panel (a
+//                          PSGetShaderResources of slots 0-2, released in the same call). While the flag is down it is not called at all.
 //   onFootHudFrameBoundary the frame thread (device_hook.cpp): the keys, the journal, the flag, the frame's panels ranked and kept
-//                          (with a reference) until the next boundary, the panel key, the 30-second summary.
+//                          (with a reference) until the next boundary, a line for each new panel size, the panel key, the 30-second summary.
 //   onFootHudSheetForEye   the door (native_menu.cpp's treat, every eye of every frame): the decision and its line, the copy of the
-//                          chosen panel into a texture of EDVR's that the sheet reads.
+//                          HUD panel into a texture of EDVR's that the sheet reads -- only from a frame that drew into it; a frame
+//                          that did not leaves the last copy, held up to 30 frames.
 #include <atomic>
 #include <cstdint>
 

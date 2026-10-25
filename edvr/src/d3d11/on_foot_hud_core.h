@@ -7,8 +7,9 @@
 // WHAT THE FLIGHT FOUND. With native VR on foot the game still draws the whole on-foot interface -- bars, compass, crosshair, the
 // gadget wheel, the dialogues -- with its three interface shaders into hidden panels (R8G8B8A8_TYPELESS, viewed UNORM; 2412x1449 the
 // one that takes most of them, 2768x2383 and 2162x1922 the others). In the cinema the game lays those panels into the picture with
-// vs B10B032BDFD46700 and vs C4B4B334B26E81A9; in headset stereo it skips that step and nobody reads them. The glue shows the panel
-// with most interface draws as a curved sheet in the eye, at the door, the way the F8 menu is drawn.
+// vs B10B032BDFD46700 and vs C4B4B334B26E81A9; in headset stereo it skips that step and nobody reads the HUD panel. The glue shows the
+// HUD panel -- the one with the HUD's proportions, 1.665 -- as a sheet bent round the head, in the eye, at the door, the way the F8
+// menu is drawn (.24: the panel by its shape, not by its draw count; held through the frames the game does not redraw it).
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -46,6 +47,20 @@ struct Panel {
 };
 constexpr int kMaxPanels = 8;
 
+// The HUD panel is the one with the HUD's proportions, width over height 1.665 +- 0.01 (cinema 3564x2140, stereo 2412x1449: one scale
+// for both, so HMD quality does not move it; the draw count does jump on a station). Of several, the largest.
+constexpr float kHudAspect = 1.665f, kHudAspectTol = 0.01f;
+inline bool isHudShape(uint32_t w, uint32_t h) {
+    if (!w || !h) return false;
+    return std::fabs(double(w) / double(h) - 1.665) <= 0.01 + 1e-9;  // in double: the floats above would put 1.655 a hair outside
+}
+inline int findHud(const Panel* p, int n) {
+    int best = -1;
+    for (int i = 0; i < n; ++i)
+        if (isHudShape(p[i].w, p[i].h) && (best < 0 || uint64_t(p[i].w) * p[i].h > uint64_t(p[best].w) * p[best].h)) best = i;
+    return best;
+}
+
 // Most interface draws first; equal counts, the larger area first; equal both, the order they were met (stable).
 inline void rankPanels(Panel* p, int n) {
     for (int i = 1; i < n; ++i) {
@@ -57,6 +72,26 @@ inline void rankPanels(Panel* p, int n) {
             --j;
         }
         p[j + 1] = x;
+    }
+}
+
+// Does a draw of the game's composite shaders read the HUD panel? `read` is the resources behind its texture slots (null for an empty
+// slot), `hud` this frame's HUD panel and the last frame's (null when not known yet). A match is the game laying its own HUD into the
+// picture; a read of anything else (the crosshair's and markers' atlas, the captions) is not.
+inline bool readsHudPanel(const void* const* read, int n, const void* hudNow, const void* hudLast) {
+    for (int i = 0; i < n; ++i)
+        if (read[i] && (read[i] == hudNow || read[i] == hudLast)) return true;
+    return false;
+}
+
+// The scouting order: the HUD panel first (when the frame has one), then the others by draw count.
+inline void orderPanels(Panel* p, int n) {
+    rankPanels(p, n);
+    const int h = findHud(p, n);
+    if (h > 0) {
+        const Panel x = p[h];
+        for (int i = h; i > 0; --i) p[i] = p[i - 1];
+        p[0] = x;
     }
 }
 
@@ -88,29 +123,91 @@ struct FrameTally {
     void clear() { *this = FrameTally{}; }
 };
 
-// The scouting key's choice: 0 the main panel, 1 the second, 2 the third... A press steps to the next panel the frame has and from the
-// last back to the main one. A choice the frame no longer has (fewer panels than before) reads as the main panel, and the next press
-// steps on from there.
+// The scouting key's choice over the ordered panels: 0 the HUD panel, 1 the next, 2 the one after... A press steps to the next panel
+// the frame has and from the last back to the first. A choice the frame no longer has (fewer panels than before) reads as the first,
+// and the next press steps on from there. pressed tells a key that has been used from the default: without a press only the HUD
+// panel is shown, and a frame without one shows none (the hold below decides how long the last copy stays).
 struct Selector {
     int index = 0;
+    bool pressed = false;
     int effective(int count) const { return index < count ? index : 0; }
     int press(int count) {
+        pressed = true;
         index = count > 0 ? (effective(count) + 1) % count : 0;
         return index;
     }
 };
+// The panel to show out of the ordered panels, -1 for none. By default the HUD panel only; once the key is pressed, the choice.
+inline int shownIndex(const Panel* ordered, int n, const Selector& s) {
+    if (n <= 0) return -1;
+    if (!s.pressed) return isHudShape(ordered[0].w, ordered[0].h) ? 0 : -1;
+    return s.effective(n);
+}
 
-// experimental.native_vr_on_foot_hud: visor (to the head), body (in front of the body), off. Missing or empty is visor; anything else
-// is visor too, with *valid false so the glue says so once.
+// Copy only from a frame that drew into the panel; otherwise keep showing the last copy, and give up after kHoldFrames in a row
+// without one (the game clears the panel at the start of a frame and on a station redraws it every other frame: a copy of the
+// cleared frame was the flicker of .10). step() once per frame the door decides.
+constexpr uint32_t kHoldFrames = 30;
+enum class HoldStep : int { Fresh = 0, Held = 1, Expired = 2 };
+struct Hold {
+    bool have = false;
+    uint32_t missed = 0;
+    HoldStep step(bool drew) {
+        if (drew) {
+            have = true;
+            missed = 0;
+            return HoldStep::Fresh;
+        }
+        if (!have) return HoldStep::Expired;
+        if (++missed >= kHoldFrames) {
+            reset();
+            return HoldStep::Expired;
+        }
+        return HoldStep::Held;
+    }
+    void reset() {
+        have = false;
+        missed = 0;
+    }
+};
+
+// The sizes of panels met while the sheet is needed, for the one line each gets (.24: where do the lift, dialog and door menus go).
+// 32 places; a 33rd size is counted, not kept.
+constexpr int kMaxSeenSizes = 32;
+struct SeenSizes {
+    uint32_t w[kMaxSeenSizes] = {}, h[kMaxSeenSizes] = {};
+    int count = 0, windowFrom = 0;
+    uint32_t unrecorded = 0;
+    // True when the size is new and kept: the caller writes its line.
+    bool note(uint32_t pw, uint32_t ph) {
+        for (int i = 0; i < count; ++i)
+            if (w[i] == pw && h[i] == ph) return false;
+        if (count == kMaxSeenSizes) {
+            ++unrecorded;
+            return false;
+        }
+        w[count] = pw;
+        h[count] = ph;
+        ++count;
+        return true;
+    }
+    void newWindow() {
+        windowFrom = count;
+        unrecorded = 0;
+    }
+};
+
+// experimental.native_vr_on_foot_hud: visor (to the head), body (in front of the body), off. Missing or empty is body; anything else
+// is body too, with *valid false so the glue says so once.
 enum class Mode : int { Visor = 0, Body = 1, Off = 2 };
 inline const char* modeName(Mode m) { return m == Mode::Body ? "body" : m == Mode::Off ? "off" : "visor"; }
 inline Mode parseMode(const char* text, bool* valid) {
     if (valid) *valid = true;
-    if (!text) return Mode::Visor;
+    if (!text) return Mode::Body;
     while (*text == ' ' || *text == '\t') ++text;
     size_t n = std::strlen(text);
     while (n && (text[n - 1] == ' ' || text[n - 1] == '\t' || text[n - 1] == '\r' || text[n - 1] == '\n')) --n;
-    if (!n) return Mode::Visor;
+    if (!n) return Mode::Body;
     auto is = [&](const char* word) {
         if (std::strlen(word) != n) return false;
         for (size_t i = 0; i < n; ++i) {
@@ -124,23 +221,26 @@ inline Mode parseMode(const char* text, bool* valid) {
     if (is("body")) return Mode::Body;
     if (is("off")) return Mode::Off;
     if (valid) *valid = false;
-    return Mode::Visor;
+    return Mode::Body;
 }
 
-// experimental.native_vr_on_foot_hud_size: the sheet's width in degrees, 30..110; anything else (NaN included) is 70, *valid false.
-constexpr float kWidthDefault = 70.0f, kWidthMin = 30.0f, kWidthMax = 110.0f;
+// experimental.native_vr_on_foot_hud_size: the sheet's width in degrees, 30..110; anything else (NaN included) is 85, *valid false.
+constexpr float kWidthDefault = 85.0f, kWidthMin = 30.0f, kWidthMax = 110.0f;
 inline float parseWidth(float raw, bool* valid) {
     const bool ok = raw >= kWidthMin && raw <= kWidthMax;
     if (valid) *valid = ok;
     return ok ? raw : kWidthDefault;
 }
 
-// The sheet's place, the F8 menu's: 1.4 m out, the menu's default wrap. Its half-width along the surface from the angle; its height
-// from the panel's proportions.
+// The sheet's place: a cylinder round the head, 1.4 m out. curve 1.0 is a radius equal to the distance, so the cylinder's axis is the
+// anchor's own point -- the head -- and every point of the sheet is 1.4 m from the eyes. The half-width is the ARC, as menuPanelHit
+// reads it (u = (theta * R - shift + halfW) / 2halfW, R = dist / curve): dist * half the angle in radians, so that the edge stands at
+// half the angle from the centre. The height follows the panel's proportions.
 constexpr float kDistance = 1.4f;
-constexpr float kCurve = 0.2f;
-inline float halfWidth(float widthDeg) { return kDistance * std::tan(widthDeg * 0.5f * 0.0174532925f); }
+constexpr float kCurve = 1.0f;
+inline float halfWidth(float widthDeg) { return kDistance * widthDeg * 0.5f * 0.0174532925f; }
 inline float aspectOf(uint32_t w, uint32_t h) { return w ? float(h) / float(w) : 0.0f; }
+inline float ratioOf(uint32_t w, uint32_t h) { return h ? float(w) / float(h) : 0.0f; }  // the lines' spect: width over height
 
 // The body anchor: the seated (LOCAL) space's forward -- yaw only, no tilt, the identity rotation -- at the head's position. The stick
 // turns the world on foot, not LOCAL, so a sheet still in LOCAL stays in front of the body and turns with the stick, while the head
@@ -161,14 +261,14 @@ inline const char* reasonText(Reason r) {
         case Reason::KeyOff: return "key off";
         case Reason::InTheShip: return "in the ship";
         case Reason::GameComposites: return "the game composites its panels";
-        case Reason::NoPanels: return "no panels";
+        case Reason::NoPanels: return "no panels: no HUD panel for 30 frames";
     }
     return "?";
 }
 struct DecisionIn {
     int onFoot = -1;           // the journal: 1 on foot, 0 not, -1 not known yet (read as not on foot)
     bool nativeOnFoot = true;  // experimental.native_vr_on_foot
-    Mode mode = Mode::Visor;
+    Mode mode = Mode::Body;
     bool gameComposites = false;
     int panels = 0;
 };
@@ -217,7 +317,7 @@ struct DecisionLatch {
 // The 30-second summary's counters.
 constexpr uint64_t kSummaryMs = 30000;
 struct Summary {
-    uint64_t frames = 0, shown = 0, gameComposites = 0, copyFail = 0, noPanels = 0;
+    uint64_t frames = 0, shown = 0, held = 0, gameComposites = 0, copyFail = 0, noPanels = 0;
     void clear() { *this = Summary{}; }
 };
 
@@ -228,9 +328,9 @@ inline int formatKey(Mode mode, bool modeValid, const char* modeText, float widt
     char bad[160] = "";
     int n = 0;
     if (!modeValid)
-        n += std::snprintf(bad + n, sizeof(bad) - size_t(n), "; \"%s\" is not visor, body or off, read as visor", modeText ? modeText : "");
+        n += std::snprintf(bad + n, sizeof(bad) - size_t(n), "; \"%s\" is not visor, body or off, read as body", modeText ? modeText : "");
     if (!widthValid && n >= 0 && size_t(n) < sizeof(bad))
-        std::snprintf(bad + n, sizeof(bad) - size_t(n), "; size %.1f is outside 30..110, read as 70", double(widthRaw));
+        std::snprintf(bad + n, sizeof(bad) - size_t(n), "; size %.1f is outside 30..110, read as 85", double(widthRaw));
     const char* what = mode == Mode::Off ? "off: on foot nothing is shown"
                        : mode == Mode::Body ? "body: on foot the game's interface stands in front of the body (the crosshair is true)"
                                             : "visor: on foot the game's interface stays in front of the eyes (the crosshair follows "
@@ -239,9 +339,23 @@ inline int formatKey(Mode mode, bool modeValid, const char* modeText, float widt
                          double(width), bad);
 }
 
+// The HUD panel by name; a scouting choice of another panel by its number.
 inline int formatShowing(int index, int count, const Panel& p, Mode mode, float width, char* out, size_t cap) {
-    return std::snprintf(out, cap, "on-foot hud: showing panel %d of %d (%ux%u, %u interface draws), anchor %s, %.0f deg", index + 1,
-                         count, p.w, p.h, p.draws, modeName(mode), double(width));
+    if (isHudShape(p.w, p.h))
+        return std::snprintf(out, cap,
+                             "on-foot hud: showing the HUD panel (%ux%u, aspect %.3f, %u interface draws), anchor %s, %.0f deg, cylinder "
+                             "around the head",
+                             p.w, p.h, double(ratioOf(p.w, p.h)), p.draws, modeName(mode), double(width));
+    return std::snprintf(out, cap,
+                         "on-foot hud: showing panel %d of %d (%ux%u, aspect %.3f, %u interface draws), anchor %s, %.0f deg, cylinder "
+                         "around the head",
+                         index + 1, count, p.w, p.h, double(ratioOf(p.w, p.h)), p.draws, modeName(mode), double(width));
+}
+
+// A size met for the first time this session while the sheet is needed.
+inline int formatNewPanel(uint32_t w, uint32_t h, uint32_t draws, char* out, size_t cap) {
+    return std::snprintf(out, cap, "on-foot hud: new panel %ux%u (aspect %.3f) with %u interface draws", w, h, double(ratioOf(w, h)),
+                         draws);
 }
 
 inline int formatStopped(Reason r, char* out, size_t cap) {
@@ -250,26 +364,36 @@ inline int formatStopped(Reason r, char* out, size_t cap) {
 
 inline int formatSelected(int index, int count, const Panel* p, char* out, size_t cap) {
     if (!p || count <= 0)
-        return std::snprintf(out, cap, "on-foot hud: panel key pressed, but this frame drew no interface panel; the main panel is shown "
+        return std::snprintf(out, cap, "on-foot hud: panel key pressed, but this frame drew no interface panel; the HUD panel is shown "
                                        "when there is one");
-    return std::snprintf(out, cap, "on-foot hud: panel %d of %d selected (%ux%u, %u draws)", index + 1, count, p->w, p->h, p->draws);
+    return std::snprintf(out, cap, "on-foot hud: panel %d of %d selected (%ux%u, aspect %.3f, %u draws)", index + 1, count, p->w, p->h,
+                         double(ratioOf(p->w, p->h)), p->draws);
 }
 
-inline int formatSummary(const Summary& s, const Panel* p, int count, uint32_t dropped, uint32_t unwritten, char* out, size_t cap) {
+inline int formatSummary(const Summary& s, const Panel* p, int count, uint32_t dropped, uint32_t unwritten, const SeenSizes& seen, char* out,
+                         size_t cap) {
     char list[400] = "";
     int n = 0;
     for (int i = 0; i < count && n >= 0 && size_t(n) < sizeof(list); ++i)
         n += std::snprintf(list + n, sizeof(list) - size_t(n), "%s%ux%u n=%u", i ? ", " : "", p[i].w, p[i].h, p[i].draws);
-    char extra[120] = "";
+    char fresh[200] = "";  // the sizes first met in this window
+    int f = 0;
+    for (int i = seen.windowFrom; i < seen.count && f >= 0 && size_t(f) < sizeof(fresh); ++i)
+        f += std::snprintf(fresh + f, sizeof(fresh) - size_t(f), "%s%ux%u", i > seen.windowFrom ? ", " : "", seen.w[i], seen.h[i]);
+    char extra[160] = "";
     int e = 0;
     if (dropped) e += std::snprintf(extra + e, sizeof(extra) - size_t(e), " targets-dropped=%u", dropped);
     if (unwritten && e >= 0 && size_t(e) < sizeof(extra))
-        std::snprintf(extra + e, sizeof(extra) - size_t(e), " changes-unwritten=%u", unwritten);
+        e += std::snprintf(extra + e, sizeof(extra) - size_t(e), " changes-unwritten=%u", unwritten);
+    if (seen.unrecorded && e >= 0 && size_t(e) < sizeof(extra))
+        std::snprintf(extra + e, sizeof(extra) - size_t(e), " new-panels-unrecorded=%u", seen.unrecorded);
     return std::snprintf(out, cap,
-                         "on-foot hud 30s: frames=%llu shown=%llu panels=[%s]%s game-composites=%llu no-panels=%llu copy-fail=%llu%s",
-                         static_cast<unsigned long long>(s.frames), static_cast<unsigned long long>(s.shown), list,
-                         count ? "" : " (no panels found)", static_cast<unsigned long long>(s.gameComposites),
-                         static_cast<unsigned long long>(s.noPanels), static_cast<unsigned long long>(s.copyFail), extra);
+                         "on-foot hud 30s: frames=%llu shown=%llu held=%llu panels=[%s]%s game-composites=%llu no-panels=%llu "
+                         "copy-fail=%llu new-panels=[%s]%s",
+                         static_cast<unsigned long long>(s.frames), static_cast<unsigned long long>(s.shown),
+                         static_cast<unsigned long long>(s.held), list, count ? "" : " (no panels found)",
+                         static_cast<unsigned long long>(s.gameComposites), static_cast<unsigned long long>(s.noPanels),
+                         static_cast<unsigned long long>(s.copyFail), fresh, extra);
 }
 
 }  // namespace ofh

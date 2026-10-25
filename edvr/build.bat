@@ -3041,7 +3041,9 @@ echo [edvr] === on_foot_hud_test.exe ===
 REM EDVRonFOOT: build gate for the on-foot HUD (src\d3d11\on_foot_hud_core.h, experimental.native_vr_on_foot_hud). Drives the pure half on
 REM synthetic frames: the .9 census's panels ranked (2412x1449 the main one), the game's own composite in the frame shows nothing, no panels,
 REM equal counts, the panel key stepping 1 -> 2 -> 3 -> 1 and a count that changes in the middle, the body anchor after a head turn and a
-REM seated-space turn, the decision order, the change latch and its budget, wrong key values, and every line's text.
+REM seated-space turn, the decision order, the change latch and its budget, wrong key values, and every line's text. .24: the HUD panel by
+REM its 1.665 shape, the copy held through frames the game did not redraw it (29 and 30), a composite draw that reads the HUD panel or not,
+REM the cylinder's arc (90 degrees ends at 45), empty key = body and 85, the HUD panel first in the scouting order, one line per new size.
 if not exist "%OBJ%\onfoothud" mkdir "%OBJ%\onfoothud"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\onfoothud"\ /Fe"%BUILD%\on_foot_hud_test.exe" ^

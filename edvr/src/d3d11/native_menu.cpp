@@ -128,7 +128,8 @@ HRESULT WINAPI treat(void* context, uint32_t eye, ID3D11Texture2D* source,
     std::memcpy(outBox, treatedBox, sizeof(treatedBox));
     return S_OK;
   };
-  // EDVRonFOOT: the game's on-foot interface first (on_foot_hud.h), under the menu: the menu below composites over its result.
+  // EDVRonFOOT: the game's on-foot interface first (on_foot_hud.h), under the menu: the menu below composites over its result. The
+  // sheet is a cylinder round the anchor (curve 1.0, the arc as the half-width, ofh::halfWidth).
   ID3D11Texture2D* hud = nullptr;
   edvr::OnFootHudSheet sheet;
   if (edvr::onFootHudSheetForEye(s->device, eye, &sheet)) {
