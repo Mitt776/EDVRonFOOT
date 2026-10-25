@@ -2,7 +2,7 @@
 
 ## 1. Основа
 
-- [ ] 1.1 Архивировать `native-vr-on-foot-hud-layer` (`/opsx:archive`). Её задача 5.3 (убрать `on_foot_hud_panel =
+- [x] 1.1 Архивировать `native-vr-on-foot-hud-layer` (`/opsx:archive`). Её задача 5.3 (убрать `on_foot_hud_panel =
   NUMLOCK` из живого `edvr.ini`) отметить как перенесённую в 5.3 этой заявки. Проверка: `openspec validate
   native-vr-on-foot-hud-cylinder --strict` проходит без «Archive would refuse this delta»; есть
   `openspec/specs/on-foot-hud/spec.md`
