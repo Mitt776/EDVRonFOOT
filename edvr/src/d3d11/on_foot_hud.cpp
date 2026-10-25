@@ -414,7 +414,8 @@ bool onFootHudSheetForEye(ID3D11Device* device, uint32_t eye, OnFootHudSheet* ou
             ofh::formatStopped(reason, line, sizeof(line));
         say(line);
     }
-    for (auto*& t : ranked.tex) t = nullptr;  // g_cur's, not this copy's to release    if (!g_doorShow) return false;
+    for (auto*& t : ranked.tex) t = nullptr;  // g_cur's, not this copy's to release
+    if (!g_doorShow) return false;
     *out = {g_copySrv, g_doorAspect, width, mode == ofh::Mode::Body ? 1 : 0};
     return true;
 }
