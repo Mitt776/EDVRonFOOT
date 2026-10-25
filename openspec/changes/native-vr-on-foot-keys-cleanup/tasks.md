@@ -50,18 +50,21 @@
 
 ## 4. Сборка и установка
 
-- [ ] 4.1 Полная сборка. В PowerShell: PATH начинается с `C:\Users\user\AppData\Local\Programs\Python\Python312`,
+- [x] 4.1 Полная сборка. В PowerShell: PATH начинается с `C:\Users\user\AppData\Local\Programs\Python\Python312`,
   `TEMP`/`TMP` = `D:\Project VSC\EDVRonFOOT\edvr\build\tmp`, затем `cmd /c '"D:\Project VSC\EDVRonFOOT\edvr\build.bat"
   --jobs 8'`. Проверка: «all gates passed», квитанция `full-pass`, `config contract ok: 129 keys`; стенд
   `native_vr_on_foot_test` в выводе, старых двух нет. Коммит через `git commit -F`, тег `v0.19.1-edvronfoot.26`;
   `build.bat --dll-only` проходит. Нестабильные под нагрузкой (`flat_temporal_test`, `terrain_checkerboard_test` T5c):
   при сбое повторить сборку один раз и записать это в отчёт.
-- [ ] 4.2 Установка при закрытой игре: `py -3.12 edvr\tools\install_edvr.py --target "C:\Steam\steamapps\common\Elite
+- [x] 4.2 Установка при закрытой игре: `py -3.12 edvr\tools\install_edvr.py --target "C:\Steam\steamapps\common\Elite
   Dangerous\Products\elite-dangerous-odyssey-64" --all --tag edvronfoot --keep-backups 1000 --dry-run`, затем без
   `--dry-run`. Проверка: `--verify-only` ok; хеш живого `edvr.ini` до и после установки один.
-- [ ] 4.3 Живой `edvr.ini` в папке игры: копия в scratchpad, затем Edit убирает три строки `native_vr_probe = …`,
+- [x] 4.3 Живой `edvr.ini` в папке игры: копия в scratchpad, затем Edit убирает три строки `native_vr_probe = …`,
   `on_foot_hud_probe = …`, `native_vr_on_foot_game_hud = …` (с их комментариями, если они там есть). Проверка: дифф
   копии и файла — только эти строки.
+  Сделано: в живом файле были только `native_vr_probe = 0` и `on_foot_hud_probe = 0` с общим комментарием и
+  `# dev: hidden` — убраны эти 4 строки и пустая после них (дифф — 5 удалённых строк, больше ничего);
+  `native_vr_on_foot_game_hud` там не было. Копия до правки: scratchpad `edvr.ini.before-26`.
 
 ## 5. Прогулка и итог
 
