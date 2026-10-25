@@ -22,15 +22,15 @@
 - [x] 2.1 `edvr/README_EDVRONFOOT.md` — поддерживаемая ревизия `334925`; `## Status` в
   `docs/research/native-vr-on-foot.md` и в `edvr/docs/openxr-oculus-selection-2026-09-14.md` — перенос и следующий шаг,
   не длиннее 60 строк. Спеки-дельты этой заявки сходятся с кодом.
-- [ ] 2.2 Полная сборка (PATH с Python312, `TEMP`/`TMP` = `edvr\build\tmp`, `build.bat --jobs 8` по абсолютному
+- [x] 2.2 Полная сборка (PATH с Python312, `TEMP`/`TMP` = `edvr\build\tmp`, `build.bat --jobs 8` по абсолютному
   пути): «all gates passed», `full-pass`; коммит `git commit -F`, тег `v0.19.1-edvronfoot.23`; `build.bat --dll-only`.
-- [ ] 2.3 Установка при закрытой игре: `install_edvr.py --target <папка игры> --all --tag edvronfoot
+- [x] 2.3 Установка при закрытой игре: `install_edvr.py --target <папка игры> --all --tag edvronfoot
   --keep-backups 1000 --dry-run`, затем без `--dry-run`, без `--allow-unqualified-game`. Проверка: `--verify-only` ok;
   живой `edvr.ini` не изменён.
 
 ## 3. Проверка
 
-- [ ] 3.1 Запуск Димой: игра открывается из Steam, VR в корабле. По логу (`edvr_log.py --expect-build
+- [x] 3.1 Запуск Димой: игра открывается из Steam, VR в корабле. По логу (`edvr_log.py --expect-build
   v0.19.1-edvronfoot.23` не 2): `oculus route: native=1 profile=1 ... installed=1`; зонд HUD — строки «installed» у
   всех точек, без «NOT installed». Затем — прогулка `.22` (задача 4.1 заявки `native-vr-on-foot-hud-layout`).
 
