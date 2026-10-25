@@ -58,7 +58,7 @@
   Исследование `docs/research/native-vr-on-foot.md`, `## Status`: следующий шаг — прогулка `.25`;
   `hotkey.on_foot_hud_panel` удалён (решение Димы 25.10). Проверка: `py -3.12 edvr\tools\check_status_blocks.py` — все
   блоки не длиннее 60 строк.
-- [ ] 3.2 Полная сборка. В PowerShell: PATH начинается с `C:\Users\user\AppData\Local\Programs\Python\Python312`,
+- [x] 3.2 Полная сборка. В PowerShell: PATH начинается с `C:\Users\user\AppData\Local\Programs\Python\Python312`,
   `TEMP`/`TMP` = `D:\Project VSC\EDVRonFOOT\edvr\build\tmp`, затем `cmd /c '"D:\Project VSC\EDVRonFOOT\edvr\build.bat"
   --jobs 8'`. Проверка:
   - «all gates passed», квитанция `full-pass`;
@@ -67,7 +67,7 @@
 
   Известные нестабильные тесты под нагрузкой (`flat_temporal_test`, `terrain_checkerboard_test` T5c): при сбое
   повторить сборку один раз и записать это в отчёт.
-- [ ] 3.3 Установка при закрытой игре: `py -3.12 edvr\tools\install_edvr.py --target "C:\Steam\steamapps\common\Elite
+- [x] 3.3 Установка при закрытой игре: `py -3.12 edvr\tools\install_edvr.py --target "C:\Steam\steamapps\common\Elite
   Dangerous\Products\elite-dangerous-odyssey-64" --all --tag edvronfoot --keep-backups 1000 --dry-run`, затем без
   `--dry-run`. Живой `edvr.ini` не трогать. Проверка: `--verify-only` ok; `edvr.ini` не изменился.
 
