@@ -9,7 +9,7 @@
 
 ## 2. Чистое ядро и стенд
 
-- [ ] 2.1 `edvr/src/d3d11/on_foot_hud_core.h` (design, решения 1, 2, 4–7):
+- [x] 2.1 `edvr/src/d3d11/on_foot_hud_core.h` (design, решения 1, 2, 4–7):
   - выбор HUD-панели по пропорции 1.665 ± 0.01, из нескольких — наибольшая;
   - удержание: копия только из кадра с рисованиями в HUD-панель, гаснет после 30 кадров без неё;
   - перебор с HUD-панелью под номером 0;
@@ -19,37 +19,37 @@
   - тексты строк из решения 7.
 
   Проверка: заголовок компилируется в стенде 2.2.
-- [ ] 2.2 Стенд `edvr/tools/on_foot_hud_test` — случаи из решения 8; старые ожидания про «главную за кадр» и `visor`
+- [x] 2.2 Стенд `edvr/tools/on_foot_hud_test` — случаи из решения 8; старые ожидания про «главную за кадр» и `visor`
   по умолчанию переписать под новое поведение. Проверка: стенд проходит; `build.bat` падает, если испортить одно
   ожидание (проверить один раз и вернуть).
 
 ## 3. Подключение
 
-- [ ] 3.1 `edvr/src/d3d11/on_foot_hud.cpp` (design, решение 3): при VS `B10B032B`/`C4B4B334` читать SRV пиксельного
+- [x] 3.1 `edvr/src/d3d11/on_foot_hud.cpp` (design, решение 3): при VS `B10B032B`/`C4B4B334` читать SRV пиксельного
   шейдера 0–2 и ставить `gameComposites`, только если одна из них — HUD-панель этого или прошлого кадра. Ссылки
   отпускаются в том же вызове. Строка новой панели — на границе кадра. Проверка: полная сборка; повторное чтение
   изменённого места — при `off` и в корабле работы нет, кроме проверки флага.
-- [ ] 3.2 `onFootHudSheetForEye`: выбор из ядра, копия только из дорисованного кадра, удержание прежней копии со
+- [x] 3.2 `onFootHudSheetForEye`: выбор из ядра, копия только из дорисованного кадра, удержание прежней копии со
   счётом `held`. `edvr/src/d3d11/native_menu.cpp`: `g.curve = kCurve`, `g.halfW` — дуга из ядра. Проверка: полная
   сборка; трассировка вручную — в корабле, в кинотеатре и при `off` `treat` возвращает то же, что до заявки.
-- [ ] 3.3 Шаблон `edvr.ini`: `native_vr_on_foot_hud = body`, `native_vr_on_foot_hud_size = 85` с прежними `# ui: … |
+- [x] 3.3 Шаблон `edvr.ini`: `native_vr_on_foot_hud = body`, `native_vr_on_foot_hud_size = 85` с прежними `# ui: … |
   live`; контракт настроек. Проверка: в выводе сборки `config contract ok`, число ключей прежнее.
 
 ## 4. Документы, сборка, установка
 
-- [ ] 4.1 `edvr/README_EDVRONFOOT.md`, раздел «Интерфейс на ногах»:
+- [x] 4.1 `edvr/README_EDVRONFOOT.md`, раздел «Интерфейс на ногах»:
   - по умолчанию к телу, 85°, лист изогнут вокруг головы;
   - показывается только HUD-панель, прицел и метки рисует игра;
   - что искать в логе, как выключить.
 
   Исследование: в `## Status` — «следующий шаг: прогулка `.24`». Проверка: `## Status` не длиннее 60 строк.
-- [ ] 4.2 Полная сборка. В PowerShell: PATH начинается с `C:\Users\user\AppData\Local\Programs\Python\Python312`,
+- [x] 4.2 Полная сборка. В PowerShell: PATH начинается с `C:\Users\user\AppData\Local\Programs\Python\Python312`,
   `TEMP`/`TMP` = `D:\Project VSC\EDVRonFOOT\edvr\build\tmp`, затем `cmd /c '"D:\Project VSC\EDVRonFOOT\edvr\build.bat"
   --jobs 8'`. Проверка:
   - «all gates passed», квитанция `full-pass`;
   - коммит через `git commit -F`, тег `v0.19.1-edvronfoot.24`;
   - `build.bat --dll-only` проходит.
-- [ ] 4.3 Установка при закрытой игре: `py -3.12 edvr\tools\install_edvr.py --target "C:\Steam\steamapps\common\Elite
+- [x] 4.3 Установка при закрытой игре: `py -3.12 edvr\tools\install_edvr.py --target "C:\Steam\steamapps\common\Elite
   Dangerous\Products\elite-dangerous-odyssey-64" --all --tag edvronfoot --keep-backups 1000 --dry-run`, затем без
   `--dry-run`. В живом `edvr.ini` через Edit: `native_vr_on_foot_hud = off` → `body`, `native_vr_on_foot_hud_size =
   100.0` → `85`. Проверка: `--verify-only` ok; дифф `edvr.ini` — ровно эти две строки.
