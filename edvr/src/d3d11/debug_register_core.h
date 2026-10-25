@@ -1,10 +1,9 @@
 #pragma once
 // Pure logic for composing the x86 debug register Dr7 (slot 0), shared by the
 // hardware write watches that arm a data breakpoint on a game address
-// (flat_camera_producer_probe.cpp), and for any slot (native_vr_probe.cpp's
-// writer watch). No Windows header, no game memory --
-// tools\transition_flash_prevent_test drives slot 0 without the game,
-// tools\native_vr_probe_test the others.
+// (flat_camera_producer_probe.cpp), and for any slot. No Windows header, no
+// game memory -- tools\transition_flash_prevent_test drives it without the
+// game.
 #include <cstdint>
 
 namespace edvr {
@@ -50,7 +49,7 @@ inline uint32_t disarmSlot0Dr7(uint32_t existing) noexcept {
 
 // ---------------------------------------------------------------------------
 // Any slot 0..3, for a watch that must not take slot 0 from the flat camera
-// producer probe (native_vr_probe.cpp's writer watch uses slot 1). Slot n's
+// producer probe. Slot n's
 // bits: Ln = bit 2n, Gn = bit 2n+1, R/Wn = bits 16+4n..17+4n, LENn = bits
 // 18+4n..19+4n. The same read-modify-write rule as slot 0's: every bit that
 // is not slot n's comes back exactly as given. A slot out of range changes

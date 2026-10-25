@@ -2,8 +2,7 @@
 // On-foot markers, the pure half (EDVRonFOOT; the project's docs\research\native-vr-on-foot.md, "Правка позы PostGUI .17" and
 // "Stereo как поведение .18"). on_foot_markers.h has the hooks. Everything here is plain C++ the rig drives directly: the three points'
 // patterns and the search for them in the game's code, the chain to the PostGUI cameras read through a reader the caller supplies, the
-// decision whether to correct, the corrected pose, the counters, the 30-second window and the text of every line. Nothing here depends
-// on the on-foot HUD probe (on_foot_hud_probe_core.h): the probe goes when the HUD arc closes.
+// decision whether to correct, the corrected pose, the counters, the 30-second window and the text of every line.
 //
 // What it fixes: on foot in headset stereo the game draws its "over the world" layer (the crosshair, the prompts over objects and
 // people) with a camera -- the PostGUI pass's -- that it gives the head's pose every frame, as in the ship. In the cinema the same

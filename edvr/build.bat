@@ -532,10 +532,8 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\glitch_frame.cpp" ^
     "src\d3d11\transition_flash_eye_base.cpp" ^
     "src\d3d11\explorer_cam.cpp" ^
-    "src\d3d11\native_vr_probe.cpp" ^
+    "src\d3d11\native_vr_on_foot.cpp" ^
     "src\d3d11\on_foot_hud.cpp" ^
-    "src\d3d11\on_foot_hud_probe.cpp" ^
-    "src\d3d11\on_foot_hud_layout.cpp" ^
     "src\d3d11\on_foot_markers.cpp" ^
     "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" "src\d3d11\vscreen_footprint.cpp" ^
     "src\d3d11\binding_shadow.cpp" ^
@@ -3018,22 +3016,23 @@ if errorlevel 1 ( echo [edvr] ERROR: explorer cam test build failed & exit /b 1 
 "%BUILD%\explorer_cam_test.exe" --self-test || exit /b 1
 exit /b 0
 
-:rig_native_vr_probe_test
-echo [edvr] === native_vr_probe_test.exe ===
-REM EDVRonFOOT: build gate for the native-VR-on-foot probe (src\d3d11\native_vr_probe.h, experimental.native_vr_probe). Part A drives
-REM native_vr_probe_core.h: the mode mapping, the ring, the limiter and every line's text. Part B compiles the REAL glue with the real
-REM CodeHook and hooks synthetic functions that begin with the game's prologue: arguments forwarded unchanged, recording only while on,
-REM an unreadable field survived, a wrong prologue refused with one line and its bytes untouched, then hooked once corrected.
-REM Part C: the view pipeline rebuild/teardown on synthetic copies -- decision lines only on change, the game's mode untouched.
-if not exist "%OBJ%\nativevrprobe" mkdir "%OBJ%\nativevrprobe"
+:rig_native_vr_on_foot_test
+echo [edvr] === native_vr_on_foot_test.exe ===
+REM EDVRonFOOT: build gate for native VR on foot (src\d3d11\native_vr_on_foot.h, experimental.native_vr_on_foot): the two switches of
+REM the game's data. Part F: the cinema-on-foot switch's step (only 1 -> 0 with the key on and our 0 -> 1 with it off, nothing over any
+REM other value, repeats said at 1, 10, 100, ...), its lines and the REAL glue on a byte of the rig's own. Part G: both readers found
+REM by their code on a synthetic image and a synthetic PE (one match, many, outside, not writable, other registers, unreadable
+REM headers), the find lines, and the HUD switch's glue. Part H: the game HUD switch's pattern on build 334473's own bytes, its step
+REM (only -1 -> 1 and back) and its lines.
+if not exist "%OBJ%\nativevronfoot" mkdir "%OBJ%\nativevronfoot"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^
-    /Fo"%OBJ%\nativevrprobe"\ /Fe"%BUILD%\native_vr_probe_test.exe" ^
-    "tools\native_vr_probe_test\native_vr_probe_test.cpp" "src\d3d11\native_vr_probe.cpp" ^
-    "src\common\code_hook.cpp" "src\common\guard.cpp" "src\common\log.cpp" "src\common\config.cpp" ^
+    /Fo"%OBJ%\nativevronfoot"\ /Fe"%BUILD%\native_vr_on_foot_test.exe" ^
+    "tools\native_vr_on_foot_test\native_vr_on_foot_test.cpp" "src\d3d11\native_vr_on_foot.cpp" ^
+    "src\common\guard.cpp" "src\common\log.cpp" "src\common\config.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib
-if errorlevel 1 ( echo [edvr] ERROR: native vr probe test build failed & exit /b 1 )
-"%BUILD%\native_vr_probe_test.exe" --self-test || exit /b 1
+if errorlevel 1 ( echo [edvr] ERROR: native vr on foot test build failed & exit /b 1 )
+"%BUILD%\native_vr_on_foot_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_on_foot_hud_test
@@ -3051,59 +3050,6 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     "tools\on_foot_hud_test\on_foot_hud_test.cpp" /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: on-foot hud test build failed & exit /b 1 )
 "%BUILD%\on_foot_hud_test.exe" --self-test || exit /b 1
-exit /b 0
-
-:rig_on_foot_hud_probe_test
-echo [edvr] === on_foot_hud_probe_test.exe ===
-REM EDVRonFOOT: build gate for the on-foot HUD probe (src\d3d11\on_foot_hud_probe.h, experimental.on_foot_hud_probe). Part A drives
-REM on_foot_hud_probe_core.h on a fake game node in the rig's memory: which nodes are ours, the mask, the pockets, the view name, the
-REM change filter, the summary, the ring and every line's text. Part B compiles the REAL glue with the real CodeHook on a synthetic
-REM function with the game's prologue: another build and wrong bytes refused with one line, the node forwarded unchanged, the snapshot
-REM after the original, forward only while off, another vtable not read, an unreadable field survived with one line. .15: the
-REM cameras' angles, the follow slopes, the pass table and their lines; the PostGUI pass switch hooked on its own synthetic function,
-REM the pass forwarded unchanged and noted, the camera drain's pose, follow and switch lines over two 30-second windows. .19: the HUD
-REM node's provider list on fake providers (read as the node's prepare reads it, checked against the frame mask: another node's
-REM context and an OR that is not the mask dropped by reason, the 65th provider only a number, an unreadable address skipping the
-REM snapshot, the shape changing with the subscription and not with the answers, counts by place, the lists and 30-second summary
-REM lines, "no snapshots" told from "providers silent"). .20: the _HUD provider's gates on a fake record (B, its record for the
-REM node's camera and set, groups, items, parts, meshes with sections, instances and materials): the walk reads all seven gates of
-REM every path and names the first closed one (each of the seven closed alone, flags under another slot, a pass for another view with
-REM the remembered pass shown), recomputes the lists and checks them against the record's answer and the provider's (the collectors'
-REM rest named, a bit the paths give and the record has not, an answer that differs, no record, an unreadable element, the budgets,
-REM the 65th _HUD path only counted, a slot or view not believed), the census, the 30-second walks by place and the collectors' table
-REM through the real glue (one walk a second, a changed census after 5 s). .21: the HUD part (the part of the record with the most open
-REM _HUD paths, learned in cinema) read whole on that fake record in every place: in the record or not (what stands at its place named,
-REM the old address not read), its flags, meshes, pass entries and the passes of all 16 views of their materials; the verdict (a _HUD
-REM pass for the set's view, only for another view with the view named, none, empty with no mesh or no entry, the walk cut short, no
-REM record, unreadable, none learned); the picture the same for meshes rebuilt at new addresses; every distinct material of the record
-REM checked for every view and counted per item (1025 distinct: 1024 checked, one counted; one with _HUD only for another view named);
-REM the draw shapes of the HUD node (a window for the node's thread, the list from the list prep hook that is hooked on its own
-REM synthetic function with the right bytes and refused with one line on wrong ones, the shapes kept by list, context, shaders, target
-REM and textures with their size, the draws outside the node with the HUD meshes' vertex shaders, 256 shapes and the 257th counted,
-REM a draw from another thread or after the window not kept, the flag of the draw path up only while hooked and recording) and their
-REM census and 30-second lines; the two write watches on the part's array of meshes (slot 2) and their number (slot 3), 8 bytes each:
-REM sites by place with whether the value was not 0, armed for real on the rig's threads, set at once when the cinema walk learns the
-REM part, moved with a line when it learns another, taken off with a line when the part is out of the record for 2 s (and set again
-REM when it is back), set again when on foot changes, taken off with the key, the number's by the fuse alone. The D3D11 reading of a draw
-REM (onFootHudProbeNoteDraw in vscreen.cpp) needs the binding shadow and the shader registry and is not linked here; the class and shape
-REM calls it makes into the probe are, exercised directly by Part B21.
-REM .22: the layout snapshot of the HUD node's draws (the replay itself, on_foot_hud_layout.cpp, needs a device and is not linked here): the output
-REM signature of a fake DXBC read into the stream-output declaration (position and the first TEXCOORD of two components or more; none: position
-REM only; no whole position refused), the layout of fake vertices (a flat rectangle: frame, visible part of the panel, 3x3 grid, bend 0; a bowed
-REM strip: bend above 0; w <= 0 dropped and counted), the 5-second claim of a form (2 s no, 6 s yes, 256 forms and the 257th counted), a line only
-REM for a new layout or a shift of 0.02 of the screen, the order of a replay on a stand-in context (the state after is the state before; a geometry
-REM shader standing or a foreign context refused untouched), the read without waiting (still drawing later, 30 frames a timeout, the ring of four),
-REM the CSV rows, file names and 32-bit BMP, every line's text; and the real glue: a result gives one line and a CSV and a BMP in a temporary
-REM folder, 48 files of each kind and the 49th not written but counted, the 30-second summary by place and reason or "no snapshot".
-if not exist "%OBJ%\onfoothudprobe" mkdir "%OBJ%\onfoothudprobe"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^
-    /Fo"%OBJ%\onfoothudprobe"\ /Fe"%BUILD%\on_foot_hud_probe_test.exe" ^
-    "tools\on_foot_hud_probe_test\on_foot_hud_probe_test.cpp" "src\d3d11\on_foot_hud_probe.cpp" ^
-    "src\common\code_hook.cpp" "src\common\guard.cpp" "src\common\log.cpp" "src\common\config.cpp" ^
-    /link /INCREMENTAL:NO kernel32.lib user32.lib
-if errorlevel 1 ( echo [edvr] ERROR: on-foot hud probe test build failed & exit /b 1 )
-"%BUILD%\on_foot_hud_probe_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_on_foot_markers_test

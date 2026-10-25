@@ -42,10 +42,8 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "fss_res.h"
 #include "journal_watch.h"
 #include "explorer_cam.h"   // explorerCamFrameBoundary (the frame tick) and explorerCamShutdown (the avatar dither-fade global goes back at an unload)
-#include "native_vr_probe.h"   // EDVRonFOOT: nativeVrProbeFrameBoundary (the frame tick: config, install, drain)
+#include "native_vr_on_foot.h" // EDVRonFOOT: nativeVrOnFootFrameBoundary (the frame tick: the key, the two switches)
 #include "on_foot_hud.h"       // EDVRonFOOT: onFootHudFrameBoundary
-#include "on_foot_hud_probe.h" // EDVRonFOOT: onFootHudProbeFrameBoundary
-#include "on_foot_hud_layout.h" // EDVRonFOOT: .22 keeps vertex shader code for the HUD layout snapshot
 #include "on_foot_markers.h"   // EDVRonFOOT: onFootMarkersFrameBoundary
 #include "ui_surfaces.h"   // the glyph atlas and sizing chain instruments
 #include "ui_panel_scale.h" // uiPanelScaleShutdown: the panel operands put back
@@ -719,9 +717,6 @@ HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecod
         registerShaderHash(*out, hash);
         engineVelocityRememberVs(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
         weaponMotionRememberShader(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len));
-        // EDVRonFOOT .22: the code of every vertex shader, for the HUD probe's layout snapshot -- only when experimental.on_foot_hud_probe was on at the
-        // launch (read once); one relaxed load when it was not. After the weapon family above: a shader that holds its code already is not kept twice.
-        if (onFootHudProbeKeepsCode()) onFootHudLayoutRememberVs(static_cast<ID3D11VertexShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
         orbitalWidthRememberVs(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);   // fix.ui_quality: the orbit lines (orbital_width.h)
         EyeDrawSnapshot::rememberShader(hash, bytecode, static_cast<size_t>(len));
         EyeTonemapSnapshot::rememberShader(hash, bytecode, static_cast<size_t>(len));
@@ -1219,10 +1214,9 @@ EDVR_BOUNDARY_TICK(tkCelestialStatus, "celestial_status");
 // boundary until 2026-10-08, which only exists when vScreen installs a State: with fix.black_void off, fix.panel_distance 1, no flash observation,
 // advanced.app_gpu_timing off and advanced.panel_hooks_always off it installs transport-only and F5 did nothing. Here it runs every owned Present.
 EDVR_BOUNDARY_TICK(tkExplorerCam, "explorer_cam");
-// EDVRonFOOT: the native-VR-on-foot probe (native_vr_probe.h). Like Explorer Cam it must run on every owned Present.
-EDVR_BOUNDARY_TICK(tkNativeVrProbe, "native_vr_probe");
+// EDVRonFOOT: native VR on foot (native_vr_on_foot.h). Like Explorer Cam it must run on every owned Present.
+EDVR_BOUNDARY_TICK(tkNativeVrOnFoot, "native_vr_on_foot");
 EDVR_BOUNDARY_TICK(tkOnFootHud, "on_foot_hud");
-EDVR_BOUNDARY_TICK(tkOnFootHudProbe, "on_foot_hud_probe");
 EDVR_BOUNDARY_TICK(tkOnFootMarkers, "on_foot_markers");
 EDVR_BOUNDARY_TICK(tkFssModeLatch, "fss_mode_latch");
 EDVR_BOUNDARY_TICK(tkMenu, "menu");
@@ -1569,9 +1563,7 @@ void presentFrameBoundary() {
     // Explorer Cam (Phase 1), after the journal's tick it reads (on foot, GuiFocus, gameplay). Unconditional: an EMPTY hotkey.explorer_cam is read here
     // every frame too, so binding it live arms the feature on the next one.
     tkExplorerCam.run([] { explorerCamFrameBoundary(static_cast<uint32_t>(g_state->frameCounter)); });
-    tkNativeVrProbe.run([] { nativeVrProbeFrameBoundary(); });
-    // EDVRonFOOT: the on-foot HUD probe (on_foot_hud_probe.h): its key, its hook, the PostGUI nodes' lines and summary.
-    tkOnFootHudProbe.run([] { onFootHudProbeFrameBoundary(); });
+    tkNativeVrOnFoot.run([] { nativeVrOnFootFrameBoundary(); });
     // EDVRonFOOT: the on-foot markers (on_foot_markers.h): native_vr_on_foot, the journal, the search for the points, whether the
     // writer hooks correct, the install, the on and off lines, the end-of-frame check and the summary.
     tkOnFootMarkers.run([] { onFootMarkersFrameBoundary(); });

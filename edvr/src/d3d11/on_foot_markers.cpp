@@ -130,7 +130,7 @@ __declspec(noinline) uint64_t eyesHook(uint64_t mgr, uint64_t n, uint64_t a3, ui
 // ---- installation (frame thread) ------------------------------------------------------------------------------------------------
 
 // A 5-byte jmp reaches +/-2 GB, and this DLL may load farther than that from the game: the patch jumps to a relay page placed near the
-// target, which jumps on, absolutely, to the hook (jmp [rip+0]; dq hook). As on_foot_hud_probe.cpp does.
+// target, which jumps on, absolutely, to the hook (jmp [rip+0]; dq hook).
 constexpr size_t kRelayBytes = 14;
 
 uint8_t* allocateRelay(uintptr_t target) noexcept {
