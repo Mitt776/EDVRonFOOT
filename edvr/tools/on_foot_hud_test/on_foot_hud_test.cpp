@@ -14,6 +14,11 @@
 // .25 (the menus): the four layers by their shapes (the lift 1029x949, the answers 1410x245, the dialog 1410x749, the HUD; the atlas,
 // the captions and the landing's one-off panels none), their places from the HUD's width (85 and 50 degrees), placeAnchor's turn and
 // drop, each layer's own hold and its own composite bit, a menu's quiet latch, and the menu lines and the summary's menus field.
+//
+// .27 (the mission description and the trader): 1410x761 is the description and not the dialog's 1410x749 (and the other way), its
+// sheet's bottom on the answers' top; the trader's layer is never found by its 16:9 shape, only by what the withheld draw read; the
+// head-locked draw is recognised whole (the eye-panel shader, 360 indices, an eye, the panels' format, 16:9) and nothing less; the
+// trader is the whole cinema frame from the HUD's width; its line says the game's copy is withheld, the summary counts the withheld.
 #include "../../src/d3d11/on_foot_hud_core.h"
 #include <cmath>
 #include <cstdio>
@@ -290,6 +295,124 @@ void partLayerSteps() {
     DecisionIn ship = in;
     ship.onFoot = 0;
     check(stepLayer(ship, true, hud, &st) == Reason::InTheShip && !hud.have, "in the ship: stopped, the copy dropped");
+}
+
+// The sheet's height in metres at the distance: the arc over the panel's proportions, as menu_panel builds it.
+float sheetHeightM(const Place& p, double aspect) { return float(kDistance * p.widthDeg * kRadPerDeg / aspect); }
+
+void partMissionTrader() {
+    // Shapes: the description and the dialog's second panel are both 1410 wide and neither is the other.
+    check(isLayerShape(Layer::Mission, 1410, 761) && !isLayerShape(Layer::Dialog, 1410, 761), "1410x761 is the mission description only");
+    check(isLayerShape(Layer::Dialog, 1410, 749) && !isLayerShape(Layer::Mission, 1410, 749), "1410x749 is the dialog's panel, not the description");
+    check(isLayerShape(Layer::Answers, 1410, 245) && !isLayerShape(Layer::Mission, 1410, 245), "1410x245 stays the answers");
+    for (int k = 0; k < kLayers; ++k)
+        if (k != int(Layer::Trader)) check(!isLayerShape(Layer(k), 2307, 1297), "2307x1297 is no layer but the trader's");
+    check(isLayerShape(Layer::Trader, 2307, 1297) && isLayerShape(Layer::Trader, 3408, 1917), "the trader's menu: 16:9, stereo and cinema");
+
+    // The trader's layer is never found by shape -- only by what the withheld draw read.
+    int other;
+    FrameTally t;
+    for (int i = 0; i < 9; ++i) t.note(&g_res[0], 2412, 1449, kFormatTypeless);
+    for (int i = 0; i < 38; ++i) t.note(&other, 2307, 1297, kFormatTypeless);
+    for (int i = 0; i < 17; ++i) t.note(&g_res[1], 1410, 761, kFormatTypeless);
+    check(findLayer(Layer::Trader, t.panels, t.count) == -1, "a 16:9 panel drawn: not the trader's layer by its shape");
+    int found[kLayers];
+    findLayerPanels(t, found);
+    check(found[int(Layer::Trader)] == -1 && found[int(Layer::Mission)] == 2 && found[int(Layer::Hud)] == 0,
+          "no withheld draw: no trader; the description found by its shape");
+    t.withheld = &other;
+    findLayerPanels(t, found);
+    check(found[int(Layer::Trader)] == 1, "the withheld draw read the 16:9 panel: that is the trader's");
+    t.withheld = &g_res[2];
+    findLayerPanels(t, found);
+    check(found[int(Layer::Trader)] == -1, "it read a panel the frame did not draw: none this frame (the hold keeps the copy)");
+    check(findPanelById(t.panels, t.count, nullptr) == -1, "no id: none");
+
+    // The head-locked draw, recognised whole and nothing less.
+    check(isHeadLockedMenuDraw(kEyePanelVs, 360, true, kFormatTypeless, 2307, 1297) &&
+              isHeadLockedMenuDraw(kEyePanelVs, 360, true, kFormatUnorm, 2307, 1297),
+          "the trader's draw: the eye-panel shader, 360 indices, into an eye, 2307x1297");
+    check(!isHeadLockedMenuDraw(kEyePanelVs, 6, true, kFormatTypeless, 2307, 1297), "a quad of 6: not withheld");
+    check(!isHeadLockedMenuDraw(kEyePanelVs, 360, false, kFormatTypeless, 2307, 1297), "not into an eye: not withheld");
+    check(!isHeadLockedMenuDraw(kGuiText, 360, true, kFormatTypeless, 2307, 1297) &&
+              !isHeadLockedMenuDraw(kGameCompositeA, 360, true, kFormatTypeless, 2307, 1297),
+          "another shader: not withheld");
+    check(!isHeadLockedMenuDraw(kEyePanelVs, 360, true, kFormatTypeless, 1410, 245) &&
+              !isHeadLockedMenuDraw(kEyePanelVs, 6, true, kFormatTypeless, 288, 171),
+          "the small panels the same shader lays: not withheld");
+    check(!isHeadLockedMenuDraw(kEyePanelVs, 360, true, 44, 2307, 1297), "another format: not withheld");
+    check(classifyEyePanelDraw(kEyePanelVs, 420, true, kFormatTypeless, 2307, 1297) == EyePanelDraw::OtherMesh &&
+              classifyEyePanelDraw(kEyePanelVs, 6, true, kFormatTypeless, 2307, 1297) == EyePanelDraw::OtherMesh &&
+              classifyEyePanelDraw(kEyePanelVs, 6, true, kFormatTypeless, 1410, 245) == EyePanelDraw::No,
+          "a 16:9 panel on another mesh: the other-mesh line; a small panel: nothing");
+
+    // Places at 85 degrees: the description as wide as the answers, centred, its bottom on their top; the trader the whole frame.
+    const Place answers = placeOf(Layer::Answers, 85), mission = placeOf(Layer::Mission, 85);
+    check(std::fabs(mission.widthDeg - 58.7f) < 0.5f && std::fabs(mission.yawDeg) < 0.01f && near(mission.curve, kMenuCurve),
+          "the description: about 59 deg wide, straight ahead, a menu's bend");
+    const float answersTop = answers.downM - sheetHeightM(answers, 1410.0 / 245.0) * 0.5f;
+    const float missionBottom = mission.downM + sheetHeightM(mission, 1410.0 / 761.0) * 0.5f;
+    check(std::fabs(answersTop - missionBottom) < 0.005f, "the description's bottom is on the answers' top");
+    check(mission.downM < 0.0f, "the description stands above the eyes' line");
+    const Place trader = placeOf(Layer::Trader, 85);
+    check(std::fabs(trader.widthDeg - 88.9f) < 0.1f && std::fabs(trader.yawDeg) < 0.01f && std::fabs(trader.downM) < 1e-4f &&
+              near(trader.curve, kCurve),
+          "the trader: the whole frame, about 88.9 deg, straight ahead, not moved, the HUD's bend");
+    check(std::fabs(placeOf(Layer::Trader, 60).widthDeg - 62.8f) < 0.1f, "60 deg: the trader about 62.8");
+
+    // The trader's hold: withheld every frame but redrawn every other one -- shown throughout; its frames never keep the HUD alive.
+    DecisionIn in;
+    in.onFoot = 1;
+    Hold traderHold, hudHold;
+    HoldStep st;
+    stepLayer(in, true, hudHold, &st);
+    bool allShown = true;
+    for (int i = 0; i < 60; ++i) allShown = allShown && stepLayer(in, i % 2 == 0, traderHold, &st) == Reason::Showing;
+    check(allShown, "a trader redrawn every other frame: shown throughout");
+    Reason hudReason = Reason::Showing;
+    for (uint32_t i = 0; i < kHoldFrames; ++i) {
+        stepLayer(in, true, traderHold, &st);
+        hudReason = stepLayer(in, false, hudHold, &st);
+    }
+    check(hudReason == Reason::NoPanels, "the trader's frames do not keep the HUD's copy");
+    Reason traderReason = Reason::Showing;
+    for (uint32_t i = 0; i < kHoldFrames; ++i) traderReason = stepLayer(in, false, traderHold, &st);
+    check(traderReason == Reason::NoPanels, "the menu closed (no withheld draw): the trader stops after 30 frames");
+
+    // Lines.
+    char line[1200];
+    Panel menu;
+    menu.w = 2307;
+    menu.h = 1297;
+    menu.draws = 38;
+    formatMenuShowing(Layer::Trader, menu, trader, Mode::Body, line, sizeof(line));
+    check(has(line, "on-foot hud: showing the trader menu (2307x1297, aspect 1.779, 38 interface draws) at its place: 89 deg wide") &&
+              has(line, "curve 1.0, anchor body; the game's own head-locked copy withheld"),
+          "the trader's line: its place, and the game's copy withheld");
+    Panel description;
+    description.w = 1410;
+    description.h = 761;
+    formatMenuShowing(Layer::Mission, description, mission, Mode::Body, line, sizeof(line));
+    check(has(line, "showing the mission description (1410x761, aspect 1.853") && has(line, "m up") && !has(line, "withheld"),
+          "the description's line: above, nothing withheld");
+    formatMenuStopped(Layer::Trader, Reason::NoPanels, line, sizeof(line));
+    check(std::strcmp(line, "on-foot hud: the trader menu stopped (closed: not drawn for 30 frames)") == 0, "the trader closed");
+    formatOtherMesh(2307, 1297, 420, line, sizeof(line));
+    check(has(line, "2307x1297 panel") && has(line, "mesh of 420 indices") && has(line, "trader menu's 360") && has(line, "Said once."),
+          "the other-mesh line names the size and the count");
+    Summary s;
+    s.frames = 900;
+    s.menus[int(Layer::Trader)].shown = 880;
+    s.menus[int(Layer::Trader)].held = 400;
+    s.menus[int(Layer::Mission)].shown = 300;
+    s.withheld = 1760;
+    SeenSizes seen;
+    formatSummary(s, t.panels, t.count, 0, 0, seen, line, sizeof(line));
+    check(has(line, "menus=[mission shown=300 held=0, trader shown=880 held=400] withheld=1760 new-panels=[]"),
+          "the summary: the description, the trader and the withheld draws");
+    s.withheld = 0;
+    formatSummary(s, t.panels, t.count, 0, 0, seen, line, sizeof(line));
+    check(!has(line, "withheld"), "nothing withheld: no withheld field");
 }
 
 void partMenuLatch() {
@@ -569,6 +692,7 @@ int main(int argc, char** argv) {
     partPlaces();
     partPlaceAnchor();
     partLayerSteps();
+    partMissionTrader();
     partMenuLatch();
     partHold();
     partArc();

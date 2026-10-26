@@ -148,11 +148,12 @@ uint32_t g_dispatches = 0;       // dispatches this census, for the end line
 // Draws the verdict chain returned on before a census call could see them
 // (drawCensusNoteUnseen): this frame, this census, and by reason -- 0
 // substituted particle billboards, 1 witchspace-star skips, 2 FSS chrome
-// skips, 3 space-dust skips. Visible substituted
+// skips, 3 space-dust skips, 4 the trader menu's head-locked draw withheld
+// on foot (EDVRonFOOT, on_foot_hud.h). Visible substituted
 // particles now enter the census before replacement instead of this tally.
 uint32_t g_unseenThisFrame = 0;
 uint32_t g_unseen = 0;
-uint32_t g_unseenBy[4] = {}; // particle, witchspace, FSS, space dust
+uint32_t g_unseenBy[5] = {}; // particle, witchspace, FSS, space dust, head-locked menu
 // The startup schedule, read once at the first frame edge -- these are
 // moments in THIS session's startup, and re-reading them later would either
 // re-fire everything already spent or move a deadline the session has passed.
@@ -710,9 +711,10 @@ void finish() {
             "before either census call could record them -- %u substituted "
             "particle billboards (fix.particle_billboard = steady), %u "
             "witchspace-star skips (fix.witchspace_stars = off), %u FSS chrome "
-            "skips, %u space-dust skips (fix.supercruise_dust / fix.normal_space_dust = off). They are in no "
+            "skips, %u space-dust skips (fix.supercruise_dust / fix.normal_space_dust = off), %u head-locked "
+            "trader-menu draws withheld on foot (experimental.native_vr_on_foot_hud). They are in no "
             "DC line above. Enable the withheld effects for a census of their draws.",
-            g_unseen, g_unseenBy[0], g_unseenBy[1], g_unseenBy[2], g_unseenBy[3]);
+            g_unseen, g_unseenBy[0], g_unseenBy[1], g_unseenBy[2], g_unseenBy[3], g_unseenBy[4]);
     }
 }
 
@@ -1126,7 +1128,7 @@ void drawCensusNoteUnseen(char why) {
     if (detail::g_drawCensusFramesLeft == 0) return;   // pending is not recording
     ++g_unseenThisFrame;
     ++g_unseen;
-    const int k = why == 'p' ? 0 : why == 'w' ? 1 : why == 'd' ? 3 : 2;
+    const int k = why == 'p' ? 0 : why == 'w' ? 1 : why == 'd' ? 3 : why == 'h' ? 4 : 2;
     ++g_unseenBy[k];
 }
 

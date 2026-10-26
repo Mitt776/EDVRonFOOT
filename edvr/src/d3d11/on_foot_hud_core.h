@@ -15,6 +15,10 @@
 // of their own (1029x949, 1410x245; .24) and lays them into the picture only in the cinema. Each is a layer of its own -- found by its
 // proportions, held, stopped by the game's own composite -- shown at the place the cinema's frame gives it (.22), sized from the
 // HUD's width, over the HUD.
+//
+// .27 (the census walks of 26.10): the NPC's mission description is a panel of its own too (1410x761), shown right above the answers.
+// The materials trader's menu (2307x1297, 16:9) the game DOES lay into the eyes itself, on a curved mesh fixed to the eyes; the draw
+// hook withholds that one draw and the menu is shown as a layer of its own, the whole cinema frame wide, in front of the body.
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -36,6 +40,12 @@ constexpr uint64_t kGameCompositeB = 0xC4B4B334B26E81A9ull;
 
 inline bool isGuiVs(uint64_t vs) { return vs == kGuiVector || vs == kGuiText || vs == kGuiIcons; }
 inline bool isGameCompositeVs(uint64_t vs) { return vs == kGameCompositeA || vs == kGameCompositeB; }
+// The game laying a panel straight into the eyes (the census of 26.10): one draw per eye with this vertex shader, the panel in pixel
+// slot 1. The trader's menu comes on a curved mesh of 360 indices; the same shader lays small panels (288x171, a 1410x245) as quads of
+// 6, with or without the trader, and those are left alone.
+constexpr uint64_t kEyePanelVs = 0xA888D51024D9798Eull;
+constexpr uint32_t kHeadLockedMenuIndices = 360;
+constexpr int kEyePanelSlot = 1;
 
 // R8G8B8A8_TYPELESS (27) or its UNORM view (28), one sample: the shape of every panel the census found. Anything else is not taken.
 constexpr uint32_t kFormatTypeless = 27;
@@ -63,9 +73,12 @@ constexpr float kMenuCurve = 0.4f;
 // The layers: what each panel is, by its proportions (width over height +- 0.01, in double: in float 1.655 would fall a hair outside),
 // and its place in the cinema's 3408x1917 frame as fractions, x right, y down (.22's census; the menus lie the HUD's side up). The HUD
 // is the measure: its width is the key's, the frame is as many degrees as the HUD's width over its 0.956. Of several panels of one
-// shape, the largest. The order is the compositing order: the HUD first, the menus over it.
-enum class Layer : int { Hud = 0, Lift = 1, Answers = 2, Dialog = 3 };
-constexpr int kLayers = 4;
+// shape, the largest. The order is the compositing order: the HUD first, the menus over it, the trader's menu -- the whole frame --
+// over all. The mission description stands right above the answers: as wide (x 0.17..0.83), its bottom at the answers' top as the
+// sheets' own proportions give it (the answers 0.66 / 5.755 / (1917/3408) = 0.204 of the frame high about 0.81, top 0.708; the
+// description 0.66 / 1.853 / 0.5625 = 0.633 high, centre 0.392).
+enum class Layer : int { Hud = 0, Lift = 1, Answers = 2, Dialog = 3, Mission = 4, Trader = 5 };
+constexpr int kLayers = 6;
 struct LayerSpec {
     double aspect;
     float x0, x1, y0, y1;
@@ -78,13 +91,18 @@ constexpr LayerSpec kLayerSpecs[kLayers] = {
     {1.084, 0.185f, 0.815f, -0.045f, 0.987f, kMenuCurve, "the lift and door menu", "lift"},       // stereo 1029x949, cinema 1521x1402
     {5.755, 0.17f, 0.83f, 0.69f, 0.93f, kMenuCurve, "the answers", "answers"},                   // stereo 1410x245, cinema 2083x362
     {1.882, 0.32f, 0.99f, 0.03f, 0.70f, kMenuCurve, "the second dialog panel", "dialog"},        // stereo 1410x749, cinema 2083x1107
+    {1.853, 0.17f, 0.83f, 0.075f, 0.708f, kMenuCurve, "the mission description", "mission"},    // stereo 1410x761
+    {16.0 / 9.0, 0.0f, 1.0f, 0.0f, 1.0f, kCurve, "the trader menu", "trader"},                  // stereo 2307x1297, cinema 3408x1917
 };
 inline const LayerSpec& specOf(Layer l) { return kLayerSpecs[int(l)]; }
 inline bool isLayerShape(Layer l, uint32_t w, uint32_t h) {
     if (!w || !h) return false;
     return std::fabs(double(w) / double(h) - specOf(l).aspect) <= 0.01 + 1e-9;
 }
+// The trader's layer is never found by its shape: a 16:9 panel also comes once in a while on its own (.26, 01:25:30, one draw). Its
+// panel is the one the withheld draw read (findPanelById), so it shows only while the game is trying to lay the menu at the head.
 inline int findLayer(Layer l, const Panel* p, int n) {
+    if (l == Layer::Trader) return -1;
     int best = -1;
     for (int i = 0; i < n; ++i)
         if (isLayerShape(l, p[i].w, p[i].h) && (best < 0 || uint64_t(p[i].w) * p[i].h > uint64_t(p[best].w) * p[best].h)) best = i;
@@ -93,6 +111,26 @@ inline int findLayer(Layer l, const Panel* p, int n) {
 // Every layer's panel in the frame, -1 for none.
 inline void findLayers(const Panel* p, int n, int out[kLayers]) {
     for (int k = 0; k < kLayers; ++k) out[k] = findLayer(Layer(k), p, n);
+}
+inline int findPanelById(const Panel* p, int n, const void* id) {
+    if (!id) return -1;
+    for (int i = 0; i < n; ++i)
+        if (p[i].id == id) return i;
+    return -1;
+}
+
+// The draw that lays the trader's menu at the head: the eye-panel shader into an eye, its panel 16:9 in the panels' format. Withhold:
+// all of it, the curved mesh of 360 indices included -- the one draw the hook skips. OtherMesh: everything but the index count, the
+// sign of a game build whose mesh changed (one line a session says so, with the count); the draw is left alone and the menu stays at
+// the head, as before .27.
+enum class EyePanelDraw : int { No = 0, Withhold = 1, OtherMesh = 2 };
+inline EyePanelDraw classifyEyePanelDraw(uint64_t vs, uint32_t indices, bool eye, uint32_t format, uint32_t w, uint32_t h) {
+    if (vs != kEyePanelVs || !eye || !(format == kFormatTypeless || format == kFormatUnorm)) return EyePanelDraw::No;
+    if (!isLayerShape(Layer::Trader, w, h)) return EyePanelDraw::No;
+    return indices == kHeadLockedMenuIndices ? EyePanelDraw::Withhold : EyePanelDraw::OtherMesh;
+}
+inline bool isHeadLockedMenuDraw(uint64_t vs, uint32_t indices, bool eye, uint32_t format, uint32_t w, uint32_t h) {
+    return classifyEyePanelDraw(vs, indices, eye, format, w, h) == EyePanelDraw::Withhold;
 }
 
 // The HUD panel is the one with the HUD's proportions, 1.665 (cinema 3564x2140, stereo 2412x1449: one scale for both, so HMD quality
@@ -143,6 +181,8 @@ struct FrameTally {
     int count = 0;
     uint32_t dropped = 0;
     uint32_t composites = 0;  // readsPanels' bits: the layers the game laid into the picture itself this frame
+    const void* withheld = nullptr;  // the panel the withheld head-locked draw read (identity only): the trader layer's
+    uint32_t withheldDraws = 0;
     int note(const void* id, uint32_t w, uint32_t h, uint32_t format) {
         for (int i = 0; i < count; ++i)
             if (panels[i].id == id) {
@@ -163,6 +203,13 @@ struct FrameTally {
     }
     void clear() { *this = FrameTally{}; }
 };
+
+// Each layer's panel in a frame, -1 for none: by shape, the trader's by what the frame's withheld draw read -- a frame that withheld it
+// but did not redraw the panel (a station draws every other frame) has none, and the layer's hold keeps the last copy.
+inline void findLayerPanels(const FrameTally& t, int out[kLayers]) {
+    findLayers(t.panels, t.count, out);
+    out[int(Layer::Trader)] = findPanelById(t.panels, t.count, t.withheld);
+}
 
 // Copy only from a frame that drew into the panel; otherwise keep showing the last copy, and give up after kHoldFrames in a row
 // without one (the game clears the panel at the start of a frame and on a station redraws it every other frame: a copy of the
@@ -398,6 +445,7 @@ struct LayerCount {
 };
 struct Summary {
     uint64_t frames = 0, shown = 0, held = 0, gameComposites = 0, copyFail = 0, noPanels = 0;
+    uint64_t withheld = 0;  // the game's head-locked draws of the trader's menu the hook skipped
     LayerCount menus[kLayers];
     void clear() { *this = Summary{}; }
 };
@@ -428,14 +476,23 @@ inline int formatShowing(const Panel& p, Mode mode, float width, char* out, size
                          p.w, p.h, double(ratioOf(p.w, p.h)), p.draws, modeName(mode), double(width));
 }
 
-// A menu's start, with the place it was given.
+// A menu's start, with the place it was given; the trader's says its head-locked copy is withheld.
 inline int formatMenuShowing(Layer l, const Panel& p, const Place& at, Mode mode, char* out, size_t cap) {
     return std::snprintf(out, cap,
                          "on-foot hud: showing %s (%ux%u, aspect %.3f, %u interface draws) at its place: %.0f deg wide, %.0f deg %s, "
-                         "%.2f m %s, curve %.1f, anchor %s",
+                         "%.2f m %s, curve %.1f, anchor %s%s",
                          specOf(l).name, p.w, p.h, double(ratioOf(p.w, p.h)), p.draws, double(at.widthDeg),
                          double(std::fabs(at.yawDeg)), at.yawDeg < -0.05f ? "left" : "right", double(std::fabs(at.downM)),
-                         at.downM > 0.005f ? "down" : "up", double(at.curve), modeName(mode));
+                         at.downM > 0.005f ? "down" : "up", double(at.curve), modeName(mode),
+                         l == Layer::Trader ? "; the game's own head-locked copy withheld" : "");
+}
+
+// Once a session: the game laid a 16:9 panel into an eye with the eye-panel shader on a mesh that is not the trader's 360 indices.
+inline int formatOtherMesh(uint32_t w, uint32_t h, uint32_t indices, char* out, size_t cap) {
+    return std::snprintf(out, cap,
+                         "on-foot hud: the game lays a %ux%u panel into the eye with vs A888D51024D9798E on a mesh of %u indices, not the "
+                         "trader menu's %u; left alone (the menu stays where the game puts it). Said once.",
+                         w, h, indices, kHeadLockedMenuIndices);
 }
 
 // A menu's end: closed when the game stopped drawing it, else the reason.
@@ -473,7 +530,7 @@ inline int formatSummary(const Summary& s, const Panel* p, int count, uint32_t d
         e += std::snprintf(extra + e, sizeof(extra) - size_t(e), " changes-unwritten=%u", unwritten);
     if (seen.unrecorded && e >= 0 && size_t(e) < sizeof(extra))
         std::snprintf(extra + e, sizeof(extra) - size_t(e), " new-panels-unrecorded=%u", seen.unrecorded);
-    char menus[200] = "";
+    char menus[320] = "";
     int m = 0;
     for (int k = 1; k < kLayers && m >= 0 && size_t(m) < sizeof(menus); ++k) {
         const LayerCount& c = s.menus[k];
@@ -485,13 +542,15 @@ inline int formatSummary(const Summary& s, const Panel* p, int count, uint32_t d
         menus[m] = ']';
         menus[m + 1] = '\0';
     }
+    char withheld[40] = "";
+    if (s.withheld) std::snprintf(withheld, sizeof(withheld), " withheld=%llu", static_cast<unsigned long long>(s.withheld));
     return std::snprintf(out, cap,
                          "on-foot hud 30s: frames=%llu shown=%llu held=%llu panels=[%s]%s game-composites=%llu no-panels=%llu "
-                         "copy-fail=%llu%s new-panels=[%s]%s",
+                         "copy-fail=%llu%s%s new-panels=[%s]%s",
                          static_cast<unsigned long long>(s.frames), static_cast<unsigned long long>(s.shown),
                          static_cast<unsigned long long>(s.held), list, count ? "" : " (no panels found)",
                          static_cast<unsigned long long>(s.gameComposites), static_cast<unsigned long long>(s.noPanels),
-                         static_cast<unsigned long long>(s.copyFail), menus, fresh, extra);
+                         static_cast<unsigned long long>(s.copyFail), menus, withheld, fresh, extra);
 }
 
 }  // namespace ofh

@@ -163,11 +163,45 @@ uint32_t compositeReads(ID3D11DeviceContext* ctx) {
         }
     return reads;
 }
+
+// The eye-panel shader's draw into an eye: is it the trader's menu laid at the head? The texture in pixel slot 1, its size and format,
+// then on_foot_hud_core.h's classifyEyePanelDraw. Withhold: the panel is noted as the trader layer's for this frame and the caller skips
+// the draw. Another mesh: one line a session, the draw left alone. The references the calls take are given back before the return.
+bool eyePanelWithhold(ID3D11DeviceContext* ctx, uint64_t vs, uint32_t count) {
+    static std::atomic<bool> saidOtherMesh{false};
+    if (!ctx) return false;
+    ID3D11ShaderResourceView* srv = nullptr;
+    ctx->PSGetShaderResources(ofh::kEyePanelSlot, 1, &srv);
+    if (!srv) return false;
+    ID3D11Resource* res = nullptr;
+    srv->GetResource(&res);
+    srv->Release();
+    if (!res) return false;
+    ID3D11Texture2D* tex = nullptr;
+    res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex));
+    const void* id = res;  // identity only, as the tally's panels: the game holds the resource
+    res->Release();
+    if (!tex) return false;
+    D3D11_TEXTURE2D_DESC d{};
+    tex->GetDesc(&d);
+    tex->Release();
+    const ofh::EyePanelDraw kind = ofh::classifyEyePanelDraw(vs, count, true, uint32_t(d.Format), d.Width, d.Height);
+    if (kind == ofh::EyePanelDraw::OtherMesh && !saidOtherMesh.exchange(true)) {
+        char line[300];
+        ofh::formatOtherMesh(d.Width, d.Height, count, line, sizeof(line));
+        say(line);
+    }
+    if (kind != ofh::EyePanelDraw::Withhold) return false;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_cur.tally.withheld = id;
+    ++g_cur.tally.withheldDraws;
+    return true;
+}
 }  // namespace
 
-void onFootHudNoteDraw(ID3D11DeviceContext* ctx, bool eye) {
+bool onFootHudNoteDraw(ID3D11DeviceContext* ctx, bool eye, uint32_t count) {
     const uint64_t vs = bindingGet(BindSlot::Vs) ? bindingShaderHash(BindSlot::Vs) : 0;
-    if (!vs) return;
+    if (!vs) return false;
     if (ofh::isGameCompositeVs(vs)) {
         guardedBudget(g_budget, [&] {
             const uint32_t reads = compositeReads(ctx);
@@ -175,9 +209,14 @@ void onFootHudNoteDraw(ID3D11DeviceContext* ctx, bool eye) {
             std::lock_guard<std::mutex> lock(g_mutex);
             g_cur.tally.composites |= reads;
         });
-        return;
+        return false;
     }
-    if (eye || !ofh::isGuiVs(vs)) return;
+    if (vs == ofh::kEyePanelVs) {
+        bool withhold = false;
+        if (eye) guardedBudget(g_budget, [&] { withhold = eyePanelWithhold(ctx, vs, count); });
+        return withhold;
+    }
+    if (eye || !ofh::isGuiVs(vs)) return false;
     guardedBudget(g_budget, [&] {
         const uint32_t gen = bindingGeneration(BindSlot::Rtv0);
         if (gen != g_rtvGen) {
@@ -199,6 +238,7 @@ void onFootHudNoteDraw(ID3D11DeviceContext* ctx, bool eye) {
         else if (tex)
             tex->Release();
     });
+    return false;
 }
 
 void onFootHudFrameBoundary() {
@@ -246,6 +286,7 @@ void onFootHudFrameBoundary() {
     g_cur.tally.clear();
     if (wants) {
         ++g_summary.frames;
+        g_summary.withheld += g_last.tally.withheldDraws;
         if (g_last.tally.composites) ++g_summary.gameComposites;
         if (!g_last.tally.count) ++g_summary.noPanels;
         // A size met for the first time while the sheet is needed, in stereo (the game's own composite is the cinema): one line.
@@ -332,9 +373,10 @@ void decideLayers(ID3D11Device* device, ofh::Mode mode, float width) {
     // drew none leaves the layer's last copy to be held.
     Frame ranked;
     if (g_cur.tally.count) rankInto(g_cur, ranked);
+    // The trader's: the panel this frame's (or the last frame's) withheld draw read, not a shape.
     int cur[ofh::kLayers], last[ofh::kLayers];
-    ofh::findLayers(ranked.tally.panels, ranked.tally.count, cur);
-    ofh::findLayers(g_last.tally.panels, g_last.tally.count, last);
+    ofh::findLayerPanels(ranked.tally, cur);
+    ofh::findLayerPanels(g_last.tally, last);
     const uint32_t composites = g_cur.tally.composites | g_last.tally.composites;
     ofh::DecisionIn base;
     base.onFoot = g_onFoot.load(std::memory_order_relaxed);

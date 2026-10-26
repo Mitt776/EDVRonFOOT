@@ -2029,8 +2029,12 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         s->rtv0EyeGen = rtvGen;
     }
     // EDVRonFOOT: the on-foot HUD's census (on_foot_hud.h) -- the interface draws per hidden panel and the game's own composite, eye
-    // or not, so above the offscreen branch. One load while the commander is not on foot or the key is off.
-    if (onFootHudWantsDraws()) onFootHudNoteDraw(self, s->rtv0Eye);
+    // or not, so above the offscreen branch. One load while the commander is not on foot or the key is off. .27: the one draw that
+    // lays the trader's menu at the head comes back true and is withheld here -- its panel is shown in front of the body instead.
+    if (onFootHudWantsDraws() && onFootHudNoteDraw(self, s->rtv0Eye, count)) {
+        if (drawCensusArmed()) drawCensusNoteUnseen('h');
+        return DrawVerdict::kSkip;
+    }
     // The quad probe, ABOVE the eye gate since 2026-08-28.
     //
     // It lived in the offscreen branch because everything it had ever been
