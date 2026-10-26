@@ -18,7 +18,8 @@
 // .27 (the mission description and the trader): 1410x761 is the description and not the dialog's 1410x749 (and the other way), its
 // sheet's bottom on the answers' top; the trader's layer is never found by its 16:9 shape, only by what the withheld draw read; the
 // head-locked draw is recognised whole (the eye-panel shader, 360 indices, an eye, the panels' format, 16:9) and nothing less; the
-// trader is the whole cinema frame from the HUD's width; its line says the game's copy is withheld, the summary counts the withheld.
+// trader is 60/85 of the HUD's width (.28; the whole frame on .27); its line says the game's copy is withheld, the summary counts
+// the withheld.
 #include "../../src/d3d11/on_foot_hud_core.h"
 #include <cmath>
 #include <cstdio>
@@ -355,10 +356,10 @@ void partMissionTrader() {
     check(std::fabs(answersTop - missionBottom) < 0.005f, "the description's bottom is on the answers' top");
     check(mission.downM < 0.0f, "the description stands above the eyes' line");
     const Place trader = placeOf(Layer::Trader, 85);
-    check(std::fabs(trader.widthDeg - 88.9f) < 0.1f && std::fabs(trader.yawDeg) < 0.01f && std::fabs(trader.downM) < 1e-4f &&
+    check(std::fabs(trader.widthDeg - 60.0f) < 0.05f && std::fabs(trader.yawDeg) < 0.01f && std::fabs(trader.downM) < 1e-4f &&
               near(trader.curve, kCurve),
-          "the trader: the whole frame, about 88.9 deg, straight ahead, not moved, the HUD's bend");
-    check(std::fabs(placeOf(Layer::Trader, 60).widthDeg - 62.8f) < 0.1f, "60 deg: the trader about 62.8");
+          "the trader: 60/85 of the HUD (60 deg at 85), straight ahead, not moved, the HUD's bend");
+    check(std::fabs(placeOf(Layer::Trader, 60).widthDeg - 42.35f) < 0.05f, "60 deg: the trader about 42.4");
 
     // The trader's hold: withheld every frame but redrawn every other one -- shown throughout; its frames never keep the HUD alive.
     DecisionIn in;
@@ -386,7 +387,7 @@ void partMissionTrader() {
     menu.h = 1297;
     menu.draws = 38;
     formatMenuShowing(Layer::Trader, menu, trader, Mode::Body, line, sizeof(line));
-    check(has(line, "on-foot hud: showing the trader menu (2307x1297, aspect 1.779, 38 interface draws) at its place: 89 deg wide") &&
+    check(has(line, "on-foot hud: showing the trader menu (2307x1297, aspect 1.779, 38 interface draws) at its place: 60 deg wide") &&
               has(line, "curve 1.0, anchor body; the game's own head-locked copy withheld"),
           "the trader's line: its place, and the game's copy withheld");
     Panel description;

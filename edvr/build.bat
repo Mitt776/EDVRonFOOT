@@ -3045,7 +3045,7 @@ REM 30), a composite draw that reads the HUD panel or not, the cylinder's arc (9
 REM panel first in the summary's order, one line per new size. .25: the menus' layers by shape (lift 1029x949, answers 1410x245, dialog
 REM 1410x749), their places from the HUD's width at 85 and 50 degrees, placeAnchor, each layer's own hold and composite bit, the menu lines.
 REM .27: the mission description 1410x761 above the answers, the trader's head-locked draw recognised whole (A888D510, 360 indices, 16:9),
-REM the trader's layer only by what the withheld draw read, the whole frame from the HUD's width, the withheld count in the summary.
+REM the trader's layer only by what the withheld draw read, 60/85 of the HUD's width (.28), the withheld count in the summary.
 if not exist "%OBJ%\onfoothud" mkdir "%OBJ%\onfoothud"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\onfoothud"\ /Fe"%BUILD%\on_foot_hud_test.exe" ^

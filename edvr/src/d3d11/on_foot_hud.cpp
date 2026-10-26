@@ -22,15 +22,22 @@ FaultBudget g_budget("onFootHud", 8);
 // The frame's panels as the draws arrive (g_cur) and the frame that ended, ordered -- the HUD panel first, then by draws (g_last). Each holds one reference per panel it
 // names, taken at the panel's first interface draw of the frame and given back at the boundary after next: no panel is held longer
 // than that, and the game is free to re-create them. One lock: the draw hook, the boundary and the door can be different threads.
+// withheldTex: the texture the frame's first withheld head-locked draw read (.28), with a reference, given back with the panels' --
+// the trader layer copies from it, so a draw is never withheld without something to show.
 struct Frame {
     ofh::FrameTally tally;
     ID3D11Texture2D* tex[ofh::kMaxPanels] = {};
+    ID3D11Texture2D* withheldTex = nullptr;
     void release() {
         for (auto*& t : tex)
             if (t) {
                 t->Release();
                 t = nullptr;
             }
+        if (withheldTex) {
+            withheldTex->Release();
+            withheldTex = nullptr;
+        }
         tally.clear();
     }
 };
@@ -113,6 +120,7 @@ ID3D11Texture2D* boundTexture() {
 // The frame that ended, ordered, its references carried along with their panels.
 void rankInto(const Frame& from, Frame& to) {
     to.tally = from.tally;
+    to.withheldTex = from.withheldTex;
     ofh::orderPanels(to.tally.panels, to.tally.count);
     for (int i = 0; i < to.tally.count; ++i) {
         to.tex[i] = nullptr;
@@ -165,8 +173,9 @@ uint32_t compositeReads(ID3D11DeviceContext* ctx) {
 }
 
 // The eye-panel shader's draw into an eye: is it the trader's menu laid at the head? The texture in pixel slot 1, its size and format,
-// then on_foot_hud_core.h's classifyEyePanelDraw. Withhold: the panel is noted as the trader layer's for this frame and the caller skips
-// the draw. Another mesh: one line a session, the draw left alone. The references the calls take are given back before the return.
+// then on_foot_hud_core.h's classifyEyePanelDraw. Withhold: the panel is noted as the trader layer's for this frame, the frame keeps a
+// reference to its texture (the first of the frame; the trader layer copies from it), and the caller skips the draw. Another mesh: one
+// line a session, the draw left alone. Every other reference the calls take is given back before the return.
 bool eyePanelWithhold(ID3D11DeviceContext* ctx, uint64_t vs, uint32_t count) {
     static std::atomic<bool> saidOtherMesh{false};
     if (!ctx) return false;
@@ -184,17 +193,23 @@ bool eyePanelWithhold(ID3D11DeviceContext* ctx, uint64_t vs, uint32_t count) {
     if (!tex) return false;
     D3D11_TEXTURE2D_DESC d{};
     tex->GetDesc(&d);
-    tex->Release();
     const ofh::EyePanelDraw kind = ofh::classifyEyePanelDraw(vs, count, true, uint32_t(d.Format), d.Width, d.Height);
     if (kind == ofh::EyePanelDraw::OtherMesh && !saidOtherMesh.exchange(true)) {
         char line[300];
         ofh::formatOtherMesh(d.Width, d.Height, count, line, sizeof(line));
         say(line);
     }
-    if (kind != ofh::EyePanelDraw::Withhold) return false;
+    if (kind != ofh::EyePanelDraw::Withhold) {
+        tex->Release();
+        return false;
+    }
     std::lock_guard<std::mutex> lock(g_mutex);
     g_cur.tally.withheld = id;
     ++g_cur.tally.withheldDraws;
+    if (!g_cur.withheldTex)
+        g_cur.withheldTex = tex;  // the frame's reference, given back at the boundary after next
+    else
+        tex->Release();
     return true;
 }
 }  // namespace
@@ -283,6 +298,7 @@ void onFootHudFrameBoundary() {
     g_last.release();
     g_last = ranked;
     for (auto*& t : g_cur.tex) t = nullptr;  // carried into g_last
+    g_cur.withheldTex = nullptr;              // so is this
     g_cur.tally.clear();
     if (wants) {
         ++g_summary.frames;
@@ -389,10 +405,20 @@ void decideLayers(ID3D11Device* device, ofh::Mode mode, float width) {
         L.latch.quietUntilShown = layer != ofh::Layer::Hud;
         const Frame* use = cur[k] >= 0 ? &ranked : last[k] >= 0 ? &g_last : nullptr;
         const int index = cur[k] >= 0 ? cur[k] : last[k];
+        // What a fresh copy comes from: the layer's panel; the trader's, the texture its withheld draw read (.28) -- this frame's,
+        // else the last frame's -- with the panel's draw count when the interface shaders drew it too.
+        ID3D11Texture2D* source = use ? use->tex[index] : nullptr;
+        ofh::Panel fresh;
+        if (use) fresh = use->tally.panels[index];
+        if (layer == ofh::Layer::Trader) {
+            source = g_cur.withheldTex ? g_cur.withheldTex : g_last.withheldTex;
+            if (!use) fresh = ofh::Panel{};
+        }
         ofh::DecisionIn in = base;
         in.gameComposites = ((composites >> k) & 1u) != 0;
         ofh::HoldStep step = ofh::HoldStep::Expired;
-        const ofh::Reason reason = ofh::stepLayer(in, use != nullptr, L.hold, &step);
+        const bool drew = layer == ofh::Layer::Trader ? source != nullptr : use != nullptr;
+        const ofh::Reason reason = ofh::stepLayer(in, drew, L.hold, &step);
         uint64_t& shown = layer == ofh::Layer::Hud ? g_summary.shown : g_summary.menus[k].shown;
         uint64_t& held = layer == ofh::Layer::Hud ? g_summary.held : g_summary.menus[k].held;
         ofh::Panel panel;
@@ -405,8 +431,10 @@ void decideLayers(ID3D11Device* device, ofh::Mode mode, float width) {
                 ++shown;
             }
         } else if (reason == ofh::Reason::Showing) {
-            panel = use->tally.panels[index];
-            if (copyInto(L, device, use->tex[index])) {
+            panel = fresh;
+            if (copyInto(L, device, source)) {
+                panel.w = L.w;  // the copy's size: the trader's panel may not be in the tally
+                panel.h = L.h;
                 L.show = true;
                 L.aspect = ofh::aspectOf(L.w, L.h);
                 L.heldPanel = panel;
@@ -439,6 +467,7 @@ void decideLayers(ID3D11Device* device, ofh::Mode mode, float width) {
         }
     }
     for (auto*& t : ranked.tex) t = nullptr;  // g_cur's, not this copy's to release
+    ranked.withheldTex = nullptr;
 }
 }  // namespace
 

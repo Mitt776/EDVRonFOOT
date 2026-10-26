@@ -18,7 +18,9 @@
 //
 // .27 (the census walks of 26.10): the NPC's mission description is a panel of its own too (1410x761), shown right above the answers.
 // The materials trader's menu (2307x1297, 16:9) the game DOES lay into the eyes itself, on a curved mesh fixed to the eyes; the draw
-// hook withholds that one draw and the menu is shown as a layer of its own, the whole cinema frame wide, in front of the body.
+// hook withholds that one draw and the menu is shown as a layer of its own in front of the body. .28: 60/85 of the HUD's width, and
+// the panel copied straight from the withheld draw's own texture -- the biologist's and the outfitter's menus come the same way but
+// are not always drawn by the interface shaders, so a draw is never withheld without its sheet.
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -92,7 +94,8 @@ constexpr LayerSpec kLayerSpecs[kLayers] = {
     {5.755, 0.17f, 0.83f, 0.69f, 0.93f, kMenuCurve, "the answers", "answers"},                   // stereo 1410x245, cinema 2083x362
     {1.882, 0.32f, 0.99f, 0.03f, 0.70f, kMenuCurve, "the second dialog panel", "dialog"},        // stereo 1410x749, cinema 2083x1107
     {1.853, 0.17f, 0.83f, 0.075f, 0.708f, kMenuCurve, "the mission description", "mission"},    // stereo 1410x761
-    {16.0 / 9.0, 0.0f, 1.0f, 0.0f, 1.0f, kCurve, "the trader menu", "trader"},                  // stereo 2307x1297, cinema 3408x1917
+    // stereo 2307x1297, cinema 3408x1917 (the whole frame); shown 60/85 of the HUD's width (Dima after .27): 0.956 * 60 / 85 of the frame
+    {16.0 / 9.0, 0.1626f, 0.8374f, 0.0f, 1.0f, kCurve, "the trader menu", "trader"},
 };
 inline const LayerSpec& specOf(Layer l) { return kLayerSpecs[int(l)]; }
 inline bool isLayerShape(Layer l, uint32_t w, uint32_t h) {

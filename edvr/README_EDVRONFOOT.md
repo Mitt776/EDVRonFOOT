@@ -179,8 +179,9 @@ native_vr_on_foot_hud_size = 85
 - описание миссии у NPC (панель `1410x761`) — по центру, прямо над вариантами ответа, той же ширины, вместе с ними как
   одно целое;
 - меню торговца материалами игра в шлеме кладёт сама, но к голове. EDVR это одно рисование игры пропускает и
-  показывает то же меню перед телом, как HUD: на весь кадр кинотеатра от ширины HUD (при 85° около 89°), изогнуто как
-  HUD. Ширина HUD меняет и его. Если рисование игры не узнано целиком (например, в новой версии игры другая сетка),
+  показывает то же меню перед телом, как HUD: шириной 60/85 от HUD (при 85° — 60°, с `.28`; на `.27` было 89°),
+  изогнуто как HUD. Ширина HUD меняет и его. Так же (с `.28`) показываются меню других продавцов, которые игра кладёт к
+  голове той же сеткой (биолог, оружие и снаряжение). Если рисование игры не узнано целиком (например, в новой версии игры другая сетка),
   EDVR его не трогает — меню остаётся у головы, как раньше. При `native_vr_on_foot_hud = off`, в корабле и в
   кинотеатре EDVR тоже ничего не пропускает.
 
@@ -199,7 +200,7 @@ native_vr_on_foot_hud_size = 85
 - `on-foot hud: showing the lift and door menu (1029x949, aspect 1.084, N interface draws) at its place: 56 deg wide,
   0 deg right, 0.04 m up, curve 0.4, anchor body` — показ меню начался, с его местом. Так же `the answers` (варианты
   ответа, `… m down`), `the second dialog panel` (`… deg right`) и `the mission description` (`… m up`).
-- `on-foot hud: showing the trader menu (2307x1297, aspect 1.779, N interface draws) at its place: 89 deg wide, …,
+- `on-foot hud: showing the trader menu (2307x1297, aspect 1.779, N interface draws) at its place: 60 deg wide, …,
   curve 1.0, anchor body; the game's own head-locked copy withheld` — меню торговца показано перед телом, а рисование
   игры у головы пропущено.
 - `on-foot hud: the game lays a 2307x1297 panel into the eye with vs A888D51024D9798E on a mesh of N indices, not the
