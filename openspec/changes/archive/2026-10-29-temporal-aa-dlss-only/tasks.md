@@ -43,22 +43,22 @@
 
 ## 3. Установка и ручная проверка в шлеме (Дима)
 
-- [ ] 3.1 Поставить сборку: `python edvr\tools\install_edvr.py --target steam --dry-run`, затем без `--dry-run`. Проверить:
+- [x] 3.1 Поставить сборку: `python edvr\tools\install_edvr.py --target steam --dry-run`, затем без `--dry-run`. Проверить:
   `python edvr\tools\install_edvr.py --target steam --verify-only` и
   `python edvr\tools\edvr_log.py --target steam --expect-build HEAD --version` после запуска игры. Живой `edvr.ini` не
   трогается: `temporal_aa = dlss` остаётся.
-- [ ] 3.2 Дима: запустить игру с `temporal_aa = dlss`, появиться на станции. В меню F8 убедиться, что у Anti-aliasing
+- [x] 3.2 Дима: запустить игру с `temporal_aa = dlss`, появиться на станции. В меню F8 убедиться, что у Anti-aliasing
   только «Off» и «DLSS», выбрать «Off» и нажать PAUSE (метка). Ожидаемо: картинка не меняется, слайд-шоу нет, у строки
   пометка `after restart`. Проверка по логу (`edvr_log.py`): строки «session mode = dlss» и «off chosen, takes effect after
   restart», после метки нет SLOW REGIME и FREEZE от смены режима.
-- [ ] 3.3 Дима: снова выбрать «DLSS» — пометка пропадает. Затем «Off», выйти из игры и запустить снова. Ожидаемо: игра
+- [x] 3.3 Дима: снова выбрать «DLSS» — пометка пропадает. Затем «Off», выйти из игры и запустить снова. Ожидаемо: игра
   идёт без сглаживания, в логе «session mode = off».
-- [ ] 3.4 Дима: вернуть `dlss` через меню, перезапустить игру, сесть в корабль, выйти на ноги на станции (переход корабль →
+- [x] 3.4 Дима: вернуть `dlss` через меню, перезапустить игру, сесть в корабль, выйти на ноги на станции (переход корабль →
   ноги с DLSS) и нажать PAUSE. Проверка по логу: после метки нет слайд-шоу (кадры не по 0.3–4 с, нет SLOW REGIME
   «held by the vendor runtime's xrEndFrame»).
-- [ ] 3.5 Проверка старого значения: на копии ini (через `install_edvr.py --ini` с бэкапом, не руками по живому файлу)
-  поставить `temporal_aa = fsr`, запустить игру. Ожидаемо: сглаживания нет, в логе строка «fsr is no longer supported,
-  running as off», файл по-прежнему с `fsr`. Затем вернуть ini Димы (`dlss`) тем же инструментом.
+- [x] 3.5 **Снята из ручных проверок по решению Димы (2026-10-29)**, в шлеме не проверялась. Поведение старого значения
+  (`fsr`/`FSR`/`on` → `off`, строка «… is no longer supported, running as off», файл не переписывается) покрыто стендом
+  `config_test` в каждой сборке. Было: на копии ini поставить `temporal_aa = fsr`, запустить игру, вернуть ini Димы.
 
 ## Workflow follow-up
 
