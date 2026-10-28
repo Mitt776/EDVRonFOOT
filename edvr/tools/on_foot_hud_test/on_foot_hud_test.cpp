@@ -20,6 +20,10 @@
 // head-locked draw is recognised whole (the eye-panel shader, 360 indices, an eye, the panels' format, 16:9) and nothing less; the
 // trader is 60/85 of the HUD's width (.28; the whole frame on .27); its line says the game's copy is withheld, the summary counts
 // the withheld.
+//
+// .31 (the two shops): Vista Genomics' 1399x961 and Pioneer Supplies' 1410x878 (1049x720 and 1057x658 at HMD quality 0.75) are
+// their own layers only, and only with 5 interface draws or more -- 922x576 (1.601, one draw) is Pioneer's shape and no layer;
+// both centred at the eyes, as wide as the answers' pixels give; the summary names them bio and arms.
 #include "../../src/d3d11/on_foot_hud_core.h"
 #include <cmath>
 #include <cstdio>
@@ -195,8 +199,11 @@ void partLayers() {
     }
     const uint32_t strangers[][2] = {{2768, 2383}, {2162, 1922}, {961, 961}, {1321, 1081}, {1600, 1400}, {2000, 1636},
                                      {2329, 500},  {1000, 1497}, {1599, 1000}, {918, 1000}};
+    // 1599x1000 is inside Pioneer's 1.606 +- 0.01 since .31; one draw keeps it off (the shops' draws, below).
     for (const auto& s : strangers)
-        for (int k = 0; k < kLayers; ++k) check(!isLayerShape(Layer(k), s[0], s[1]), "the atlas, the captions and the one-off panels: no layer");
+        for (int k = 0; k < kLayers; ++k)
+            if (!(s[0] == 1599 && Layer(k) == Layer::Arms))
+                check(!isLayerShape(Layer(k), s[0], s[1]), "the atlas, the captions and the one-off panels: no layer");
     check(!isLayerShape(Layer::Lift, 0, 1) && !isLayerShape(Layer::Lift, 1, 0), "an empty size is no layer");
 
     // HMD quality 0.75 (.29's logs): every panel that much smaller, rounded to the pixel; the answers' 1057x183 is 5.776, outside
@@ -221,7 +228,8 @@ void partLayers() {
         uint32_t w, h;
     } bases[] = {{Layer::Hud, 2412, 1449},     {Layer::Hud, 3564, 2140},     {Layer::Lift, 1029, 949},     {Layer::Lift, 1521, 1402},
                  {Layer::Answers, 1410, 245},  {Layer::Answers, 2083, 362},  {Layer::Dialog, 1410, 749},   {Layer::Dialog, 2083, 1107},
-                 {Layer::Mission, 1410, 761},  {Layer::Trader, 2307, 1297},  {Layer::Trader, 3408, 1917}};
+                 {Layer::Mission, 1410, 761},  {Layer::Trader, 2307, 1297},  {Layer::Trader, 3408, 1917},
+                 {Layer::Biologist, 1399, 961}, {Layer::Arms, 1410, 878},    {Layer::Arms, 1761, 1096}};
     int scaledWrong = 0;
     for (const auto& b : bases)
         for (int q = 50; q <= 100; ++q)
@@ -232,11 +240,41 @@ void partLayers() {
                     if (isLayerShape(Layer(k), w, h) != (Layer(k) == b.l)) ++scaledWrong;
             }
     check(scaledWrong == 0, "every layer at HMD quality 0.50..1.00: its own layer, and no other");
-    // The panels at 0.75 that are no layer (.29's new-panel lines).
-    const uint32_t strangers75[][2] = {{1384, 297}, {922, 576}, {2076, 1787}, {2076, 1816}, {1621, 1441},
-                                       {991, 810},  {720, 720}, {461, 461},   {461, 691},   {277, 302}};
-    for (const auto& s : strangers75)
-        for (int k = 0; k < kLayers; ++k) check(!isLayerShape(Layer(k), s[0], s[1]), "the panels at HMD quality 0.75 that are no layer: none");
+    // The panels at 0.75 that are no layer (.29's and .30's new-panel lines, with their draws there; 1230x769 the landing's, .24 on,
+    // always one draw). 922x576 and 1230x769 are Pioneer's shape (1.601 and 1.599 inside 1.606 +- 0.01) and no layer by their one
+    // draw; the rest are no layer's shape at all.
+    const uint32_t strangers75[][3] = {{1384, 297, 6}, {922, 576, 1}, {2076, 1787, 7}, {2076, 1816, 82}, {1621, 1441, 32},
+                                       {991, 810, 33}, {720, 720, 19}, {461, 461, 1},   {461, 691, 6},    {277, 302, 1},
+                                       {1230, 769, 1}, {1599, 1000, 1}};
+    for (const auto& s : strangers75) {
+        const Panel one{&g_res[0], s[0], s[1], kFormatTypeless, s[2]};
+        for (int k = 0; k < kLayers; ++k) {
+            check(findLayer(Layer(k), &one, 1) == -1, "the panels at HMD quality 0.75 that are no layer: none");
+            if (!((s[0] == 922 || s[0] == 1230 || s[0] == 1599) && Layer(k) == Layer::Arms))
+                check(!isLayerShape(Layer(k), s[0], s[1]), "the panels at HMD quality 0.75: no layer's shape, the three Pioneer's only");
+        }
+    }
+    check(isLayerShape(Layer::Arms, 922, 576) && isLayerShape(Layer::Arms, 1230, 769) && isLayerShape(Layer::Arms, 1599, 1000),
+          "922x576, 1230x769 and 1599x1000 are Pioneer's shape: only their draws keep them off");
+
+    // The two shops (.30, 29.10): each its own layer only, at 1.0 and 0.75; found with the draws the game gives them, not with 4.
+    const struct {
+        Layer l;
+        uint32_t w, h, draws;
+    } shops[] = {{Layer::Biologist, 1399, 961, 16}, {Layer::Biologist, 1049, 720, 16}, {Layer::Arms, 1410, 878, 25},
+                 {Layer::Arms, 1057, 658, 44}};
+    for (const auto& s : shops) {
+        int layers = 0;
+        for (int k = 0; k < kLayers; ++k) layers += isLayerShape(Layer(k), s.w, s.h) ? 1 : 0;
+        check(layers == 1 && isLayerShape(s.l, s.w, s.h), "a shop's size is its own layer only");
+        const Panel drawn{&g_res[0], s.w, s.h, kFormatTypeless, s.draws}, thin{&g_res[0], s.w, s.h, kFormatTypeless, 4},
+            five{&g_res[0], s.w, s.h, kFormatTypeless, 5};
+        check(findLayer(s.l, &drawn, 1) == 0 && findLayer(s.l, &five, 1) == 0, "a shop's panel with 5 draws or more: found");
+        check(findLayer(s.l, &thin, 1) == -1, "a shop's panel with 4 draws: not found");
+    }
+    check(specOf(Layer::Answers).minDraws == 0 && specOf(Layer::Hud).minDraws == 0, "the other layers need no draws: the answers come with one");
+    const Panel answersOne{&g_res[0], 1057, 183, kFormatTypeless, 1};
+    check(findLayer(Layer::Answers, &answersOne, 1) == 0, "the answers with one draw: found");
 
     // A frame of the dialog: the HUD, the answers and the captions; two answers-shaped panels, the larger taken.
     FrameTally t;
@@ -274,6 +312,18 @@ void partPlaces() {
     check(std::fabs(lift50.widthDeg - lift.widthDeg * r) < 1e-3f && std::fabs(answers50.downM - answers.downM * r) < 1e-4f &&
               std::fabs(dialog50.yawDeg - dialog.yawDeg * r) < 1e-3f && near(placeOf(Layer::Hud, 50).widthDeg, 50),
           "50 deg: the width, the turn and the drop all in proportion");
+    // The shops: centred at the eyes, as wide as the answers' pixels give (Pioneer's 1410 as the answers', Vista's 1399).
+    const Place bio = placeOf(Layer::Biologist, 85), arms = placeOf(Layer::Arms, 85);
+    check(std::fabs(arms.widthDeg - answers.widthDeg) < 0.05f && std::fabs(bio.widthDeg - answers.widthDeg * 1399.0f / 1410.0f) < 0.05f,
+          "the shops: as wide as the answers, by their pixels");
+    check(std::fabs(bio.yawDeg) < 0.01f && std::fabs(arms.yawDeg) < 0.01f && std::fabs(bio.downM) < 0.002f && std::fabs(arms.downM) < 0.002f,
+          "the shops: straight ahead, at the eyes");
+    check(near(bio.curve, kMenuCurve) && near(arms.curve, kMenuCurve), "the shops: the menus' curve");
+    const float ab = specOf(Layer::Arms).y1 - specOf(Layer::Arms).y0, bb = specOf(Layer::Biologist).y1 - specOf(Layer::Biologist).y0;
+    check(std::fabs((specOf(Layer::Arms).x1 - specOf(Layer::Arms).x0) * 3408.0f / ab / 1917.0f - 1410.0f / 878.0f) < 0.005f &&
+              std::fabs((specOf(Layer::Biologist).x1 - specOf(Layer::Biologist).x0) * 3408.0f / bb / 1917.0f - 1399.0f / 961.0f) < 0.005f,
+          "the shops: as high as their proportions give");
+    check(std::fabs(placeOf(Layer::Arms, 50).widthDeg - arms.widthDeg * r) < 1e-3f, "the shops at 50 deg: narrower in proportion");
 }
 
 bool rigid(const float* p) {
@@ -453,6 +503,15 @@ void partMissionTrader() {
     s.withheld = 0;
     formatSummary(s, t.panels, t.count, 0, 0, seen, line, sizeof(line));
     check(!has(line, "withheld"), "nothing withheld: no withheld field");
+    s.menus[int(Layer::Biologist)].shown = 120;
+    s.menus[int(Layer::Arms)].held = 7;
+    formatSummary(s, t.panels, t.count, 0, 0, seen, line, sizeof(line));
+    check(has(line, "trader shown=880 held=400, bio shown=120 held=0, arms shown=0 held=7]"), "the summary: the shops as bio and arms");
+    const Panel vista{&g_res[0], 1399, 961, kFormatTypeless, 16}, pioneer{&g_res[0], 1410, 878, kFormatTypeless, 25};
+    formatMenuShowing(Layer::Biologist, vista, placeOf(Layer::Biologist, 85), Mode::Body, line, sizeof(line));
+    check(has(line, "showing the biologist menu (1399x961"), "the biologist's line");
+    formatMenuShowing(Layer::Arms, pioneer, placeOf(Layer::Arms, 85), Mode::Body, line, sizeof(line));
+    check(has(line, "showing the weapons menu (1410x878"), "the weapons menu's line");
 }
 
 void partMenuLatch() {

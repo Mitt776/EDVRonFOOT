@@ -3046,6 +3046,8 @@ REM panel first in the summary's order, one line per new size. .25: the menus' l
 REM 1410x749), their places from the HUD's width at 85 and 50 degrees, placeAnchor, each layer's own hold and composite bit, the menu lines.
 REM .27: the mission description 1410x761 above the answers, the trader's head-locked draw recognised whole (A888D510, 360 indices, 16:9),
 REM the trader's layer only by what the withheld draw read, 60/85 of the HUD's width (.28), the withheld count in the summary.
+REM .31: the shops 1399x961 and 1410x878 (and at 0.75) their own layers only, with 5 draws or more; 922x576 and 1230x769 (Pioneer's
+REM shape, one draw) none; both centred at the eyes, as wide as the answers' pixels; bio and arms in the summary.
 if not exist "%OBJ%\onfoothud" mkdir "%OBJ%\onfoothud"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\onfoothud"\ /Fe"%BUILD%\on_foot_hud_test.exe" ^

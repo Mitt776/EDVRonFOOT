@@ -78,17 +78,23 @@ constexpr float kMenuCurve = 0.4f;
 // and its place in the cinema's 3408x1917 frame as fractions, x right, y down (.22's census; the menus lie the HUD's side up). The HUD
 // is the measure: its width is the key's, the frame is as many degrees as the HUD's width over its 0.956. Of several panels of one
 // shape, the largest. The order is the compositing order: the HUD first, the menus over it, the trader's menu -- the whole frame --
-// over all. The mission description stands right above the answers: as wide (x 0.17..0.83), its bottom at the answers' top as the
-// sheets' own proportions give it (the answers 0.66 / 5.755 / (1917/3408) = 0.204 of the frame high about 0.81, top 0.708; the
-// description 0.66 / 1.853 / 0.5625 = 0.633 high, centre 0.392).
-enum class Layer : int { Hud = 0, Lift = 1, Answers = 2, Dialog = 3, Mission = 4, Trader = 5 };
-constexpr int kLayers = 6;
+// over all, the shops after it (the two never come together). The mission description stands right above the answers: as wide
+// (x 0.17..0.83), its bottom at the answers' top as the sheets' own proportions give it (the answers 0.66 / 5.755 / (1917/3408) =
+// 0.204 of the frame high about 0.81, top 0.708; the description 0.66 / 1.853 / 0.5625 = 0.633 high, centre 0.392). The two shops
+// (.30, 29.10) the game hangs in the world over the counter, turned, right of the vendor -- no place in the frame to take; Dima's
+// choice: centred at the eyes, as wide as their pixels at the answers' density (1410 px = 0.66 of the frame), as high as their
+// proportions give.
+enum class Layer : int { Hud = 0, Lift = 1, Answers = 2, Dialog = 3, Mission = 4, Trader = 5, Biologist = 6, Arms = 7 };
+constexpr int kLayers = 8;
 struct LayerSpec {
     double aspect;
     float x0, x1, y0, y1;
     float curve;
     const char* name;   // in the lines
     const char* brief;  // in the summary
+    // Fewer interface draws and the panel is not the layer's: 922x576 (1.601, one draw) lies inside the shops' 1.606, the shops are
+    // drawn 16 to 44 times. Not for all: the answers come with one draw.
+    uint32_t minDraws = 0;
 };
 constexpr LayerSpec kLayerSpecs[kLayers] = {
     {1.665, 0.022f, 0.978f, -0.017f, 1.017f, kCurve, "the HUD panel", "hud"},                    // stereo 2412x1449, cinema 3564x2140
@@ -98,6 +104,10 @@ constexpr LayerSpec kLayerSpecs[kLayers] = {
     {1.853, 0.17f, 0.83f, 0.075f, 0.708f, kMenuCurve, "the mission description", "mission"},    // stereo 1410x761
     // stereo 2307x1297, cinema 3408x1917 (the whole frame); shown 60/85 of the HUD's width (Dima after .27): 0.956 * 60 / 85 of the frame
     {16.0 / 9.0, 0.1626f, 0.8374f, 0.0f, 1.0f, kCurve, "the trader menu", "trader"},
+    // Vista Genomics: stereo 1399x961, 1049x720 at HMD quality 0.75; 0.66 * 1399 / 1410 = 0.6549 wide, 0.7997 high
+    {1399.0 / 961.0, 0.1726f, 0.8274f, 0.1002f, 0.8998f, kMenuCurve, "the biologist menu", "bio", 5},
+    // Pioneer Supplies: stereo 1410x878, 1057x658 at 0.75, cinema 1761x1096; 0.66 wide, 0.7306 high
+    {1410.0 / 878.0, 0.17f, 0.83f, 0.1347f, 0.8653f, kMenuCurve, "the weapons menu", "arms", 5},
 };
 inline const LayerSpec& specOf(Layer l) { return kLayerSpecs[int(l)]; }
 inline bool isLayerShape(Layer l, uint32_t w, uint32_t h) {
@@ -111,7 +121,9 @@ inline int findLayer(Layer l, const Panel* p, int n) {
     if (l == Layer::Trader) return -1;
     int best = -1;
     for (int i = 0; i < n; ++i)
-        if (isLayerShape(l, p[i].w, p[i].h) && (best < 0 || uint64_t(p[i].w) * p[i].h > uint64_t(p[best].w) * p[best].h)) best = i;
+        if (isLayerShape(l, p[i].w, p[i].h) && p[i].draws >= specOf(l).minDraws &&
+            (best < 0 || uint64_t(p[i].w) * p[i].h > uint64_t(p[best].w) * p[best].h))
+            best = i;
     return best;
 }
 // Every layer's panel in the frame, -1 for none.
