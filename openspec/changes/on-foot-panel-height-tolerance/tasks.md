@@ -25,7 +25,7 @@
 - [x] 2.1 В `docs\research\native-vr-on-foot.md` под «Заход 5» (после находки) добавить короткую запись о заявке:
   правило, почему «или», что проверено перебором. Обновить блок `## Status`: ответы при HMD Quality < 1.0 исправлены,
   ждут проверки в шлеме. Проверка: блок Status не длиннее 60 строк.
-- [ ] 2.2 Коммит по правилам `edvr\AGENTS.md`: сообщение в файле, `git commit -F`. Поставить тег
+- [x] 2.2 Коммит по правилам `edvr\AGENTS.md`: сообщение в файле, `git commit -F`. Поставить тег
   `v0.19.1-edvronfoot.30`, затем `build.bat --dll-only`, `python tools\install_edvr.py --target steam` и
   `--verify-only`. Проверка: `vr payload and profile verified`; `python tools\edvr_log.py --target steam --version`
   после запуска игры показывает `.30`.
