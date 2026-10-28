@@ -84,6 +84,7 @@ LayerState g_layers[ofh::kLayers];
 uint64_t g_doorSeq = 0;
 ofh::Summary g_summary;
 ofh::SeenSizes g_seen;     // the boundary's: panel sizes met, one line each
+uint32_t g_hudWidth = 0;   // under g_mutex: the last HUD panel's width, the shops' measure (ofh::findLayers)
 static_assert(kOnFootHudSheets == ofh::kLayers, "one sheet per layer");
 
 // The bound target: a 2D, single-sample texture of the panels' format. One resolve and one GetDesc per binding generation.
@@ -142,8 +143,8 @@ uint32_t compositeReads(ID3D11DeviceContext* ctx) {
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         int c[ofh::kLayers], l[ofh::kLayers];
-        ofh::findLayers(g_cur.tally.panels, g_cur.tally.count, c);
-        ofh::findLayers(g_last.tally.panels, g_last.tally.count, l);
+        ofh::findLayers(g_cur.tally.panels, g_cur.tally.count, c, g_hudWidth);
+        ofh::findLayers(g_last.tally.panels, g_last.tally.count, l, g_hudWidth);
         for (int k = 0; k < ofh::kLayers; ++k) {
             if (c[k] >= 0) now[k] = g_cur.tally.panels[c[k]].id;
             if (l[k] >= 0) last[k] = g_last.tally.panels[l[k]].id;
@@ -297,6 +298,8 @@ void onFootHudFrameBoundary() {
     rankInto(g_cur, ranked);
     g_last.release();
     g_last = ranked;
+    const int hud = ofh::findHud(g_last.tally.panels, g_last.tally.count);
+    if (hud >= 0) g_hudWidth = g_last.tally.panels[hud].w;
     for (auto*& t : g_cur.tex) t = nullptr;  // carried into g_last
     g_cur.withheldTex = nullptr;              // so is this
     g_cur.tally.clear();
@@ -391,8 +394,8 @@ void decideLayers(ID3D11Device* device, ofh::Mode mode, float width) {
     if (g_cur.tally.count) rankInto(g_cur, ranked);
     // The trader's: the panel this frame's (or the last frame's) withheld draw read, not a shape.
     int cur[ofh::kLayers], last[ofh::kLayers];
-    ofh::findLayerPanels(ranked.tally, cur);
-    ofh::findLayerPanels(g_last.tally, last);
+    ofh::findLayerPanels(ranked.tally, cur, g_hudWidth);
+    ofh::findLayerPanels(g_last.tally, last, g_hudWidth);
     const uint32_t composites = g_cur.tally.composites | g_last.tally.composites;
     ofh::DecisionIn base;
     base.onFoot = g_onFoot.load(std::memory_order_relaxed);

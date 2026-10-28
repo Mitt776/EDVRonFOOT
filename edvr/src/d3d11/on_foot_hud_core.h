@@ -95,7 +95,12 @@ struct LayerSpec {
     // Fewer interface draws and the panel is not the layer's: 922x576 (1.601, one draw) lies inside the shops' 1.606, the shops are
     // drawn 16 to 44 times. Not for all: the answers come with one draw.
     uint32_t minDraws = 0;
+    // The panel's width when the HUD panel is 2412 wide, 0 for any width. The game scales every panel by one HMD quality, so a shop
+    // is always that share of the HUD panel's width (1410 / 2412 = 1057 / 1809); 922x576 came with 13 draws at the ship's ramp (.31,
+    // 02:42:06) and is 922 / 1809, no shop.
+    uint32_t widthAtHud = 0;
 };
+constexpr uint32_t kHudWidthRef = 2412;
 constexpr LayerSpec kLayerSpecs[kLayers] = {
     {1.665, 0.022f, 0.978f, -0.017f, 1.017f, kCurve, "the HUD panel", "hud"},                    // stereo 2412x1449, cinema 3564x2140
     {1.084, 0.185f, 0.815f, -0.045f, 0.987f, kMenuCurve, "the lift and door menu", "lift"},       // stereo 1029x949, cinema 1521x1402
@@ -105,9 +110,9 @@ constexpr LayerSpec kLayerSpecs[kLayers] = {
     // stereo 2307x1297, cinema 3408x1917 (the whole frame); shown 60/85 of the HUD's width (Dima after .27): 0.956 * 60 / 85 of the frame
     {16.0 / 9.0, 0.1626f, 0.8374f, 0.0f, 1.0f, kCurve, "the trader menu", "trader"},
     // Vista Genomics: stereo 1399x961, 1049x720 at HMD quality 0.75; 0.66 * 1399 / 1410 = 0.6549 wide, 0.7997 high
-    {1399.0 / 961.0, 0.1726f, 0.8274f, 0.1002f, 0.8998f, kMenuCurve, "the biologist menu", "bio", 5},
+    {1399.0 / 961.0, 0.1726f, 0.8274f, 0.1002f, 0.8998f, kMenuCurve, "the biologist menu", "bio", 5, 1399},
     // Pioneer Supplies: stereo 1410x878, 1057x658 at 0.75, cinema 1761x1096; 0.66 wide, 0.7306 high
-    {1410.0 / 878.0, 0.17f, 0.83f, 0.1347f, 0.8653f, kMenuCurve, "the weapons menu", "arms", 5},
+    {1410.0 / 878.0, 0.17f, 0.83f, 0.1347f, 0.8653f, kMenuCurve, "the weapons menu", "arms", 5, 1410},
 };
 inline const LayerSpec& specOf(Layer l) { return kLayerSpecs[int(l)]; }
 inline bool isLayerShape(Layer l, uint32_t w, uint32_t h) {
@@ -115,20 +120,31 @@ inline bool isLayerShape(Layer l, uint32_t w, uint32_t h) {
     const double aspect = specOf(l).aspect;
     return std::fabs(double(w) / double(h) - aspect) <= 0.01 + 1e-9 || std::fabs(double(w) / aspect - double(h)) <= 1.0 + 1e-9;
 }
+// Is the panel as wide as its layer's share of the HUD panel's width (within 2 pixels: the two are rounded apart)? A layer without a
+// share fits any width; one with a share fits none while no HUD panel has been seen (hudW 0).
+inline bool fitsHud(Layer l, uint32_t w, uint32_t hudW) {
+    const uint32_t share = specOf(l).widthAtHud;
+    if (!share) return true;
+    if (!hudW) return false;
+    return std::fabs(double(w) - double(hudW) * share / kHudWidthRef) <= 2.0 + 1e-9;
+}
 // The trader's layer is never found by its shape: a 16:9 panel also comes once in a while on its own (.26, 01:25:30, one draw). Its
 // panel is the one the withheld draw read (findPanelById), so it shows only while the game is trying to lay the menu at the head.
-inline int findLayer(Layer l, const Panel* p, int n) {
+inline int findLayer(Layer l, const Panel* p, int n, uint32_t hudW = 0) {
     if (l == Layer::Trader) return -1;
     int best = -1;
     for (int i = 0; i < n; ++i)
-        if (isLayerShape(l, p[i].w, p[i].h) && p[i].draws >= specOf(l).minDraws &&
+        if (isLayerShape(l, p[i].w, p[i].h) && p[i].draws >= specOf(l).minDraws && fitsHud(l, p[i].w, hudW) &&
             (best < 0 || uint64_t(p[i].w) * p[i].h > uint64_t(p[best].w) * p[best].h))
             best = i;
     return best;
 }
-// Every layer's panel in the frame, -1 for none.
-inline void findLayers(const Panel* p, int n, int out[kLayers]) {
-    for (int k = 0; k < kLayers; ++k) out[k] = findLayer(Layer(k), p, n);
+// Every layer's panel in the frame, -1 for none. The HUD first: its width this frame, else the last one seen (lastHudW, 0 for none),
+// is the measure of the shops' (fitsHud) -- the game stops drawing the HUD panel while a shop is open.
+inline void findLayers(const Panel* p, int n, int out[kLayers], uint32_t lastHudW) {
+    out[int(Layer::Hud)] = findLayer(Layer::Hud, p, n);
+    const uint32_t hudW = out[int(Layer::Hud)] >= 0 ? p[out[int(Layer::Hud)]].w : lastHudW;
+    for (int k = 1; k < kLayers; ++k) out[k] = findLayer(Layer(k), p, n, hudW);
 }
 inline int findPanelById(const Panel* p, int n, const void* id) {
     if (!id) return -1;
@@ -224,8 +240,8 @@ struct FrameTally {
 
 // Each layer's panel in a frame, -1 for none: by shape, the trader's by what the frame's withheld draw read -- a frame that withheld it
 // but did not redraw the panel (a station draws every other frame) has none, and the layer's hold keeps the last copy.
-inline void findLayerPanels(const FrameTally& t, int out[kLayers]) {
-    findLayers(t.panels, t.count, out);
+inline void findLayerPanels(const FrameTally& t, int out[kLayers], uint32_t lastHudW) {
+    findLayers(t.panels, t.count, out, lastHudW);
     out[int(Layer::Trader)] = findPanelById(t.panels, t.count, t.withheld);
 }
 

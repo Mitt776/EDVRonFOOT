@@ -23,7 +23,8 @@
 //
 // .31 (the two shops): Vista Genomics' 1399x961 and Pioneer Supplies' 1410x878 (1049x720 and 1057x658 at HMD quality 0.75) are
 // their own layers only, and only with 5 interface draws or more -- 922x576 (1.601, one draw) is Pioneer's shape and no layer;
-// both centred at the eyes, as wide as the answers' pixels give; the summary names them bio and arms.
+// both centred at the eyes, as wide as the answers' pixels give; the summary names them bio and arms. A shop is as wide as its share of
+// the HUD panel's width (this frame's, else the last seen): 922x576 with 13 draws at the ship's ramp (.31) is none.
 #include "../../src/d3d11/on_foot_hud_core.h"
 #include <cmath>
 #include <cstdio>
@@ -249,7 +250,7 @@ void partLayers() {
     for (const auto& s : strangers75) {
         const Panel one{&g_res[0], s[0], s[1], kFormatTypeless, s[2]};
         for (int k = 0; k < kLayers; ++k) {
-            check(findLayer(Layer(k), &one, 1) == -1, "the panels at HMD quality 0.75 that are no layer: none");
+            check(findLayer(Layer(k), &one, 1, 1809) == -1, "the panels at HMD quality 0.75 that are no layer: none");
             if (!((s[0] == 922 || s[0] == 1230 || s[0] == 1599) && Layer(k) == Layer::Arms))
                 check(!isLayerShape(Layer(k), s[0], s[1]), "the panels at HMD quality 0.75: no layer's shape, the three Pioneer's only");
         }
@@ -260,17 +261,52 @@ void partLayers() {
     // The two shops (.30, 29.10): each its own layer only, at 1.0 and 0.75; found with the draws the game gives them, not with 4.
     const struct {
         Layer l;
-        uint32_t w, h, draws;
-    } shops[] = {{Layer::Biologist, 1399, 961, 16}, {Layer::Biologist, 1049, 720, 16}, {Layer::Arms, 1410, 878, 25},
-                 {Layer::Arms, 1057, 658, 44}};
+        uint32_t w, h, draws, hud;
+    } shops[] = {{Layer::Biologist, 1399, 961, 16, 2412}, {Layer::Biologist, 1049, 720, 16, 1809}, {Layer::Arms, 1410, 878, 25, 2412},
+                 {Layer::Arms, 1057, 658, 44, 1809}};
     for (const auto& s : shops) {
         int layers = 0;
         for (int k = 0; k < kLayers; ++k) layers += isLayerShape(Layer(k), s.w, s.h) ? 1 : 0;
         check(layers == 1 && isLayerShape(s.l, s.w, s.h), "a shop's size is its own layer only");
         const Panel drawn{&g_res[0], s.w, s.h, kFormatTypeless, s.draws}, thin{&g_res[0], s.w, s.h, kFormatTypeless, 4},
             five{&g_res[0], s.w, s.h, kFormatTypeless, 5};
-        check(findLayer(s.l, &drawn, 1) == 0 && findLayer(s.l, &five, 1) == 0, "a shop's panel with 5 draws or more: found");
-        check(findLayer(s.l, &thin, 1) == -1, "a shop's panel with 4 draws: not found");
+        check(findLayer(s.l, &drawn, 1, s.hud) == 0 && findLayer(s.l, &five, 1, s.hud) == 0, "a shop's panel with 5 draws or more: found");
+        check(findLayer(s.l, &thin, 1, s.hud) == -1, "a shop's panel with 4 draws: not found");
+        check(findLayer(s.l, &drawn, 1, 0) == -1, "a shop's panel while no HUD panel has been seen: not found");
+        check(findLayer(s.l, &drawn, 1, s.hud == 2412 ? 1809 : 2412) == -1, "a shop's panel beside the other quality's HUD: not found");
+    }
+    // Every quality 0.50..1.00, both roundings: the shop beside the HUD panel of the same quality is found.
+    int shopsMissed = 0;
+    for (int q = 50; q <= 100; ++q)
+        for (int nearest = 0; nearest < 2; ++nearest) {
+            const double f = q / 100.0, add = nearest ? 0.5 : 0.0;
+            const uint32_t hud = uint32_t(std::floor(2412 * f + add));
+            const Panel bio{&g_res[0], uint32_t(std::floor(1399 * f + add)), uint32_t(std::floor(961 * f + add)), kFormatTypeless, 16};
+            const Panel arms{&g_res[0], uint32_t(std::floor(1410 * f + add)), uint32_t(std::floor(878 * f + add)), kFormatTypeless, 25};
+            if (findLayer(Layer::Biologist, &bio, 1, hud) != 0) ++shopsMissed;
+            if (findLayer(Layer::Arms, &arms, 1, hud) != 0) ++shopsMissed;
+        }
+    check(shopsMissed == 0, "the shops at HMD quality 0.50..1.00 beside the HUD of that quality: found");
+    // .31, 02:42:06, the ship's ramp: 922x576 with 13 draws, no HUD panel in the frame, the last one 1809 wide -- no shop. The shop
+    // the same way (the game stops the HUD while it is open): found by the remembered width; the HUD in the frame is used first.
+    {
+        FrameTally ramp;
+        for (int i = 0; i < 13; ++i) ramp.note(&g_res[0], 922, 576, kFormatTypeless);
+        for (int i = 0; i < 82; ++i) ramp.note(&g_res[1], 2076, 1816, kFormatTypeless);
+        int out[kLayers];
+        findLayers(ramp.panels, ramp.count, out, 1809);
+        int any = 0;
+        for (int k = 0; k < kLayers; ++k) any += out[k] >= 0 ? 1 : 0;
+        check(any == 0, ".31 ramp: 922x576 with 13 draws beside a 1809 HUD is no layer");
+        FrameTally shop;
+        for (int i = 0; i < 44; ++i) shop.note(&g_res[0], 1057, 658, kFormatTypeless);
+        findLayers(shop.panels, shop.count, out, 1809);
+        check(out[int(Layer::Arms)] == 0 && out[int(Layer::Hud)] == -1, "Pioneer without the HUD in the frame: by the last HUD's width");
+        findLayers(shop.panels, shop.count, out, 0);
+        check(out[int(Layer::Arms)] == -1, "Pioneer before any HUD panel was seen: not shown");
+        for (int i = 0; i < 12; ++i) shop.note(&g_res[2], 1809, 1086, kFormatTypeless);
+        findLayers(shop.panels, shop.count, out, 2412);
+        check(out[int(Layer::Arms)] == 0 && out[int(Layer::Hud)] == 1, "the HUD in the frame is the measure before the remembered one");
     }
     check(specOf(Layer::Answers).minDraws == 0 && specOf(Layer::Hud).minDraws == 0, "the other layers need no draws: the answers come with one");
     const Panel answersOne{&g_res[0], 1057, 183, kFormatTypeless, 1};
@@ -284,7 +320,7 @@ void partLayers() {
     int other;
     for (int i = 0; i < 3; ++i) t.note(&other, 1410, 245, kFormatTypeless);
     int found[kLayers];
-    findLayers(t.panels, t.count, found);
+    findLayers(t.panels, t.count, found, 0);
     check(found[int(Layer::Hud)] == 0 && found[int(Layer::Answers)] == 3 && found[int(Layer::Lift)] == -1 &&
               found[int(Layer::Dialog)] == -1,
           "a dialog frame: the HUD and the answers, no lift, no second panel");
@@ -407,14 +443,14 @@ void partMissionTrader() {
     for (int i = 0; i < 17; ++i) t.note(&g_res[1], 1410, 761, kFormatTypeless);
     check(findLayer(Layer::Trader, t.panels, t.count) == -1, "a 16:9 panel drawn: not the trader's layer by its shape");
     int found[kLayers];
-    findLayerPanels(t, found);
+    findLayerPanels(t, found, 0);
     check(found[int(Layer::Trader)] == -1 && found[int(Layer::Mission)] == 2 && found[int(Layer::Hud)] == 0,
           "no withheld draw: no trader; the description found by its shape");
     t.withheld = &other;
-    findLayerPanels(t, found);
+    findLayerPanels(t, found, 0);
     check(found[int(Layer::Trader)] == 1, "the withheld draw read the 16:9 panel: that is the trader's");
     t.withheld = &g_res[2];
-    findLayerPanels(t, found);
+    findLayerPanels(t, found, 0);
     check(found[int(Layer::Trader)] == -1, "it read a panel the frame did not draw: none this frame (the hold keeps the copy)");
     check(findPanelById(t.panels, t.count, nullptr) == -1, "no id: none");
 
