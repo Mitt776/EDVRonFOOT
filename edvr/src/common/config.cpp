@@ -35,6 +35,18 @@ struct Config::Impl {
     // successful parse. A parse clears it, so an edit that leaves a value
     // malformed says so again -- once. See firstNoteFor().
     std::set<std::string, std::less<>> noteNoted;
+    // fix.temporal_aa is taken once per session (docs/research/native-vr-on-
+    // foot.md, "Заход 5": switching it live on foot dropped the game into a
+    // slideshow of 0.3-4 s frames). The first parse fixes the session's mode;
+    // every later parse puts that mode back under the key, so every reader
+    // sees it, and keeps the file's fresh value only as the chosen one, for
+    // the menu. on and fsr are no longer offered and run as off.
+    bool        temporalFixed = false;
+    bool        temporalSessionSet = false;   // the key was in the file at the first parse
+    std::string temporalSession;
+    bool        temporalChosenSet = false;
+    std::string temporalChosen;               // as the file has it now
+    std::string temporalDeferredNoted;        // the chosen value last said to wait for a restart
 };
 
 namespace {
@@ -50,6 +62,15 @@ std::string lowered(const std::string& s) {
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     }
     return out;
+}
+
+// The retired temporal modes: EDVR's own TAA (on) and FSR 3.1 (fsr).
+bool retiredTemporalMode(const std::string& v) {
+    return _stricmp(v.c_str(), "on") == 0 || _stricmp(v.c_str(), "fsr") == 0;
+}
+
+std::string sessionTemporalMode(const std::string& v) {
+    return retiredTemporalMode(v) ? std::string("off") : v;
 }
 
 // Config's lock, scoped. Shared for a lookup; exclusive for anything that
@@ -137,6 +158,9 @@ void Config::init(const std::wstring& moduleDir) {
         // itself: it is null until here, and "no Impl yet" means "the default".
         WriteGuard g(m_lock);
         if (!m_impl) m_impl = new Impl();
+        // init() is the start of a session (once in the DLL; a rig's re-init
+        // is a new one), so the temporal mode is fixed afresh by the parse below.
+        m_impl->temporalFixed = false;
     }
 
     // The flat profile keeps its settings in a file of its own, so a flat
@@ -163,6 +187,12 @@ void Config::init(const std::wstring& moduleDir) {
         }
     }
     parse();
+    {
+        // A first read that failed (an editor holding the file) still fixes
+        // the session: off, the side that needs only a restart to undo.
+        WriteGuard g(m_lock);
+        if (!m_impl->temporalFixed) temporalResolve(&m_impl->values);
+    }
 
     // Defaults to <exe dir>\edvr_logs; the shader dump lands in a subdirectory.
     std::string dirUtf8 = getString("log.dir", "");
@@ -220,6 +250,9 @@ void Config::parse() {
         // one.
         WriteGuard g(m_lock);
         if (m_impl->values.empty()) m_impl->values.swap(parsed);
+        // No file at the start is a session without temporal AA: one restored
+        // or written later takes effect at the next start.
+        if (!m_impl->temporalFixed) temporalResolve(&m_impl->values);
         return;
     }
 
@@ -327,6 +360,7 @@ void Config::parse() {
         // a getter or the log, so it cannot meet the lock again.
         WriteGuard g(m_lock);
         auditResolve(&parsed);
+        temporalResolve(&parsed);
         m_impl->values.swap(parsed);
         m_impl->noteNoted.clear();
         m_generation.fetch_add(1, std::memory_order_release);   // after the swap: a reader that sees the new number sees the new values
@@ -480,6 +514,57 @@ void Config::auditFlush() const {
     }
 }
 
+// fix.temporal_aa against the session's mode (see Impl). The first call fixes
+// the mode; every call after it writes that mode back into the map about to
+// be swapped in and keeps the file's value as the chosen one. Lines are
+// queued like the audit's, for auditFlush() to write once the log is open.
+//
+// Runs under the exclusive lock, like auditResolve.
+void Config::temporalResolve(void* parsedMap) {
+    if (!m_impl) return;
+    auto& parsed = *static_cast<ValueMap*>(parsedMap);
+    const auto it = parsed.find("fix.temporal_aa");
+    m_impl->temporalChosenSet = it != parsed.end();
+    m_impl->temporalChosen = m_impl->temporalChosenSet ? it->second : std::string();
+
+    if (!m_impl->temporalFixed) {
+        m_impl->temporalFixed = true;
+        m_impl->temporalSessionSet = m_impl->temporalChosenSet;
+        m_impl->temporalSession = sessionTemporalMode(m_impl->temporalChosen);
+        if (m_impl->temporalChosenSet && retiredTemporalMode(m_impl->temporalChosen)) {
+            m_impl->auditPending.push_back(
+                std::string(iniName()) + ": temporal_aa: " + m_impl->temporalChosen +
+                " is no longer supported, running as off.");
+        }
+        m_impl->auditPending.push_back(
+            "temporal_aa: session mode = " +
+            (m_impl->temporalSessionSet ? m_impl->temporalSession : std::string("off")) +
+            " (held until the game exits; a change takes effect after restart).");
+        m_impl->temporalDeferredNoted = m_impl->temporalChosen;
+    } else {
+        const std::string chosen = m_impl->temporalChosenSet ? m_impl->temporalChosen : std::string("off");
+        const std::string session = m_impl->temporalSessionSet ? m_impl->temporalSession : std::string("off");
+        if (_stricmp(sessionTemporalMode(chosen).c_str(), session.c_str()) == 0) {
+            // Back to the running mode: a later change is news again.
+            m_impl->temporalDeferredNoted = chosen;
+        } else if (_stricmp(chosen.c_str(), m_impl->temporalDeferredNoted.c_str()) != 0) {
+            m_impl->temporalDeferredNoted = chosen;
+            m_impl->auditPending.push_back(
+                retiredTemporalMode(chosen)
+                    ? "temporal_aa: " + chosen + " is no longer supported; off takes effect after restart (now " +
+                          session + ")."
+                    : "temporal_aa: " + chosen + " chosen, takes effect after restart (now " + session + ").");
+        }
+    }
+
+    if (m_impl->temporalSessionSet) {
+        parsed["fix.temporal_aa"] = m_impl->temporalSession;
+    } else if (it != parsed.end()) {
+        parsed.erase(it);
+    }
+    if (!m_impl->auditPending.empty()) m_auditPending.store(true, std::memory_order_release);
+}
+
 bool Config::reloadIfChanged() {
     WIN32_FILE_ATTRIBUTE_DATA data{};
     if (!GetFileAttributesExW(m_path.c_str(), GetFileExInfoStandard, &data)) return false;
@@ -519,6 +604,24 @@ std::string Config::requestedTemporalMode() const {
     if (!m_impl) return "off";
     const auto it = m_impl->values.find("fix.temporal_aa");
     return it == m_impl->values.end() ? "off" : it->second;
+}
+
+std::string Config::chosenTemporalMode() const {
+    ReadGuard g(m_lock);
+    if (!m_impl) return "off";
+    if (!m_impl->temporalFixed) {
+        const auto it = m_impl->values.find("fix.temporal_aa");
+        return it == m_impl->values.end() ? "off" : it->second;
+    }
+    return m_impl->temporalChosenSet ? m_impl->temporalChosen : std::string("off");
+}
+
+bool Config::temporalModeAfterRestart() const {
+    ReadGuard g(m_lock);
+    if (!m_impl || !m_impl->temporalFixed) return false;
+    const std::string chosen = m_impl->temporalChosenSet ? m_impl->temporalChosen : std::string("off");
+    const std::string session = m_impl->temporalSessionSet ? m_impl->temporalSession : std::string("off");
+    return _stricmp(sessionTemporalMode(chosen).c_str(), session.c_str()) != 0;
 }
 
 // Said once per key per successful parse, and only once the log can take it.

@@ -392,6 +392,90 @@ static void noteCases(const std::wstring& scratch) {
     }
 }
 
+// --- fix.temporal_aa is fixed at the start (temporal-aa-dlss-only) -----------
+//
+// Switching the temporal mode live on foot dropped the game into a slideshow
+// (docs/research/native-vr-on-foot.md, "Заход 5"), so Config takes the mode once
+// per session: every reader sees the session's mode after any reload, the menu
+// reads the file's value, and on/fsr (retired) run as off.
+static void temporalCases(const std::wstring& scratch) {
+    Config& cfg = Config::get();
+    Log::get().close();
+    deleteLogs(scratch, L"temporal");
+    auto expectMode = [&cfg](const char* session, const char* chosen, bool after, const char* what) {
+        const std::string s = cfg.getString("fix.temporal_aa", "off");
+        const std::string r = cfg.requestedTemporalMode();
+        const std::string c = cfg.chosenTemporalMode();
+        const bool a = cfg.temporalModeAfterRestart();
+        if (s == session && r == session && c == chosen && a == after) ok(what);
+        else fail(what, "getString " + s + ", requested " + r + ", chosen " + c + ", after restart " +
+                            (a ? "yes" : "no") + "; wanted " + session + "/" + session + "/" + chosen +
+                            "/" + (after ? "yes" : "no"));
+    };
+    auto start = [&](const char* body) {
+        if (!rewriteIni(scratch, body)) return false;
+        cfg.init(scratch);
+        return true;
+    };
+    auto reload = [&](const char* body) { return rewriteIni(scratch, body) && cfg.reloadIfChanged(); };
+
+    if (!start("[fix]\r\ntemporal_aa = FSR\r\nrender_sharpness = 0.2\r\n")) {
+        fail("temporal cases", "could not write the scratch ini");
+        return;
+    }
+    if (!Log::get().open(scratch, L"temporal")) {
+        fail("temporal cases", "the log would not open in the scratch dir");
+        return;
+    }
+    expectMode("off", "FSR", false, "temporal_aa = fsr (any case) reads as off, and the menu sees the file's fsr");
+    if (!reload("[fix]\r\ntemporal_aa = dlss\r\nrender_sharpness = 0.5\r\n")) {
+        fail("temporal cases", "the dlss write did not reload");
+    }
+    expectMode("off", "dlss", true, "a reload with dlss keeps the session's off; the menu sees dlss, after restart");
+    expectFloat("fix.render_sharpness", 0.5f, "...while the other keys of the same edit are picked up");
+    reload("[fix]\r\ntemporal_aa = dlss\r\nrender_sharpness = 0.5\r\n# again\r\n");
+    reload("[fix]\r\ntemporal_aa = off\r\nrender_sharpness = 0.5\r\n");
+    expectMode("off", "off", false, "back to the session's mode: no after-restart mark");
+    reload("[fix]\r\ntemporal_aa = dlss\r\nrender_sharpness = 0.5\r\n");
+
+    start("[fix]\r\ntemporal_aa = on\r\n");
+    expectMode("off", "on", false, "temporal_aa = on (EDVR's own TAA) reads as off");
+
+    start("[fix]\r\ntemporal_aa = dlaa\r\n");
+    expectMode("dlaa", "dlaa", false, "temporal_aa = dlaa stays dlaa");
+    reload("[fix]\r\ntemporal_aa = off\r\n");
+    expectMode("dlaa", "off", true, "a reload with off keeps dlaa running");
+
+    start("[fix]\r\ntemporal_aa = dlss\r\n");
+    expectMode("dlss", "dlss", false, "temporal_aa = dlss stays dlss");
+    check(temporalModeEnabled(cfg.getString("fix.temporal_aa", "off")), "...and is a live temporal mode");
+    reload("[fix]\r\ntemporal_aa = fsr\r\n");
+    expectMode("dlss", "fsr", true, "a reload with fsr keeps dlss running; fsr waits as off");
+    reload("[fix]\r\n");
+    expectMode("dlss", "off", true, "a reload with the key gone keeps dlss running");
+    Log::get().close();
+
+    const std::string body = readNewestLog(scratch, L"temporal");
+    static const struct { const char* needle; int want; const char* what; } kNeeds[] = {
+        {"temporal_aa: FSR is no longer supported, running as off", 1, "a retired fsr is said once, at the start"},
+        {"temporal_aa: on is no longer supported, running as off", 1, "...and a retired on"},
+        {"temporal_aa: session mode = off", 2, "the session's mode is logged at each start"},
+        {"temporal_aa: session mode = dlaa", 1, "...dlaa"},
+        {"temporal_aa: session mode = dlss", 1, "...dlss"},
+        {"temporal_aa: dlss chosen, takes effect after restart", 2,
+         "a deferred choice is said once per new value, not per reload"},
+        {"temporal_aa: off chosen, takes effect after restart", 2, "...off, in the dlaa and the dlss sessions"},
+        {"temporal_aa: fsr is no longer supported; off takes effect after restart", 1,
+         "...and fsr chosen mid-session says it will run as off"},
+    };
+    for (const auto& n : kNeeds) {
+        const int got = countOf(body, n.needle);
+        if (got == n.want) ok(n.what);
+        else fail(n.what, std::string("\"") + n.needle + "\" appears " + std::to_string(got) +
+                              " times in the log, wanted " + std::to_string(n.want));
+    }
+}
+
 // --- reads that race a reload (2026-09-29) ----------------------------------
 //
 // parse() swaps a freshly parsed map in and frees the old one. The render
@@ -2065,6 +2149,7 @@ int main(int argc, char** argv) {
         const std::wstring scratch = widen(argv[2]);
         floatCases(scratch);
         noteCases(scratch);
+        temporalCases(scratch);
         iniNameCases(scratch);
         raceCase(scratch);
         shareDeleteCase(scratch);

@@ -353,10 +353,15 @@ bool rowLocked(int def) {
     return kMenuRows[def].kind == MenuKind::Hotkey && hotkeyRowLocked(kMenuRows[def].key, explorerCamSessionActive());
 }
 
+bool isTemporalModeRow(const MenuRowDef& d) {
+    return strcmp(d.section, "fix") == 0 && strcmp(d.key, "temporal_aa") == 0;
+}
+
+// The Anti-aliasing row shows the mode the FILE holds (Config::chosenTemporalMode),
+// in both profiles: the running mode is fixed at launch, and the row's restart badge
+// says when the two differ (rowPending).
 std::string rowValue(const MenuRowDef& d) {
-    if (runtimeFlatProfile() && strcmp(d.section, "fix") == 0 &&
-        strcmp(d.key, "temporal_aa") == 0)
-        return Config::get().requestedTemporalMode();
+    if (isTemporalModeRow(d)) return Config::get().chosenTemporalMode();
     return Config::get().getString(dottedOf(d).c_str(), d.shipped);
 }
 
@@ -887,6 +892,11 @@ constexpr const char* kNoRuntimeToken = "not written: the runtime's name yields 
 // rewrite of the list, changes nothing here and must badge nothing.
 bool rowPending(const MenuRowDef& d, const std::string& value, const std::string& snapshot) {
     if (isOpenxrRenderScaleRow(d)) return renderScaleRowPending(value);
+    // The snapshot is the session's mode (takeSnapshot); a retired on/fsr would run as off.
+    if (isTemporalModeRow(d)) {
+        const bool retired = _stricmp(value.c_str(), "on") == 0 || _stricmp(value.c_str(), "fsr") == 0;
+        return _stricmp(retired ? "off" : value.c_str(), snapshot.c_str()) != 0;
+    }
     return value != snapshot;
 }
 
@@ -927,11 +937,8 @@ std::vector<ChoiceItem> choicesOf(const MenuRowDef& d) {
                 c.label = nvidiaLabel();
             }
             if (runtimeFlatProfile() && strcmp(d.section, "fix") == 0 &&
-                strcmp(d.key, "temporal_aa") == 0) {
-                if (c.value == "off") c.label = "Off";
-                else if (c.value == "on") c.label = "TAA";
-                else if (c.value == "dlss") c.label = nvidiaLabel();
-                else if (c.value == "fsr") c.label = "FSR3";
+                strcmp(d.key, "temporal_aa") == 0 && c.value == "off") {
+                c.label = "Off";
             }
             out.push_back(c);
         }
@@ -1546,6 +1553,13 @@ void takeSnapshot() {
     for (int i = 0; i < kRowDefCount; ++i) {
         const MenuRowDef& d = kMenuRows[i];
         if (d.applies == 2) g_rows[i].snapshot = g_rows[i].value;
+        // The running mode, not the file's: the badge's "was -> now" starts from it.
+        if (isTemporalModeRow(d)) {
+            g_rows[i].snapshot = runtimeFlatProfile() ? Config::get().requestedTemporalMode()
+                                                      : Config::get().getString("fix.temporal_aa", "off");
+            g_rows[i].pending = rowPending(d, g_rows[i].value, g_rows[i].snapshot);
+            continue;
+        }
         g_rows[i].pending = false;
     }
     g_s.snapshotTaken = true;
@@ -4054,7 +4068,8 @@ void menuNoteConfigReloaded() {
             }
         } else if (d.applies == 2 && s.snapshotTaken) {
             r.pending = rowPending(d, v, r.snapshot);
-            if (r.pending && !r.auditNoted) {
+            // Config says the temporal mode's deferral itself, once per new value.
+            if (r.pending && !r.auditNoted && !isTemporalModeRow(d)) {
                 r.auditNoted = true;
                 Log::get().note("%s: %s is now %s on disk but is read at launch; the running "
                                 "value is still %s. Restart the game to apply it.",

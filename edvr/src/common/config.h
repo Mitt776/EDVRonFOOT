@@ -67,6 +67,12 @@ public:
     std::string getString(const char* key, const char* def) const;
     // Diagnostic intent, before scope filtering; never enables a feature.
     std::string requestedTemporalMode() const;
+    // fix.temporal_aa is fixed for the session at the first parse (on and fsr
+    // run as off); getString and requestedTemporalMode give that mode for the
+    // whole session. The value the file holds NOW, for the menu only:
+    std::string chosenTemporalMode() const;
+    // ...and whether it differs from the session's mode (it waits for a restart).
+    bool        temporalModeAfterRestart() const;
 
     // The config audit's data: every key this build reads or documents
     // (lowercase), and the moved-from map ({old, new} dotted names) parsed at
@@ -100,6 +106,9 @@ private:
     void parse();
     // Called with m_lock held exclusively; queues findings, never logs them.
     void auditResolve(void* parsedMap);
+    // Called with m_lock held exclusively: fixes fix.temporal_aa for the
+    // session, writes it back into the map, queues its log lines.
+    void temporalResolve(void* parsedMap);
     // Writes queued audit findings once the log is open. Takes m_lock itself,
     // and only when there is something to write.
     void auditFlush() const;

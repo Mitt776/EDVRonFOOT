@@ -64,16 +64,6 @@ std::wstring lower(std::wstring s) {
     return s;
 }
 
-bool isVscreenKey(const SettingDef& def, const char* key) {
-    return strcmp(def.section, "fix") == 0 && strcmp(def.key, key) == 0;
-}
-
-// A row's effective value: what the file says, or what it ships as when
-// the file says nothing.
-std::string effectiveValue(const SettingRow& row) {
-    return row.value.empty() ? std::string(row.def->shipped) : row.value;
-}
-
 bool matches(const SettingRow& row, const std::wstring& needle) {
     if (needle.empty()) return true;
     const std::wstring hay = lower(fromUtf8(std::string(row.def->label) + " " + row.def->key +
@@ -104,19 +94,8 @@ void rebuildItems(List* list) {
 
     const std::vector<SettingRow>& rows = list->model->rows();
 
-    // fsr ignores fix.temporal_aa_model (NVIDIA's preset row): found fresh
-    // each rebuild.
-    bool hideAaPreset = false;
-    for (const SettingRow& r : rows) {
-        if (isVscreenKey(*r.def, "temporal_aa")) {
-            hideAaPreset = _stricmp(effectiveValue(r).c_str(), "fsr") == 0;
-            break;
-        }
-    }
-
     for (size_t i = 0; i < rows.size(); ++i) {
         if (!matches(rows[i], needle)) continue;
-        if (hideAaPreset && isVscreenKey(*rows[i].def, "temporal_aa_model")) continue;
         const std::wstring wanted = headingFor(*rows[i].def);
         if (!haveHeading || wanted != heading) {
             heading = wanted;
