@@ -199,6 +199,45 @@ void partLayers() {
         for (int k = 0; k < kLayers; ++k) check(!isLayerShape(Layer(k), s[0], s[1]), "the atlas, the captions and the one-off panels: no layer");
     check(!isLayerShape(Layer::Lift, 0, 1) && !isLayerShape(Layer::Lift, 1, 0), "an empty size is no layer");
 
+    // HMD quality 0.75 (.29's logs): every panel that much smaller, rounded to the pixel; the answers' 1057x183 is 5.776, outside
+    // 5.755 +- 0.01, and is the answers by its height. Each is its own layer only.
+    const uint32_t q75[][2] = {{1809, 1086}, {772, 711}, {1057, 183}};  // HUD, lift, answers
+    const uint32_t q75Mission[2] = {1057, 571};
+    for (int i = 0; i < 3; ++i) {
+        int layers = 0;
+        for (int k = 0; k < kLayers; ++k) layers += isLayerShape(Layer(k), q75[i][0], q75[i][1]) ? 1 : 0;
+        check(layers == 1 && isLayerShape(Layer(i), q75[i][0], q75[i][1]), "HMD quality 0.75: each size is its own layer only");
+    }
+    {
+        int layers = 0;
+        for (int k = 0; k < kLayers; ++k) layers += isLayerShape(Layer(k), q75Mission[0], q75Mission[1]) ? 1 : 0;
+        check(layers == 1 && isLayerShape(Layer::Mission, q75Mission[0], q75Mission[1]), "HMD quality 0.75: 1057x571 is the mission description only");
+    }
+    check(classifyEyePanelDraw(kEyePanelVs, kHeadLockedMenuIndices, true, kFormatUnorm, 1730, 973) == EyePanelDraw::Withhold,
+          "HMD quality 0.75: the trader's 1730x973 is withheld");
+    // Every layer's stereo and cinema size at HMD quality 0.50..1.00, rounded down and to the nearest: its own layer, and no other.
+    const struct {
+        Layer l;
+        uint32_t w, h;
+    } bases[] = {{Layer::Hud, 2412, 1449},     {Layer::Hud, 3564, 2140},     {Layer::Lift, 1029, 949},     {Layer::Lift, 1521, 1402},
+                 {Layer::Answers, 1410, 245},  {Layer::Answers, 2083, 362},  {Layer::Dialog, 1410, 749},   {Layer::Dialog, 2083, 1107},
+                 {Layer::Mission, 1410, 761},  {Layer::Trader, 2307, 1297},  {Layer::Trader, 3408, 1917}};
+    int scaledWrong = 0;
+    for (const auto& b : bases)
+        for (int q = 50; q <= 100; ++q)
+            for (int nearest = 0; nearest < 2; ++nearest) {
+                const double f = q / 100.0, add = nearest ? 0.5 : 0.0;
+                const uint32_t w = uint32_t(std::floor(b.w * f + add)), h = uint32_t(std::floor(b.h * f + add));
+                for (int k = 0; k < kLayers; ++k)
+                    if (isLayerShape(Layer(k), w, h) != (Layer(k) == b.l)) ++scaledWrong;
+            }
+    check(scaledWrong == 0, "every layer at HMD quality 0.50..1.00: its own layer, and no other");
+    // The panels at 0.75 that are no layer (.29's new-panel lines).
+    const uint32_t strangers75[][2] = {{1384, 297}, {922, 576}, {2076, 1787}, {2076, 1816}, {1621, 1441},
+                                       {991, 810},  {720, 720}, {461, 461},   {461, 691},   {277, 302}};
+    for (const auto& s : strangers75)
+        for (int k = 0; k < kLayers; ++k) check(!isLayerShape(Layer(k), s[0], s[1]), "the panels at HMD quality 0.75 that are no layer: none");
+
     // A frame of the dialog: the HUD, the answers and the captions; two answers-shaped panels, the larger taken.
     FrameTally t;
     for (int i = 0; i < 9; ++i) t.note(&g_res[0], 2412, 1449, kFormatTypeless);

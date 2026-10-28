@@ -72,7 +72,9 @@ constexpr float kCurve = 1.0f;
 // flight judges it.
 constexpr float kMenuCurve = 0.4f;
 
-// The layers: what each panel is, by its proportions (width over height +- 0.01, in double: in float 1.655 would fall a hair outside),
+// The layers: what each panel is, by its proportions (width over height +- 0.01, in double: in float 1.655 would fall a hair outside;
+// or a height within one pixel of the width over the proportions -- .29: below HMD quality 1.0 the game draws every panel that much
+// smaller, rounded to the pixel, and the answers at 0.75 come 1057x183, 5.776, a rounding the narrow panel's 0.01 does not cover),
 // and its place in the cinema's 3408x1917 frame as fractions, x right, y down (.22's census; the menus lie the HUD's side up). The HUD
 // is the measure: its width is the key's, the frame is as many degrees as the HUD's width over its 0.956. Of several panels of one
 // shape, the largest. The order is the compositing order: the HUD first, the menus over it, the trader's menu -- the whole frame --
@@ -100,7 +102,8 @@ constexpr LayerSpec kLayerSpecs[kLayers] = {
 inline const LayerSpec& specOf(Layer l) { return kLayerSpecs[int(l)]; }
 inline bool isLayerShape(Layer l, uint32_t w, uint32_t h) {
     if (!w || !h) return false;
-    return std::fabs(double(w) / double(h) - specOf(l).aspect) <= 0.01 + 1e-9;
+    const double aspect = specOf(l).aspect;
+    return std::fabs(double(w) / double(h) - aspect) <= 0.01 + 1e-9 || std::fabs(double(w) / aspect - double(h)) <= 1.0 + 1e-9;
 }
 // The trader's layer is never found by its shape: a 16:9 panel also comes once in a while on its own (.26, 01:25:30, one draw). Its
 // panel is the one the withheld draw read (findPanelById), so it shows only while the game is trying to lay the menu at the head.
@@ -136,8 +139,8 @@ inline bool isHeadLockedMenuDraw(uint64_t vs, uint32_t indices, bool eye, uint32
     return classifyEyePanelDraw(vs, indices, eye, format, w, h) == EyePanelDraw::Withhold;
 }
 
-// The HUD panel is the one with the HUD's proportions, 1.665 (cinema 3564x2140, stereo 2412x1449: one scale for both, so HMD quality
-// does not move it; the draw count does jump on a station).
+// The HUD panel is the one with the HUD's proportions, 1.665 (cinema 3564x2140, stereo 2412x1449, 1809x1086 at HMD quality 0.75: one
+// shape for all, found by the layers' rule; the draw count does jump on a station).
 inline bool isHudShape(uint32_t w, uint32_t h) { return isLayerShape(Layer::Hud, w, h); }
 inline int findHud(const Panel* p, int n) { return findLayer(Layer::Hud, p, n); }
 
