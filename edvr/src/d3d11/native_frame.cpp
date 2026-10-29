@@ -1,5 +1,6 @@
 #include "../common/native_frame.h"
 
+#include "../common/aim_eye_signal.h"
 #include "../common/comfort_fade.h"
 #include "../common/config.h"
 #include "../common/frame_flag.h"
@@ -237,14 +238,17 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
                           EdvrNativeFrameOutput* output) {
     std::lock_guard<std::mutex> lock(g_mutex);
     State* state = identify(context);
-    // A version 1, 2, 3 or 4 caller is an openvr_api.dll from before the
-    // comfort fade (or, earlier, the channel probe, turbo pacing or the
-    // field-of-view trim) existed. Each gets exactly the fields it knows
+    // A version 1 to 5 caller is an openvr_api.dll from before the aiming
+    // eye (or, earlier, the comfort fade, the channel probe, turbo pacing or
+    // the field-of-view trim) existed. Each gets exactly the fields it knows
     // about, and whatever it cannot carry stays out of its struct entirely.
-    const bool wantsFade = output &&
-        output->version == EDVR_NATIVE_FRAME_VERSION_5 &&
+    const bool wantsAim = output &&
+        output->version == EDVR_NATIVE_FRAME_VERSION_6 &&
         output->size == sizeof(*output);
-    const bool wantsChannel = output && !wantsFade &&
+    const bool wantsFade = output && !wantsAim &&
+        output->version == EDVR_NATIVE_FRAME_VERSION_5 &&
+        output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_5;
+    const bool wantsChannel = output && !wantsAim && !wantsFade &&
         output->version == EDVR_NATIVE_FRAME_VERSION_4 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_4;
     const bool wantsPacing = output && !wantsFade && !wantsChannel &&
@@ -258,18 +262,20 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
     if (!state || state != g_current || !state->active || !input || !output ||
         input->size != sizeof(*input) || input->version != EDVR_NATIVE_FRAME_VERSION_1 ||
-        (!wantsFade && !wantsChannel && !wantsPacing && !wantsTrim && !legacy) ||
+        (!wantsAim && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim && !legacy) ||
         input->generation != state->generation || input->referenceGeneration == 0 ||
         input->sequence == 0 || input->sequence <= state->sequenceFloor ||
         input->valid > 1 || (input->valid && !rigidPose(input->physicalHead))) return E_INVALIDARG;
 
     EdvrNativeFrameOutput result{};
-    result.size = wantsFade ? sizeof(result)
+    result.size = wantsAim ? sizeof(result)
+                 : wantsFade ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_5
                  : wantsChannel ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_4
                  : wantsPacing ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_3
                  : wantsTrim  ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_2
                               : EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
-    result.version = wantsFade ? EDVR_NATIVE_FRAME_VERSION_5
+    result.version = wantsAim ? EDVR_NATIVE_FRAME_VERSION_6
+                    : wantsFade ? EDVR_NATIVE_FRAME_VERSION_5
                     : wantsChannel ? EDVR_NATIVE_FRAME_VERSION_4
                     : wantsPacing ? EDVR_NATIVE_FRAME_VERSION_3
                     : wantsTrim  ? EDVR_NATIVE_FRAME_VERSION_2
@@ -278,6 +284,14 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     // this frame, 0 unless the frame thread published a fresh level. Only a
     // version 5 caller has the slot; every older shape never learns of it.
     result.fadeAlpha = edvr::comfort::read(GetTickCount64());
+    // The aiming eye while LT is held on foot (aim_eye_signal.h): only a
+    // version 6 caller has the slots; every older shape never learns of them.
+    if (wantsAim) {
+        const edvr::aim_eye::Signal aim = edvr::aim_eye::read(GetTickCount64());
+        result.aimEye = aim.eye;
+        result.aimEyeBlend = aim.blend;
+        result.aimOnFoot = aim.onFoot;
+    }
     // The old Explorer Cam's headset offset (headOffset, yawRadians,
     // offsetEnabled, offsetGamePoses) is retired: those slots stay zero, so a
     // runtime built before 2026-10-07 reads "no offset" and applies none.

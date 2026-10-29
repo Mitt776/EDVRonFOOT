@@ -35,6 +35,7 @@
 #include "native_temporal_client.h"
 #include "native_sharpen_client.h"
 #include "native_frame_client.h"
+#include "aim_eye_shift.h"
 #include "native_fss_client.h"
 #include "native_fov_trim.h"
 #include "native_timing_client.h"
@@ -208,9 +209,14 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   NativeFrameClient features;
   NativeFssClient fss;
   NativeFovTrim fovTrim;
-  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_5};
+  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_6};
   EdvrNativeFrameDecision featureDecision{sizeof(featureDecision),EDVR_NATIVE_FRAME_VERSION_1};
   bool featureFrameKnown=false;
+  // The aiming eye (aim_eye_shift.h): this frame's offset of the game's head pose, in head axes and metres, which the frame's render and game poses
+  // carry and each "now" answer (locateHeadOwned) carries turned by its own rotation. Zero and unknown until a frame computes one; dropped with the
+  // pose frame (dropPoseFrame), so no offset outlives the origin, session or geometry it was computed in.
+  double aimEyeHead[3]{};bool aimEyeHeadKnown=false;
+  AimEyeLog aimEyeLog;
   uint64_t fssHealedEyes[2]{},featureChanges=0;
   uint64_t fssDeferredEyes=0;
   // The heal's target eye, held from its own submit until the donor eye's
@@ -395,7 +401,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     float orientation[4]{0,0,0,1};
     double speedDegPerSec=0;
   } latestPoseFrame;
-  void dropPoseFrame() {latestPoseFrame=PoseFrame{};}
+  void dropPoseFrame() {latestPoseFrame=PoseFrame{};aimEyeHead[0]=aimEyeHead[1]=aimEyeHead[2]=0;aimEyeHeadKnown=false;}
   // The clock Elite's "now" pose calls read (a rig substitutes its own so "now" is a number it chooses), and the explicit-time locates the runtime
   // refused with XR_ERROR_TIME_INVALID and that were located at now + prediction instead.
   CounterNow headClock=counterNow;
@@ -1156,7 +1162,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       gameGeometry.width[eye]=dims.width;gameGeometry.height[eye]=dims.height;
     }
     if(features.acquired()) {
-      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_5};
+      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_6};
       if(features.begin(located,poses.read().originGeneration,next)!=S_OK) {
         boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);
       }
@@ -1223,6 +1229,23 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
           gameGeometry.width[e]=dims.width;gameGeometry.height[e]=dims.height;
         }
       }
+    }
+    // The aiming eye (aim_eye_shift.h): while the d3d11 half says LT is held on foot, the GAME's render and game poses are moved so its aiming eye
+    // stands where the middle of the head was, before the temporal pass is told the pose the game draws from. Not the layer: frameViews below stay
+    // the located views, so the headset takes the image as seen from the real eyes and never turns it back.
+    aimEyeHead[0]=aimEyeHead[1]=aimEyeHead[2]=0;aimEyeHeadKnown=false;
+    if(features.acquired()&&featureFrameKnown) {
+      double aimFullMm=0;
+      if(locatedValid) {
+        aimEyeHeadKnown=aimEyeHeadOffset(temporalGeometry.eyeToHead,featureFrame.aimEye,featureFrame.aimEyeBlend,aimEyeHead);
+        aimFullMm=aimEyeFullMm(temporalGeometry.eyeToHead,featureFrame.aimEye);
+      }
+      if(aimEyeHeadKnown) {
+        if(render.pose.bPoseIsValid)applyAimEyeOffset(render.pose.mDeviceToAbsoluteTracking,aimEyeHead);
+        if(game.pose.bPoseIsValid)applyAimEyeOffset(game.pose.mDeviceToAbsoluteTracking,aimEyeHead);
+      }
+      aimEyeLog.frame(features.providerVersion(),featureFrame.aimEye,aimEyeHeadKnown?featureFrame.aimEyeBlend:0.f,featureFrame.aimOnFoot,aimFullMm,
+        frame.sequence,GetTickCount64(),[](const char* aimLine){nativeTracePuts(aimLine);});
     }
     if(locatedValid) geometry.recommend(gameGeometry.width,gameGeometry.height);
     // The temporal pass is sized by what the frame it is handed was rendered
@@ -2353,6 +2376,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     }
     pose.eTrackingResult=pose.bPoseIsValid?vr::TrackingResult_Running_OK:vr::TrackingResult_Running_OutOfRange;
     if(pose.bPoseIsValid){double matrix[4][4];detail::rigid(head.pose,matrix);if(!detail::narrow(matrix,pose.mDeviceToAbsoluteTracking))return false;}
+    // The aiming eye: the drawn frame's offset, in head axes, turned by THIS answer's rotation (aim_eye_shift.h), so every path the game reads its
+    // head from agrees. The pose-gap sample above was taken from the located rotation, which the offset does not change.
+    if(pose.bPoseIsValid&&aimEyeHeadKnown)applyAimEyeOffset(pose.mDeviceToAbsoluteTracking,aimEyeHead);
     out=pose;return true;
   }
   bool resetSeated(uint64_t generation) override {

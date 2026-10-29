@@ -1,4 +1,5 @@
 #include "../../src/common/native_frame.h"
+#include "../../src/common/aim_eye_signal.h"
 #include "../../src/common/comfort_fade.h"
 #include "../../src/common/frame_flag.h"
 #include "../../src/common/config.h"
@@ -131,7 +132,7 @@ int wmain(int argc, wchar_t** argv) {
     // a different XR-owner thread.  The provider must not use a producer-ID
     // gate for callbacks.
     EdvrNativeFrameOutput firstOutput{sizeof(firstOutput),
-                                      EDVR_NATIVE_FRAME_VERSION_5};
+                                      EDVR_NATIVE_FRAME_VERSION_6};
     HRESULT workerBegin = E_FAIL;
     HRESULT workerLatch = E_FAIL;
     EdvrNativeFrameDecision firstDecision{
@@ -161,9 +162,9 @@ int wmain(int argc, wchar_t** argv) {
     check(firstOutput.sceneReady && firstOutput.transitionEnabled &&
               firstOutput.resubmitEnabled,
           "scene and transition outputs");
-    check(firstOutput.version == EDVR_NATIVE_FRAME_VERSION_5 &&
+    check(firstOutput.version == EDVR_NATIVE_FRAME_VERSION_6 &&
               firstOutput.size == sizeof(firstOutput),
-          "version 5 answered in kind");
+          "version 6 answered in kind");
     check(firstOutput.trimOuterDeg == 7.0f &&
               firstOutput.trimNasalDeg == 0.0f &&
               firstOutput.trimVerticalDeg == 0.0f,
@@ -187,7 +188,7 @@ int wmain(int argc, wchar_t** argv) {
     EdvrNativeFrameInput lost = input(41, 7, 2, false);
     lost.physicalHead[0] = std::numeric_limits<float>::quiet_NaN();
     EdvrNativeFrameOutput lostOutput{sizeof(lostOutput),
-                                     EDVR_NATIVE_FRAME_VERSION_5};
+                                     EDVR_NATIVE_FRAME_VERSION_6};
     check(table.beginFrame(table.context, &lost, &lostOutput) == S_OK,
           "lost pose succeeds");
     EdvrNativeFrameDecision lostDecision{
@@ -198,7 +199,7 @@ int wmain(int argc, wchar_t** argv) {
     EdvrNativeFrameInput bad = input(41, 7, 3);
     bad.physicalHead[0] = 2.0f;
     EdvrNativeFrameOutput badOutput{sizeof(badOutput),
-                                    EDVR_NATIVE_FRAME_VERSION_5};
+                                    EDVR_NATIVE_FRAME_VERSION_6};
     check(table.beginFrame(table.context, &bad, &badOutput) == E_INVALIDARG,
           "non-rigid physical pose rejected");
 
@@ -279,8 +280,11 @@ int wmain(int argc, wchar_t** argv) {
               EDVR_NATIVE_FRAME_OUTPUT_SIZE_4,
           "version 4 adds exactly the channel");
     check(EDVR_NATIVE_FRAME_OUTPUT_SIZE_4 + sizeof(float) ==
-              sizeof(EdvrNativeFrameOutput),
+              EDVR_NATIVE_FRAME_OUTPUT_SIZE_5,
           "version 5 adds exactly the comfort fade level");
+    check(EDVR_NATIVE_FRAME_OUTPUT_SIZE_5 + 3 * sizeof(uint32_t) ==
+              sizeof(EdvrNativeFrameOutput),
+          "version 6 adds exactly the aiming eye, its blend and the on-foot flag");
 
     // A runtime-only entry applies to any headset on that runtime with no
     // entry of its own; a key with no entry for the worn headset is no trim,
@@ -288,7 +292,7 @@ int wmain(int argc, wchar_t** argv) {
     edvr::Config::get().set("experimental.fov_trim_vertical", "oculus:3");
     edvr::Config::get().set("experimental.fov_trim_outer", "");
     edvr::Config::get().set("experimental.fov_trim_nasal", "virtualdesktopxr/meta-quest-3:9");
-    EdvrNativeFrameOutput trimOutput{sizeof(trimOutput), EDVR_NATIVE_FRAME_VERSION_5};
+    EdvrNativeFrameOutput trimOutput{sizeof(trimOutput), EDVR_NATIVE_FRAME_VERSION_6};
     EdvrNativeFrameInput trimFrame = input(41, 7, 10);
     check(table.beginFrame(table.context, &trimFrame, &trimOutput) == S_OK &&
               trimOutput.trimVerticalDeg == 3.0f && trimOutput.trimOuterDeg == 0.0f &&
@@ -312,14 +316,14 @@ int wmain(int argc, wchar_t** argv) {
           "a version 3 caller is answered in kind, its absent tail untouched");
 
     g_journalActive = g_onFootKnown = g_onFoot = true;
-    EdvrNativeFrameOutput onFootOutput{sizeof(onFootOutput), EDVR_NATIVE_FRAME_VERSION_5};
+    EdvrNativeFrameOutput onFootOutput{sizeof(onFootOutput), EDVR_NATIVE_FRAME_VERSION_6};
     EdvrNativeFrameInput onFootFrame = input(41, 7, 12);
     check(table.beginFrame(table.context, &onFootFrame, &onFootOutput) == S_OK &&
               onFootOutput.deferredPacing == 1,
           "weapon stability on foot defers pacing");
 
     g_onFoot = false;
-    EdvrNativeFrameOutput inShipOutput{sizeof(inShipOutput), EDVR_NATIVE_FRAME_VERSION_5};
+    EdvrNativeFrameOutput inShipOutput{sizeof(inShipOutput), EDVR_NATIVE_FRAME_VERSION_6};
     EdvrNativeFrameInput inShipFrame = input(41, 7, 13);
     check(table.beginFrame(table.context, &inShipFrame, &inShipOutput) == S_OK &&
               inShipOutput.deferredPacing == 0,
@@ -327,7 +331,7 @@ int wmain(int argc, wchar_t** argv) {
 
     g_onFoot = true;
     edvr::Config::get().set("fix.weapon_stability", "0");
-    EdvrNativeFrameOutput disabledOutput{sizeof(disabledOutput), EDVR_NATIVE_FRAME_VERSION_5};
+    EdvrNativeFrameOutput disabledOutput{sizeof(disabledOutput), EDVR_NATIVE_FRAME_VERSION_6};
     EdvrNativeFrameInput disabledFrame = input(41, 7, 14);
     check(table.beginFrame(table.context, &disabledFrame, &disabledOutput) == S_OK &&
               disabledOutput.deferredPacing == 0,
@@ -365,7 +369,7 @@ int wmain(int argc, wchar_t** argv) {
     // in a file still works -- Config reads it as the new name through the
     // moved-from map, which this rig does not register; tools/config_test does,
     // with the shipped tables.)
-    EdvrNativeFrameOutput newNames{sizeof(newNames), EDVR_NATIVE_FRAME_VERSION_5};
+    EdvrNativeFrameOutput newNames{sizeof(newNames), EDVR_NATIVE_FRAME_VERSION_6};
     EdvrNativeFrameInput newNamesFrame = input(41, 7, 18);
     check(table.beginFrame(table.context, &newNamesFrame, &newNames) == S_OK &&
               newNames.trimVerticalDeg == 3.0f,
@@ -376,7 +380,7 @@ int wmain(int argc, wchar_t** argv) {
     edvr::Config::get().set("fix.fov_trim_vertical", "oculus/meta-quest-3:9");
     edvr::Config::get().set("fix.fov_trim_outer", "oculus/meta-quest-3:9");
     edvr::Config::get().set("fix.fov_trim_nasal", "oculus/meta-quest-3:9");
-    EdvrNativeFrameOutput retiredNames{sizeof(retiredNames), EDVR_NATIVE_FRAME_VERSION_5};
+    EdvrNativeFrameOutput retiredNames{sizeof(retiredNames), EDVR_NATIVE_FRAME_VERSION_6};
     EdvrNativeFrameInput retiredFrame = input(41, 7, 19);
     check(table.beginFrame(table.context, &retiredFrame, &retiredNames) == S_OK &&
               retiredNames.trimVerticalDeg == 0.0f && retiredNames.trimOuterDeg == 0.0f &&
@@ -387,7 +391,7 @@ int wmain(int argc, wchar_t** argv) {
     {
         uint64_t seq = 40;
         auto ask5 = [&](float* fade) {
-            EdvrNativeFrameOutput o{sizeof(o), EDVR_NATIVE_FRAME_VERSION_5};
+            EdvrNativeFrameOutput o{sizeof(o), EDVR_NATIVE_FRAME_VERSION_6};
             o.fadeAlpha = -77.0f;   // a sentinel the answer must overwrite
             EdvrNativeFrameInput f = input(41, 7, ++seq);
             const HRESULT r = table.beginFrame(table.context, &f, &o);
@@ -427,7 +431,40 @@ int wmain(int argc, wchar_t** argv) {
         EdvrNativeFrameOutput v4AsV5{EDVR_NATIVE_FRAME_OUTPUT_SIZE_4, EDVR_NATIVE_FRAME_VERSION_5};
         EdvrNativeFrameInput mismatchFrame2 = input(41, 7, ++seq);
         check(table.beginFrame(table.context, &mismatchFrame2, &v4AsV5) == E_INVALIDARG, "...and a version 4 sized struct claiming version 5 is refused: it is never half-answered");
+        EdvrNativeFrameOutput v5{EDVR_NATIVE_FRAME_OUTPUT_SIZE_5, EDVR_NATIVE_FRAME_VERSION_5};
+        v5.aimEye = 0xA5A5A5A5u;
+        EdvrNativeFrameInput v5Frame = input(41, 7, ++seq);
+        check(table.beginFrame(table.context, &v5Frame, &v5) == S_OK && v5.version == EDVR_NATIVE_FRAME_VERSION_5 && v5.size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_5 &&
+                  v5.fadeAlpha == 1.0f && v5.aimEye == 0xA5A5A5A5u,
+              "A VERSION 5 CALLER (a runtime from before the aiming eye) still gets the fade, and the aim slots past its struct are untouched");
+        EdvrNativeFrameOutput fullAsV5{sizeof(fullAsV5), EDVR_NATIVE_FRAME_VERSION_5};
+        EdvrNativeFrameInput fullAsV5Frame = input(41, 7, ++seq);
+        check(table.beginFrame(table.context, &fullAsV5Frame, &fullAsV5) == E_INVALIDARG, "...and a full-size struct claiming version 5 is refused");
         edvr::comfort::clear();
+
+        // ---- the aiming eye while LT is held on foot (aim_eye_signal.h; version 6) -------------------------------------------------------------------------
+        auto ask6 = [&](EdvrNativeFrameOutput* o) {
+            *o = EdvrNativeFrameOutput{sizeof(*o), EDVR_NATIVE_FRAME_VERSION_6};
+            o->aimEye = 77; o->aimEyeBlend = -77.0f; o->aimOnFoot = 77;   // sentinels the answer must overwrite
+            EdvrNativeFrameInput f = input(41, 7, ++seq);
+            return table.beginFrame(table.context, &f, o);
+        };
+        EdvrNativeFrameOutput a{};
+        edvr::aim_eye::clear();
+        check(ask6(&a) == S_OK && a.aimEye == 0 && a.aimEyeBlend == 0.0f && a.aimOnFoot == 0, "NOTHING PUBLISHED: a version 6 caller reads no eye, blend 0, not on foot");
+        edvr::aim_eye::publish({edvr::aim_eye::kEyeRight, 1.0f, 1}, GetTickCount64());
+        check(ask6(&a) == S_OK && a.aimEye == 2 && a.aimEyeBlend == 1.0f && a.aimOnFoot == 1, "A FRESH SIGNAL: right eye, blend 1, on foot");
+        edvr::aim_eye::publish({edvr::aim_eye::kEyeLeft, 0.5f, 1}, GetTickCount64());
+        check(ask6(&a) == S_OK && a.aimEye == 1 && std::fabs(a.aimEyeBlend - 0.5f) < 1e-4f, "...left eye, half way");
+        edvr::aim_eye::publish({edvr::aim_eye::kEyeRight, 1.0f, 1}, GetTickCount64() - 5000);
+        check(ask6(&a) == S_OK && a.aimEyeBlend == 0.0f && a.aimOnFoot == 0, "A STALE SIGNAL (5 s old) reads no shift: the d3d11 half going quiet never leaves the world shifted");
+        edvr::aim_eye::publish({edvr::aim_eye::kEyeRight, 1.0f, 1}, GetTickCount64());
+        EdvrNativeFrameOutput v5b{EDVR_NATIVE_FRAME_OUTPUT_SIZE_5, EDVR_NATIVE_FRAME_VERSION_5};
+        v5b.aimEye = 0xA5A5A5A5u; v5b.aimEyeBlend = -123.0f;
+        EdvrNativeFrameInput v5bFrame = input(41, 7, ++seq);
+        check(table.beginFrame(table.context, &v5bFrame, &v5b) == S_OK && v5b.aimEye == 0xA5A5A5A5u && v5b.aimEyeBlend == -123.0f,
+              "A VERSION 5 CALLER never learns of a published shift: the slots past its struct are untouched");
+        edvr::aim_eye::clear();
     }
 
     check(table.close(table.context) == S_OK && !edvr::glitchConsumerPresent(),

@@ -43,6 +43,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "journal_watch.h"
 #include "explorer_cam.h"   // explorerCamFrameBoundary (the frame tick) and explorerCamShutdown (the avatar dither-fade global goes back at an unload)
 #include "native_vr_on_foot.h" // EDVRonFOOT: nativeVrOnFootFrameBoundary (the frame tick: the key, the two switches)
+#include "on_foot_aim_eye.h"   // EDVRonFOOT: onFootAimEyeFrameBoundary
 #include "on_foot_hud.h"       // EDVRonFOOT: onFootHudFrameBoundary
 #include "on_foot_markers.h"   // EDVRonFOOT: onFootMarkersFrameBoundary
 #include "ui_surfaces.h"   // the glyph atlas and sizing chain instruments
@@ -1216,6 +1217,7 @@ EDVR_BOUNDARY_TICK(tkCelestialStatus, "celestial_status");
 EDVR_BOUNDARY_TICK(tkExplorerCam, "explorer_cam");
 // EDVRonFOOT: native VR on foot (native_vr_on_foot.h). Like Explorer Cam it must run on every owned Present.
 EDVR_BOUNDARY_TICK(tkNativeVrOnFoot, "native_vr_on_foot");
+EDVR_BOUNDARY_TICK(tkOnFootAimEye, "on_foot_aim_eye");
 EDVR_BOUNDARY_TICK(tkOnFootHud, "on_foot_hud");
 EDVR_BOUNDARY_TICK(tkOnFootMarkers, "on_foot_markers");
 EDVR_BOUNDARY_TICK(tkFssModeLatch, "fss_mode_latch");
@@ -1564,6 +1566,9 @@ void presentFrameBoundary() {
     // every frame too, so binding it live arms the feature on the next one.
     tkExplorerCam.run([] { explorerCamFrameBoundary(static_cast<uint32_t>(g_state->frameCounter)); });
     tkNativeVrOnFoot.run([] { nativeVrOnFootFrameBoundary(); });
+    // EDVRonFOOT: the aiming eye (on_foot_aim_eye.h): LT on foot ramps a blend and publishes it for the runtime's head-pose shift. After the
+    // journal's tick it reads; published every frame, because a signal 200 ms old reads as no shift.
+    tkOnFootAimEye.run([] { onFootAimEyeFrameBoundary(); });
     // EDVRonFOOT: the on-foot markers (on_foot_markers.h): native_vr_on_foot, the journal, the search for the points, whether the
     // writer hooks correct, the install, the on and off lines, the end-of-frame check and the summary.
     tkOnFootMarkers.run([] { onFootMarkersFrameBoundary(); });

@@ -26,6 +26,12 @@
 // d3d11.dll that refuses the shape steps down and reads "no fade" (0), never
 // black.
 #define EDVR_NATIVE_FRAME_VERSION_5 5u
+// Version 6 adds aimEye, aimEyeBlend and aimOnFoot to the END and nothing else
+// (the aiming eye while LT is held on foot, aim_eye_signal.h), under the same
+// hand-copied-DLLs rule: a version 1 to 5 caller never learns of them, and a
+// runtime that asks version 6 of a d3d11.dll that refuses the shape steps down
+// and reads "no shift" (blend 0).
+#define EDVR_NATIVE_FRAME_VERSION_6 6u
 
 // The game producer owns the device and generation passed at acquire. The
 // methods in the table are CPU-only and are called by the XR owner after the
@@ -83,6 +89,15 @@ struct EdvrNativeFrameOutput {
     // freshness-checked by the provider (comfort_fade.h): a signal that went
     // stale reads 0.
     float fadeAlpha;
+    // Version 6 and later. The aiming eye while the commander holds LT on foot
+    // (on_foot_aim_eye_core.h): aimEye 0 none, 1 left, 2 right; aimEyeBlend how
+    // much of that eye's offset the game's head pose is shifted by, 0 (none,
+    // the only value an older provider can mean) to 1; aimOnFoot 1 while the
+    // journal says on foot and native_vr_on_foot is on, for the runtime's
+    // summary line. Already freshness-checked by the provider (aim_eye_signal.h).
+    uint32_t aimEye;
+    float aimEyeBlend;
+    uint32_t aimOnFoot;
 };
 
 // The size the fields through resubmitEnabled occupy, which is what a
@@ -104,6 +119,10 @@ struct EdvrNativeFrameOutput {
 // caller's struct is, with no tail padding before fadeAlpha.
 #define EDVR_NATIVE_FRAME_OUTPUT_SIZE_4 \
     ((uint32_t)offsetof(EdvrNativeFrameOutput, fadeAlpha))
+// The size the fields through fadeAlpha occupy, which is what a version 5
+// caller's struct is, with no tail padding before aimEye.
+#define EDVR_NATIVE_FRAME_OUTPUT_SIZE_5 \
+    ((uint32_t)offsetof(EdvrNativeFrameOutput, aimEye))
 
 struct EdvrNativeFrameDecision {
     uint32_t size, version;

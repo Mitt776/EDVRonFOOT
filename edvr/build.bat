@@ -534,6 +534,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\explorer_cam.cpp" ^
     "src\d3d11\native_vr_on_foot.cpp" ^
     "src\d3d11\on_foot_hud.cpp" ^
+    "src\d3d11\on_foot_aim_eye.cpp" ^
     "src\d3d11\on_foot_markers.cpp" ^
     "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" "src\d3d11\vscreen_footprint.cpp" ^
     "src\d3d11\binding_shadow.cpp" ^
@@ -3055,6 +3056,20 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     "tools\on_foot_hud_test\on_foot_hud_test.cpp" /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: on-foot hud test build failed & exit /b 1 )
 "%BUILD%\on_foot_hud_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_on_foot_aim_eye_test
+echo [edvr] === on_foot_aim_eye_test.exe ===
+REM EDVRonFOOT: build gate for the on-foot aiming eye (src\d3d11\on_foot_aim_eye_core.h, experimental.native_vr_on_foot_aim_eye). Drives the
+REM pure half: the key's reading (right, left, off, empty, junk, case and padding), the target in the ship, in the cinema, with the journal
+REM not knowing and without LT, the ramp (0.12 s up and down at 16 ms frames, a re-press from the middle continuing without a jump, a pause's
+REM huge dt moving one small step), the eye kept while the ramp runs out after the key went off, and the key line's text.
+if not exist "%OBJ%\onfootaimeye" mkdir "%OBJ%\onfootaimeye"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\onfootaimeye"\ /Fe"%BUILD%\on_foot_aim_eye_test.exe" ^
+    "tools\on_foot_aim_eye_test\on_foot_aim_eye_test.cpp" /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: on-foot aim eye test build failed & exit /b 1 )
+"%BUILD%\on_foot_aim_eye_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_on_foot_markers_test
