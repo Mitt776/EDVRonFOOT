@@ -216,6 +216,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // carry and each "now" answer (locateHeadOwned) carries turned by its own rotation. Zero and unknown until a frame computes one; dropped with the
   // pose frame (dropPoseFrame), so no offset outlives the origin, session or geometry it was computed in.
   double aimEyeHead[3]{};bool aimEyeHeadKnown=false;
+  // The position snap (aim_eye_shift.h): the wander kept once per press lives across frames and pose-frame drops (a single failed frame must not
+  // re-keep it mid-aim), and is dropped only when the blend is back to 0 or the origin changes (invalidateOrigin). This frame's offset of it, in
+  // tracking axes, lives like aimEyeHead.
+  AimSnap aimSnap;
+  double aimSnapTracking[3]{};bool aimSnapTrackingKnown=false;
   AimEyeLog aimEyeLog;
   uint64_t fssHealedEyes[2]{},featureChanges=0;
   uint64_t fssDeferredEyes=0;
@@ -401,7 +406,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     float orientation[4]{0,0,0,1};
     double speedDegPerSec=0;
   } latestPoseFrame;
-  void dropPoseFrame() {latestPoseFrame=PoseFrame{};aimEyeHead[0]=aimEyeHead[1]=aimEyeHead[2]=0;aimEyeHeadKnown=false;}
+  void dropPoseFrame() {
+    latestPoseFrame=PoseFrame{};aimEyeHead[0]=aimEyeHead[1]=aimEyeHead[2]=0;aimEyeHeadKnown=false;
+    aimSnapTracking[0]=aimSnapTracking[1]=aimSnapTracking[2]=0;aimSnapTrackingKnown=false;
+  }
   // The clock Elite's "now" pose calls read (a rig substitutes its own so "now" is a number it chooses), and the explicit-time locates the runtime
   // refused with XR_ERROR_TIME_INVALID and that were located at now + prediction instead.
   CounterNow headClock=counterNow;
@@ -1002,7 +1010,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     features.invalidate();previousPairValid=false;
     timingInvalidate();
     geometry.invalidate(geometryGeneration);frameGeometryAvailable=false;
-    dropPoseFrame();
+    dropPoseFrame();aimSnap.reset(); // a new origin: the next aiming frame keeps the wander from it
     if(originInvalidationNotes++<16)nativeTracePrintf("geometry_invalidated,reason=%s,generation=%llu,recenters=%llu,reference_changes=%llu\n",
       reason,(unsigned long long)geometryGeneration,(unsigned long long)recenters,(unsigned long long)referenceChanges);
     return poses.resetOrigin(compositorGeneration);
@@ -1233,20 +1241,29 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // The aiming eye (aim_eye_shift.h): while the d3d11 half says LT is held on foot, the GAME's render and game poses are moved so its aiming eye
     // stands where the middle of the head was, before the temporal pass is told the pose the game draws from. Not the layer: frameViews below stay
     // the located views, so the headset takes the image as seen from the real eyes and never turns it back.
+    // The position snap rides the same blend: the wander is kept from the real (unshifted) pose, and while the eye shift acts the game's head is
+    // also moved back by blend times it. Neither touches the layer, located.headPose or frameViews.
     aimEyeHead[0]=aimEyeHead[1]=aimEyeHead[2]=0;aimEyeHeadKnown=false;
+    aimSnapTracking[0]=aimSnapTracking[1]=aimSnapTracking[2]=0;aimSnapTrackingKnown=false;
     if(features.acquired()&&featureFrameKnown) {
+      const auto& snapFrom=render.pose.bPoseIsValid?render.pose:game.pose;
+      aimSnap.frame(featureFrame.aimEye,featureFrame.aimEyeBlend,snapFrom.mDeviceToAbsoluteTracking,snapFrom.bPoseIsValid);
       double aimFullMm=0;
       if(locatedValid) {
         aimEyeHeadKnown=aimEyeHeadOffset(temporalGeometry.eyeToHead,featureFrame.aimEye,featureFrame.aimEyeBlend,aimEyeHead);
         aimFullMm=aimEyeFullMm(temporalGeometry.eyeToHead,featureFrame.aimEye);
       }
       if(aimEyeHeadKnown) {
-        if(render.pose.bPoseIsValid)applyAimEyeOffset(render.pose.mDeviceToAbsoluteTracking,aimEyeHead);
-        if(game.pose.bPoseIsValid)applyAimEyeOffset(game.pose.mDeviceToAbsoluteTracking,aimEyeHead);
+        aimSnapTrackingKnown=aimSnap.offset(featureFrame.aimEyeBlend,aimSnapTracking);
+        for(auto* pose:{&render.pose,&game.pose}) {
+          if(!pose->bPoseIsValid)continue;
+          if(aimSnapTrackingKnown)applyTrackingOffset(pose->mDeviceToAbsoluteTracking,aimSnapTracking);
+          applyAimEyeOffset(pose->mDeviceToAbsoluteTracking,aimEyeHead);
+        }
       }
       aimEyeLog.frame(features.providerVersion(),featureFrame.aimEye,aimEyeHeadKnown?featureFrame.aimEyeBlend:0.f,featureFrame.aimOnFoot,aimFullMm,
-        frame.sequence,GetTickCount64(),[](const char* aimLine){nativeTracePuts(aimLine);});
-    }
+        aimSnap,frame.sequence,GetTickCount64(),[](const char* aimLine){nativeTracePuts(aimLine);});
+    } else aimSnap.reset();
     if(locatedValid) geometry.recommend(gameGeometry.width,gameGeometry.height);
     // The temporal pass is sized by what the frame it is handed was rendered
     // for, which while a rebuild is awaited is the previous ask and not the
@@ -2378,6 +2395,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(pose.bPoseIsValid){double matrix[4][4];detail::rigid(head.pose,matrix);if(!detail::narrow(matrix,pose.mDeviceToAbsoluteTracking))return false;}
     // The aiming eye: the drawn frame's offset, in head axes, turned by THIS answer's rotation (aim_eye_shift.h), so every path the game reads its
     // head from agrees. The pose-gap sample above was taken from the located rotation, which the offset does not change.
+    // The position snap of the same frame, in tracking axes, as it is.
+    if(pose.bPoseIsValid&&aimSnapTrackingKnown)applyTrackingOffset(pose.mDeviceToAbsoluteTracking,aimSnapTracking);
     if(pose.bPoseIsValid&&aimEyeHeadKnown)applyAimEyeOffset(pose.mDeviceToAbsoluteTracking,aimEyeHead);
     out=pose;return true;
   }

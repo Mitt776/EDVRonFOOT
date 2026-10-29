@@ -1,6 +1,7 @@
 #pragma once
 // The aiming eye, runtime side (aim_eye_shift.h; openspec change on-foot-ads-dominant-eye): the offset the game's head pose is moved by, that the game's
 // aiming eye then stands where the middle of the head was at any head rotation, the version ladder against a d3d11.dll of either age, and the log lines.
+// The position snap (on-foot-ads-position-snap): the wander kept once per press, the game's aiming eye back at the origin, the 0.5 m limit, the log fields.
 #include "../../src/openxr/aim_eye_shift.h"
 #include "../../src/openxr/native_frame_client.h"
 #include <cmath>
@@ -120,36 +121,132 @@ template<class Check> void runAimEyeCases(Check&& check) {
     std::vector<std::string> lines;
     auto sink = [&](const char* l) { lines.emplace_back(l); };
     auto count = [&](const char* prefix) { unsigned n = 0; for (const auto& l : lines) n += l.rfind(prefix, 0) == 0; return n; };
+    const AimSnap none;
     AimEyeLog log;
     uint64_t ms = 1000, seq = 1;
-    for (int i = 0; i < 10; ++i) log.frame(6, 2, 0.0f, 1, 32.0, seq++, ms += 11, sink);
+    for (int i = 0; i < 10; ++i) log.frame(6, 2, 0.0f, 1, 32.0, none, seq++, ms += 11, sink);
     check(lines.empty(), "on foot, LT not held: no line yet");
-    log.frame(6, 2, 0.13f, 1, 32.0, seq++, ms += 11, sink);
-    check(lines.size() == 1 && lines[0] == "aim_eye_on,eye=right,shift_mm=32.0,sequence=11\n", "THE BLEND LEAVES 0: one aim_eye_on line, the eye and the full shift");
-    for (int i = 0; i < 20; ++i) log.frame(6, 2, 1.0f, 1, 32.0, seq++, ms += 11, sink);
+    log.frame(6, 2, 0.13f, 1, 32.0, none, seq++, ms += 11, sink);
+    check(lines.size() == 1 && lines[0] == "aim_eye_on,eye=right,shift_mm=32.0,snap=none,sequence=11\n",
+          "THE BLEND LEAVES 0: one aim_eye_on line, the eye and the full shift");
+    for (int i = 0; i < 20; ++i) log.frame(6, 2, 1.0f, 1, 32.0, none, seq++, ms += 11, sink);
     check(lines.size() == 1, "...and nothing while it holds");
-    log.frame(6, 2, 0.0f, 1, 32.0, seq++, ms += 11, sink);
+    log.frame(6, 2, 0.0f, 1, 32.0, none, seq++, ms += 11, sink);
     check(lines.size() == 2 && lines[1] == "aim_eye_off,sequence=32\n", "BACK TO 0: one aim_eye_off line");
-    log.frame(6, 1, 0.5f, 1, 31.0, seq++, ms += 11, sink);
+    log.frame(6, 1, 0.5f, 1, 31.0, none, seq++, ms += 11, sink);
     check(count("aim_eye_on,eye=left,shift_mm=31.0") == 1, "a left-eye press names the left eye");
-    log.frame(6, 1, 0.0f, 1, 31.0, seq++, ms += 11, sink);
+    log.frame(6, 1, 0.0f, 1, 31.0, none, seq++, ms += 11, sink);
     ms += AimEyeLog::kWindowMs;
-    log.frame(6, 2, 0.0f, 1, 32.0, seq++, ms, sink);
-    check(count("aim_eye_summary,frames=35,shifted=22,max_mm=32.0,channel=6") == 1, "30 S ON FOOT: a summary of all frames, the shifted ones and the largest shift");
+    log.frame(6, 2, 0.0f, 1, 32.0, none, seq++, ms, sink);
+    check(count("aim_eye_summary,frames=35,shifted=22,max_mm=32.0,max_snap_mm=0.0,channel=6") == 1,
+          "30 S ON FOOT: a summary of all frames, the shifted ones and the largest shift");
     lines.clear();
     ms += AimEyeLog::kWindowMs;
-    log.frame(6, 2, 0.0f, 0, 32.0, seq++, ms, sink);
+    log.frame(6, 2, 0.0f, 0, 32.0, none, seq++, ms, sink);
     check(lines.empty(), "30 s in a ship (channel 6, not on foot): no summary");
     AimEyeLog oldPair;
     lines.clear(); ms = 5000;
-    oldPair.frame(5, 0, 0.0f, 0, 0.0, 1, ms, sink);
-    oldPair.frame(5, 0, 0.0f, 0, 0.0, 2, ms + AimEyeLog::kWindowMs, sink);
-    check(lines.size() == 1 && lines[0] == "aim_eye_summary,frames=2,shifted=0,max_mm=0.0,channel=5\n",
+    oldPair.frame(5, 0, 0.0f, 0, 0.0, none, 1, ms, sink);
+    oldPair.frame(5, 0, 0.0f, 0, 0.0, none, 2, ms + AimEyeLog::kWindowMs, sink);
+    check(lines.size() == 1 && lines[0] == "aim_eye_summary,frames=2,shifted=0,max_mm=0.0,max_snap_mm=0.0,channel=5\n",
           "AN OLDER D3D11.DLL (channel 5): the summary is written anyway, channel=5 and shifted=0 -- 'the fix never reached the runtime', not 'LT was never held'");
     AimEyeLog noGeometry;
     lines.clear();
-    noGeometry.frame(6, 2, 1.0f, 1, 0.0, 1, 100, sink);
+    noGeometry.frame(6, 2, 1.0f, 1, 0.0, none, 1, 100, sink);
     check(lines.empty() && !noGeometry.on(), "a blend with no usable eye offset (0 mm) is not a shift and writes no aim_eye_on");
+  }
+  // ---- the position snap (openspec change on-foot-ads-position-snap) --------------------------------------------------------------------------------------
+  auto offsetIs = [](const double o[3], double x, double y, double z) {
+    return std::fabs(o[0] - x) < 1e-6 && std::fabs(o[1] - y) < 1e-6 && std::fabs(o[2] - z) < 1e-6;
+  };
+  const double snapTurns[][2] = {{0, 0}, {90, 0}, {0, 30}};
+  for (const auto& t : snapTurns) {
+    const auto real = headPose(t[0], t[1], 0.0, -0.05, 0.02);
+    AimSnap snap;
+    snap.frame(2, 1.0f, real, true);
+    auto game = real;
+    double s[3], o[3];
+    const bool snapped = snap.offset(1.0f, s);
+    aimEyeHeadOffset(eyes, 2, 1.0f, o);
+    applyTrackingOffset(game, s);
+    applyAimEyeOffset(game, o);
+    double w[3];
+    eyeWorld(game, eyes[1], w);
+    bool rotationSame = true;
+    for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) rotationSame = rotationSame && game.m[i][j] == real.m[i][j];
+    check(snapped && snap.state() == AimSnapState::Held && std::sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]) < 1e-5 && rotationSame,
+          "SLID DOWN 5 CM AND 2 CM BACK, AT YAW 0/90 AND ROLL 30, blend 1: the game's aiming eye stands exactly at the origin, the rotation is untouched");
+  }
+  {
+    AimSnap snap;
+    double s[3];
+    snap.frame(2, 0.13f, headPose(0, 0, 0.0, -0.05, 0.02), true);
+    check(snap.offset(0.5f, s) && offsetIs(s, 0.0, 0.025, -0.01), "half a blend is exactly half the snap");
+    check(std::fabs(snap.mm() - 53.85) < 0.01 && std::fabs(snap.yMm() + 50.0) < 1e-3, "the kept wander in mm, and its vertical part with its sign");
+    snap.frame(2, 1.0f, headPose(40, 10, 0.1, 0.2, 0.3), true);
+    snap.frame(2, 1.0f, headPose(-20, 0, -0.1, 0.0, 0.1), true);
+    check(snap.offset(1.0f, s) && offsetIs(s, 0.0, 0.05, -0.02), "THE HEAD MOVES WITH LT HELD: the kept wander does not change");
+    snap.frame(2, 0.3f, headPose(0, 0, 0.2, 0.2, 0.2), true);
+    snap.frame(2, 0.6f, headPose(0, 0, 0.2, 0.2, 0.2), true);
+    check(snap.offset(1.0f, s) && offsetIs(s, 0.0, 0.05, -0.02), "PRESSED AGAIN FROM A BLEND OF 0.3: the old wander, no jump");
+    snap.frame(2, 0.0f, headPose(0, 0, 0.2, 0.2, 0.2), true);
+    check(snap.state() == AimSnapState::None && !snap.offset(1.0f, s) && offsetIs(s, 0, 0, 0), "BLEND BACK TO 0: dropped, no offset");
+    snap.frame(1, 0.1f, headPose(0, 0, 0.01, -0.02, 0.0), true);
+    check(snap.offset(1.0f, s) && offsetIs(s, -0.01, 0.02, 0.0), "a new press keeps a new wander");
+    snap.reset();
+    snap.frame(1, 1.0f, headPose(0, 0, 0.0, 0.001, 0.0), true);
+    check(snap.state() == AimSnapState::Held && snap.offset(1.0f, s) && offsetIs(s, 0.0, -0.001, 0.0),
+          "A RECENTER IN THE MIDDLE OF A PRESS (reset): the next frame keeps the new wander, about 0");
+    snap.frame(0, 1.0f, headPose(0, 0, 0.0, 0.0, 0.0), true);
+    check(snap.state() == AimSnapState::None, "no eye: dropped");
+  }
+  {
+    AimSnap snap;
+    double s[3], o[3];
+    snap.frame(2, 0.1f, headPose(0, 0, 0.0, -0.6, 0.0), true);
+    check(snap.state() == AimSnapState::Far && !snap.offset(1.0f, s) && aimEyeHeadOffset(eyes, 2, 1.0f, o),
+          "0.6 M FROM THE ORIGIN: far, no snap, the eye shift still works");
+    snap.frame(2, 1.0f, headPose(0, 0, 0.0, -0.01, 0.0), true);
+    check(snap.state() == AimSnapState::Far && !snap.offset(1.0f, s), "...far until the end of that press, even back near the origin");
+    snap.frame(2, 0.0f, headPose(0, 0, 0.0, -0.01, 0.0), true);
+    snap.frame(2, 0.1f, headPose(0, 0, 0.0, -0.01, 0.0), true);
+    check(snap.state() == AimSnapState::Held, "...and the next press is held again");
+    AimSnap nan;
+    auto bad = headPose(0, 0, 0.0, 0.0, 0.0);
+    bad.m[1][3] = std::numeric_limits<float>::quiet_NaN();
+    nan.frame(2, 1.0f, bad, true);
+    check(nan.state() == AimSnapState::Far && !nan.offset(1.0f, s), "A NaN IN THE TRANSLATION: far, no snap");
+    AimSnap late;
+    late.frame(2, 0.1f, headPose(0, 0, 0.0, -0.03, 0.0), false);
+    check(late.state() == AimSnapState::None && !late.offset(1.0f, s), "AN INVALID POSE IN THE FIRST FRAME: nothing kept yet");
+    late.frame(2, 0.2f, headPose(0, 0, 0.0, -0.03, 0.0), true);
+    check(late.state() == AimSnapState::Held && late.offset(1.0f, s) && offsetIs(s, 0.0, 0.03, 0.0), "...kept on the next frame with a valid pose");
+  }
+  {
+    std::vector<std::string> lines;
+    auto sink = [&](const char* l) { lines.emplace_back(l); };
+    AimSnap snap;
+    AimEyeLog log;
+    snap.frame(2, 0.13f, headPose(0, 0, 0.0, -0.045, 0.0), true);
+    log.frame(6, 2, 0.13f, 1, 32.0, snap, 1, 100, sink);
+    check(lines.size() == 1 && lines[0] == "aim_eye_on,eye=right,shift_mm=32.0,snap=held,snap_mm=45.0,snap_y_mm=-45.0,sequence=1\n",
+          "SLID DOWN: the aim_eye_on line carries snap=held, the wander and its vertical part with a minus");
+    log.frame(6, 2, 1.0f, 1, 32.0, snap, 2, 111, sink);
+    snap.frame(2, 0.0f, headPose(0, 0, 0.0, -0.045, 0.0), true);
+    log.frame(6, 2, 0.0f, 1, 32.0, snap, 3, 100 + AimEyeLog::kWindowMs, sink);
+    check(lines.size() == 3 && lines[2] == "aim_eye_summary,frames=3,shifted=2,max_mm=32.0,max_snap_mm=45.0,channel=6\n",
+          "the summary carries the largest snap of the window");
+    lines.clear();
+    snap.frame(2, 0.13f, headPose(0, 0, 0.0, -0.6, 0.0), true);
+    log.frame(6, 2, 0.13f, 1, 32.0, snap, 4, 30200, sink);
+    check(lines.size() == 1 && lines[0] == "aim_eye_on,eye=right,shift_mm=32.0,snap=far,snap_mm=600.0,sequence=4\n",
+          "TOO FAR: the aim_eye_on line says snap=far and how far");
+    AimSnap late;
+    AimEyeLog lateLog;
+    lines.clear();
+    late.frame(2, 0.13f, headPose(0, 0, 0.0, -0.03, 0.0), false);
+    lateLog.frame(6, 2, 0.13f, 1, 32.0, late, 1, 100, sink);
+    check(lines.size() == 1 && lines[0] == "aim_eye_on,eye=right,shift_mm=32.0,snap=none,sequence=1\n", "NO VALID POSE YET: snap=none");
   }
 }
 }  // namespace edvr::openxr::test
