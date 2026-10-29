@@ -59,8 +59,8 @@
 ## 5. Сборка и установка
 
 - [x] 5.1 Полный `build.bat` по абсолютному пути, прочитать хвост, гейт зелёный.
-- [ ] 5.2 Коммит по правилам `edvr\AGENTS.md` (сообщение через `git commit -F`), затем `build.bat --dll-only`.
-- [ ] 5.3 `python tools\install_edvr.py --target steam`, потом `--verify-only`: `vr payload and profile verified`.
+- [x] 5.2 Коммит по правилам `edvr\AGENTS.md` (сообщение через `git commit -F`), затем `build.bat --dll-only`.
+- [x] 5.3 `python tools\install_edvr.py --target steam`, потом `--verify-only`: `vr payload and profile verified`.
 
 ## 6. Проверка в шлеме (Дима)
 
