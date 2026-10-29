@@ -59,9 +59,9 @@
 
 - [x] 4.1 Полный `D:\Project VSC\EDVRonFOOT\edvr\build.bat --jobs 8` по абсолютному пути. Проверка: в хвосте
   `Native OpenXR build and all gates passed` (`weapon_motion` — известный терпимый сбой).
-- [ ] 4.2 Коммит по правилам `edvr\AGENTS.md`: сообщение через `git commit -F`, тег `v0.19.1-edvronfoot.34`. Затем
+- [x] 4.2 Коммит по правилам `edvr\AGENTS.md`: сообщение через `git commit -F`, тег `v0.19.1-edvronfoot.34`. Затем
   `build.bat --dll-only`. Проверка: `--dll-only` прошёл проверку квитанции.
-- [ ] 4.3 `python tools\install_edvr.py --target steam`, потом `--verify-only`. Проверка: `vr payload and profile
+- [x] 4.3 `python tools\install_edvr.py --target steam`, потом `--verify-only`. Проверка: `vr payload and profile
   verified`, стоит `.34`.
 
 ## 5. Проверка в шлеме (Дима)
