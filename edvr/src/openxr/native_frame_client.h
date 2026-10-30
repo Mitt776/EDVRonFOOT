@@ -1,6 +1,7 @@
 #pragma once
 #include "../common/native_frame.h"
 #include "geometry_snapshot.h"
+#include <cmath>
 #include <cstring>
 
 namespace edvr::openxr {
@@ -18,7 +19,7 @@ class NativeFrameClient final {
     if(candidate.size!=sizeof(candidate)||candidate.version!=EDVR_NATIVE_FRAME_VERSION_1||!candidate.context||
        !owned(provider,candidate.beginFrame)||!owned(provider,candidate.latchSubmit)||
        !owned(provider,candidate.invalidate)||!owned(provider,candidate.close))return E_NOINTERFACE;
-    table_=candidate;generation_=generation;providerVersion_=EDVR_NATIVE_FRAME_VERSION_6;return S_OK;
+    table_=candidate;generation_=generation;providerVersion_=EDVR_NATIVE_FRAME_VERSION_7;return S_OK;
   }
   bool acquired()const{return table_.context!=nullptr;}
   // The shape the provider last accepted (6 for a current d3d11.dll), for the aiming eye's summary line.
@@ -35,7 +36,7 @@ class NativeFrameClient final {
   // The version ladder, on its own so a rig can drive it with a provider of any age. A d3d11.dll that does not yet know a newer shape refuses it and
   // consumes nothing when it does, so the same frame can be asked again the only way that one knows: one step down at a time, until version 1 (which every
   // provider answers) or an acceptance settles what shape to ask for first next time. It then carries no trim/pacing/fade/aim field, ever; whatever
-  // the answer did not carry reads as its off value (fadeAlpha 0: no fade, never black; aimEyeBlend 0: no shift).
+  // the answer did not carry reads as its off value (fadeAlpha 0: no fade, never black; aimEyeBlend 0: no shift; headAimYawRad 0: no turn).
   template<class Begin>
   static HRESULT beginLadder(Begin&& call,uint32_t& providerVersion,EdvrNativeFrameOutput& out) {
     out=ask(providerVersion);
@@ -55,6 +56,8 @@ class NativeFrameClient final {
       out.aimEye=0,out.aimEyeBlend=0;
     if(r!=S_OK||out.version<EDVR_NATIVE_FRAME_VERSION_6||out.aimOnFoot>1)
       out.aimOnFoot=0;
+    if(r!=S_OK||out.version<EDVR_NATIVE_FRAME_VERSION_7||!std::isfinite(out.headAimYawRad)||out.headAimProbe>1)
+      out.headAimYawRad=0,out.headAimProbe=0;
     return r;
   }
   HRESULT latch(uint64_t sequence,EdvrNativeFrameDecision& out) {
@@ -62,10 +65,12 @@ class NativeFrameClient final {
     return acquired()?table_.latchSubmit(table_.context,sequence,&out):S_FALSE;
   }
   HRESULT invalidate(){return acquired()?table_.invalidate(table_.context):S_FALSE;}
-  HRESULT close(){if(!acquired())return S_FALSE;const auto r=table_.close(table_.context);if(SUCCEEDED(r)){table_={};providerVersion_=EDVR_NATIVE_FRAME_VERSION_6;}return r;}
+  HRESULT close(){if(!acquired())return S_FALSE;const auto r=table_.close(table_.context);if(SUCCEEDED(r)){table_={};providerVersion_=EDVR_NATIVE_FRAME_VERSION_7;}return r;}
   static EdvrNativeFrameOutput ask(uint32_t version) {
-    if(version>=EDVR_NATIVE_FRAME_VERSION_6)
-      return EdvrNativeFrameOutput{sizeof(EdvrNativeFrameOutput),EDVR_NATIVE_FRAME_VERSION_6};
+    if(version>=EDVR_NATIVE_FRAME_VERSION_7)
+      return EdvrNativeFrameOutput{sizeof(EdvrNativeFrameOutput),EDVR_NATIVE_FRAME_VERSION_7};
+    if(version==EDVR_NATIVE_FRAME_VERSION_6)
+      return EdvrNativeFrameOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_6,EDVR_NATIVE_FRAME_VERSION_6};
     if(version==EDVR_NATIVE_FRAME_VERSION_5)
       return EdvrNativeFrameOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_5,EDVR_NATIVE_FRAME_VERSION_5};
     if(version==EDVR_NATIVE_FRAME_VERSION_4)
@@ -85,6 +90,6 @@ class NativeFrameClient final {
   EdvrNativeFrameTable table_{};uint64_t generation_=0;
   // The shape (6/5/4/3/2/1) the provider last accepted; begin() asks this one
   // first, so a provider once found to be older is not re-probed every frame.
-  uint32_t providerVersion_=EDVR_NATIVE_FRAME_VERSION_6;
+  uint32_t providerVersion_=EDVR_NATIVE_FRAME_VERSION_7;
 };
 }

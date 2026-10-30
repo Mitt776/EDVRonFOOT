@@ -535,6 +535,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\native_vr_on_foot.cpp" ^
     "src\d3d11\on_foot_hud.cpp" ^
     "src\d3d11\on_foot_aim_eye.cpp" ^
+    "src\d3d11\head_aim_probe.cpp" ^
     "src\d3d11\on_foot_markers.cpp" ^
     "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" "src\d3d11\vscreen_footprint.cpp" ^
     "src\d3d11\binding_shadow.cpp" ^
@@ -3070,6 +3071,21 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     "tools\on_foot_aim_eye_test\on_foot_aim_eye_test.cpp" /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: on-foot aim eye test build failed & exit /b 1 )
 "%BUILD%\on_foot_aim_eye_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_head_aim_probe_test
+echo [edvr] === head_aim_probe_test.exe ===
+REM EDVRonFOOT: build gate for the on-foot head aim probe (src\d3d11\head_aim_probe_core.h, experimental.native_vr_on_foot_head_aim_probe and
+REM _compensate; temporary, openspec change on-foot-head-aim-probe). Drives the pure half: both keys' reading (every value, empty, junk, case and
+REM padding), the gate (the ship, native_vr_on_foot off, no player), the ramp (0.5 s up and down, an angle eased out before the other eases in, a
+REM pause's huge dt one small step), the sway (period, bounds, no jump), the turn by the compensation's sign, who the player is (the camera's HMC
+REM seen by the getters, the single HMC, several), and the text of every line.
+if not exist "%OBJ%\headaimprobe" mkdir "%OBJ%\headaimprobe"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\headaimprobe"\ /Fe"%BUILD%\head_aim_probe_test.exe" ^
+    "tools\head_aim_probe_test\head_aim_probe_test.cpp" /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: head aim probe test build failed & exit /b 1 )
+"%BUILD%\head_aim_probe_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_on_foot_markers_test

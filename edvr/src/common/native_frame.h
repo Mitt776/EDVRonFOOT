@@ -32,6 +32,12 @@
 // runtime that asks version 6 of a d3d11.dll that refuses the shape steps down
 // and reads "no shift" (blend 0).
 #define EDVR_NATIVE_FRAME_VERSION_6 6u
+// Version 7 adds headAimYawRad and headAimProbe to the END and nothing else
+// (the on-foot head aim probe, head_aim_signal.h; openspec change
+// on-foot-head-aim-probe), under the same hand-copied-DLLs rule: a version 1
+// to 6 caller never learns of them, and a runtime that asks version 7 of a
+// d3d11.dll that refuses the shape steps down and reads "no turn" (0).
+#define EDVR_NATIVE_FRAME_VERSION_7 7u
 
 // The game producer owns the device and generation passed at acquire. The
 // methods in the table are CPU-only and are called by the XR owner after the
@@ -98,6 +104,14 @@ struct EdvrNativeFrameOutput {
     uint32_t aimEye;
     float aimEyeBlend;
     uint32_t aimOnFoot;
+    // Version 7 and later. The on-foot head aim probe (head_aim_signal.h):
+    // headAimYawRad is the angle the runtime turns the head pose it gives the
+    // GAME by, about the seated space's vertical, 0 (no turn, the only value
+    // an older provider can mean) whenever the probe shifts nothing or its
+    // compensation is off; headAimProbe 1 while the probe acts, for the
+    // runtime's summary line.
+    float headAimYawRad;
+    uint32_t headAimProbe;
 };
 
 // The size the fields through resubmitEnabled occupy, which is what a
@@ -123,6 +137,10 @@ struct EdvrNativeFrameOutput {
 // caller's struct is, with no tail padding before aimEye.
 #define EDVR_NATIVE_FRAME_OUTPUT_SIZE_5 \
     ((uint32_t)offsetof(EdvrNativeFrameOutput, aimEye))
+// The size the fields through aimOnFoot occupy, which is what a version 6
+// caller's struct is, with no tail padding before headAimYawRad.
+#define EDVR_NATIVE_FRAME_OUTPUT_SIZE_6 \
+    ((uint32_t)offsetof(EdvrNativeFrameOutput, headAimYawRad))
 
 struct EdvrNativeFrameDecision {
     uint32_t size, version;

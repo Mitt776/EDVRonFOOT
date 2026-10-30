@@ -687,6 +687,7 @@ int selfTest() {
   edvr::openxr::test::runSteamIdentityCases(check);
   edvr::openxr::test::runComfortFadeCases(check);
   edvr::openxr::test::runAimEyeCases(check);
+  edvr::openxr::test::runHeadAimCases(check);
   edvr::openxr::test::runCantedDisplayCases(check);
   edvr::openxr::test::runParallelProjectionNoticeCases(check);
   edvr::openxr::test::runHeadPoseCases(check);

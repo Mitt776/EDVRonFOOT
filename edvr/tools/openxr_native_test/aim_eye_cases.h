@@ -42,7 +42,7 @@ struct Provider {
   uint32_t maxVersion = 6, eye = 2, onFoot = 1; float blend = 1.0f; bool scribble = false;
   HRESULT answer(EdvrNativeFrameOutput& o) {
     if (o.version > maxVersion || o.version < EDVR_NATIVE_FRAME_VERSION_1) return E_INVALIDARG;
-    const uint32_t want = o.version == 6 ? uint32_t(sizeof(o)) : o.version == 5 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_5 : o.version == 4 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_4
+    const uint32_t want = o.version == 7 ? uint32_t(sizeof(o)) : o.version == 6 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_6 : o.version == 5 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_5 : o.version == 4 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_4
       : o.version == 3 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_3 : o.version == 2 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_2 : EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
     if (o.size != want) return E_INVALIDARG;
     if (o.version >= 6 || scribble) { o.aimEye = eye; o.aimEyeBlend = blend; o.aimOnFoot = onFoot; }
@@ -247,6 +247,93 @@ template<class Check> void runAimEyeCases(Check&& check) {
     late.frame(2, 0.13f, headPose(0, 0, 0.0, -0.03, 0.0), false);
     lateLog.frame(6, 2, 0.13f, 1, 32.0, late, 1, 100, sink);
     check(lines.size() == 1 && lines[0] == "aim_eye_on,eye=right,shift_mm=32.0,snap=none,sequence=1\n", "NO VALID POSE YET: snap=none");
+  }
+}
+
+// The head aim probe, runtime side (aim_eye_shift.h; openspec change on-foot-head-aim-probe): the turn of the game's head pose about the seated vertical,
+// the version ladder against a d3d11.dll of either age (6/7), and the runtime's line.
+template<class Check> void runHeadAimCases(Check&& check) {
+  using namespace aim_fixture;
+  const double k = 3.14159265358979323846 / 180.0;
+  auto same = [](const vr::HmdMatrix34_t& a, const vr::HmdMatrix34_t& b, double eps) {
+    for (int i = 0; i < 3; ++i)
+      for (int j = 0; j < 4; ++j)
+        if (std::fabs(double(a.m[i][j]) - double(b.m[i][j])) > eps) return false;
+    return true;
+  };
+  {
+    const vr::HmdMatrix34_t start = headPose(30, 20, 0.1, 1.2, -0.3);
+    vr::HmdMatrix34_t p = start;
+    turnAboutVertical(p, 10 * k);
+    turnAboutVertical(p, -10 * k);
+    check(same(p, start, 1e-5), "TURN: +10 then -10 degrees gives the pose back");
+    vr::HmdMatrix34_t yawOnly = headPose(30, 0, 0.0, 1.2, 0.0);
+    turnAboutVertical(yawOnly, 10 * k);
+    check(same(yawOnly, headPose(40, 0, 0.0, 1.2, 0.0), 1e-5), "a head on the axis turned by 10 degrees: its yaw grows by 10, it does not move");
+    vr::HmdMatrix34_t off = headPose(0, 0, 0.0, 1.2, -1.0);
+    turnAboutVertical(off, 90 * k);
+    check(std::fabs(off.m[0][3] - (-1.0)) < 1e-5 && std::fabs(off.m[1][3] - 1.2) < 1e-5 && std::fabs(off.m[2][3]) < 1e-5,
+          "a head 1 m off the axis is carried round it: +90 degrees turns -Z onto -X, the height kept");
+    vr::HmdMatrix34_t q = start;
+    turnAboutVertical(q, 37 * k);
+    bool ortho = true;
+    for (int a = 0; a < 3; ++a)
+      for (int b = 0; b < 3; ++b) {
+        double d = 0;
+        for (int r = 0; r < 3; ++r) d += double(q.m[r][a]) * double(q.m[r][b]);
+        if (std::fabs(d - (a == b ? 1.0 : 0.0)) > 1e-5) ortho = false;
+      }
+    check(ortho, "the turned rotation stays orthonormal");
+    vr::HmdMatrix34_t z = start;
+    turnAboutVertical(z, 0.0);
+    turnAboutVertical(z, std::numeric_limits<double>::quiet_NaN());
+    check(same(z, start, 0.0), "0 and an angle that is not a number leave the pose alone");
+  }
+  // ---- the ladder: runtime 7 against a d3d11.dll of either age (6/7) ----------------------------------------------------------------------------------------
+  {
+    using Client = edvr::openxr::NativeFrameClient;
+    struct P7 {
+      uint32_t maxVersion = 7; float yaw = 0.2f; uint32_t probe = 1;
+      HRESULT answer(EdvrNativeFrameOutput& o) {
+        if (o.version > maxVersion) return E_INVALIDARG;
+        const uint32_t want = o.version == 7 ? uint32_t(sizeof(o)) : o.version == 6 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_6 : 0u;
+        if (o.size != want) return E_INVALIDARG;
+        o.aimEye = 2; o.aimEyeBlend = 1.0f; o.aimOnFoot = 1;
+        if (o.version >= 7) { o.headAimYawRad = yaw; o.headAimProbe = probe; }
+        return S_OK;
+      }
+    };
+    auto ladder = [&](P7& p, uint32_t& version, EdvrNativeFrameOutput& out) {
+      return Client::beginLadder([&](EdvrNativeFrameOutput& o) { return p.answer(o); }, version, out);
+    };
+    P7 p; uint32_t v = 7; EdvrNativeFrameOutput out{};
+    check(ladder(p, v, out) == S_OK && out.version == 7 && out.headAimYawRad == 0.2f && out.headAimProbe == 1 && out.aimEye == 2,
+          "RUNTIME 7, D3D11 7: the turn, the probe flag and the aim arrive");
+    P7 old; old.maxVersion = 6; v = 7;
+    check(ladder(old, v, out) == S_OK && out.version == 6 && v == 6 && out.headAimYawRad == 0.0f && out.headAimProbe == 0 && out.aimEye == 2,
+          "RUNTIME 7, D3D11 6: one step down, the aim still arrives, no turn");
+    P7 bad; bad.yaw = std::numeric_limits<float>::infinity(); bad.probe = 9; v = 7;
+    check(ladder(bad, v, out) == S_OK && out.headAimYawRad == 0.0f && out.headAimProbe == 0, "a turn that is not finite, or a flag above 1, reads no turn");
+  }
+  // ---- the runtime's line ---------------------------------------------------------------------------------------------------------------------------------
+  {
+    std::vector<std::string> lines;
+    auto sink = [&](const char* line) { lines.emplace_back(line); };
+    HeadAimLog log;
+    log.frame(7, 0, 0.0, 1000, sink);
+    log.frame(7, 0, 0.0, 31000, sink);
+    check(lines.empty(), "probe off, channel 7: no line");
+    log.frame(7, 1, 10 * k, 32000, sink);
+    log.frame(7, 1, -5 * k, 33000, sink);
+    log.frame(7, 1, 0.0, 61000, sink);
+    check(lines.size() == 1 && lines[0] == "head_aim_runtime,frames=3,probe=3,turned=2,max_deg=10.0,channel=7\n",
+          "THE PROBE ACTING: frames, probe frames, turned frames and the largest turn of the window");
+    HeadAimLog older;
+    lines.clear();
+    older.frame(6, 0, 0.0, 0, sink);
+    older.frame(6, 0, 0.0, 30000, sink);
+    check(lines.size() == 1 && lines[0] == "head_aim_runtime,frames=2,probe=0,turned=0,max_deg=0.0,channel=6\n",
+          "AN OLDER D3D11.DLL: the line comes anyway, saying the turn never reached the runtime");
   }
 }
 }  // namespace edvr::openxr::test

@@ -9,6 +9,10 @@
 // back by blend times that, in tracking axes and without any rotation; the eye shift is added on top. At blend 1 the game's aiming eye stands at the
 // origin, as right after a recenter. Kept once per press, dropped when the blend is back to 0 or the origin changes; more than kAimSnapMaxM away is a
 // forgotten recenter or a tracking fault, and that press gets no snap.
+// The head aim probe (openspec change on-foot-head-aim-probe): the d3d11 half shifts one of the game's angles of the commander and sends the angle the
+// game's head pose is turned by about the seated space's vertical (EdvrNativeFrameOutput::headAimYawRad, version 7), so that the game's camera (head
+// pose x the character's eye) can be held still while the character turns. The whole pose turns, rotation and translation, about the axis through the
+// seated origin, last of all, after the eye shift and the snap. Never the layer.
 // Pure: no OpenXR calls, no globals, so a rig can drive every case.
 #include "geometry_snapshot.h"
 #include <cmath>
@@ -54,6 +58,51 @@ inline void applyAimEyeOffset(vr::HmdMatrix34_t& pose, const double offset[3]) {
 inline void applyTrackingOffset(vr::HmdMatrix34_t& pose, const double offset[3]) {
   for (int r = 0; r < 3; ++r) pose.m[r][3] = float(double(pose.m[r][3]) + offset[r]);
 }
+
+// Turns a head-to-tracking pose about the tracking space's vertical (+Y) through its origin by `yawRad`: pose = R(yawRad) * pose, rotation and
+// translation alike. A positive angle turns +Z toward +X; which sign holds the world still is the probe's flight to find. 0 and anything
+// that is not a finite angle leave the pose alone.
+inline void turnAboutVertical(vr::HmdMatrix34_t& pose, double yawRad) {
+  if (yawRad == 0.0 || !std::isfinite(yawRad)) return;
+  const double c = std::cos(yawRad), s = std::sin(yawRad);
+  for (int col = 0; col < 4; ++col) {
+    const double x = pose.m[0][col], z = pose.m[2][col];
+    pose.m[0][col] = float(c * x + s * z);
+    pose.m[2][col] = float(-s * x + c * z);
+  }
+}
+
+// The head aim probe's runtime line:
+//   head_aim_runtime,frames=F,probe=P,turned=T,max_deg=M,channel=C   every 30 s while the d3d11 half says the probe acts (probe > 0), or ALWAYS when
+//     the channel is below 7 (an older d3d11.dll cannot turn anything): channel=6 with turned=0 then reads "the turn never reached the runtime".
+class HeadAimLog {
+ public:
+  static constexpr uint64_t kWindowMs = 30000;
+  template<class Sink>
+  void frame(uint32_t channel, uint32_t probe, double yawRad, uint64_t nowMs, Sink&& sink) {
+    if (!windowStarted_) { windowStarted_ = true; windowBegan_ = nowMs; }
+    ++frames_;
+    if (probe) ++probe_;
+    if (yawRad != 0.0 && std::isfinite(yawRad)) {
+      ++turned_;
+      const double deg = std::fabs(yawRad) * 57.29577951308232;
+      if (deg > maxDeg_) maxDeg_ = deg;
+    }
+    if (nowMs - windowBegan_ >= kWindowMs) {
+      if (probe_ || channel < 7) {
+        char line[160];
+        std::snprintf(line, sizeof(line), "head_aim_runtime,frames=%llu,probe=%llu,turned=%llu,max_deg=%.1f,channel=%u\n", (unsigned long long)frames_,
+                      (unsigned long long)probe_, (unsigned long long)turned_, maxDeg_, channel);
+        sink(line);
+      }
+      windowBegan_ = nowMs; frames_ = probe_ = turned_ = 0; maxDeg_ = 0.0;
+    }
+  }
+ private:
+  bool windowStarted_ = false;
+  uint64_t windowBegan_ = 0, frames_ = 0, probe_ = 0, turned_ = 0;
+  double maxDeg_ = 0.0;
+};
 
 // A head further than this from the origin as LT is pressed is not "slid down in the chair": no snap for that press.
 constexpr double kAimSnapMaxM = 0.5;
