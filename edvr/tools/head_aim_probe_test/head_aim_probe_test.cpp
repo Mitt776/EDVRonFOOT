@@ -155,22 +155,26 @@ void partTurn() {
 
 void partIdentity() {
     Census c;
-    check(identify(0, c).source == Source::None && std::strcmp(identify(0, c).why, "no getter calls") == 0, "no calls: no player");
+    check(identify(0, false, c).source == Source::None && std::strcmp(identify(0, false, c).why, "no getter calls") == 0, "no calls: no player");
     note(c, 0x1000);
     note(c, 0x1000);
     check(countOf(c) == 1 && !c.many, "the same HMC twice counts once");
-    Identity id = identify(0, c);
+    Identity id = identify(0, false, c);
     check(id.source == Source::Single && id.player == 0x1000, "one HMC: it is the player");
-    id = identify(0x1000, c);
+    id = identify(0x1000, false, c);
     check(id.source == Source::Camera && id.player == 0x1000, "the camera's HMC seen by the getters: the player, by the camera");
     note(c, 0x2000);
-    check(identify(0, c).source == Source::None, "two HMCs and no camera: no player");
-    check(identify(0x2000, c).source == Source::Camera && identify(0x2000, c).player == 0x2000, "two HMCs, the camera names one: that one");
-    check(identify(0x3000, c).source == Source::None, "the camera's HMC not among the getters': no player");
+    check(identify(0, false, c).source == Source::None, "two HMCs and no camera: no player");
+    check(identify(0x2000, false, c).source == Source::Camera && identify(0x2000, false, c).player == 0x2000, "two HMCs, the camera names one: that one");
+    check(identify(0x3000, false, c).source == Source::None, "the camera's HMC not among the getters': no player");
     Census full;
-    for (uintptr_t i = 1; i <= 9; ++i) note(full, i * 0x100);
+    for (uintptr_t i = 1; i <= uintptr_t(kSlots) + 1; ++i) note(full, i * 0x100);
     check(countOf(full) == kSlots && full.many, "more than the slots: many");
-    check(identify(0x900, full).source == Source::None, "the camera's HMC beyond the slots is not confirmed");
+    const uintptr_t beyond = (uintptr_t(kSlots) + 1) * 0x100;
+    check(identify(beyond, false, full).source == Source::None, "the camera's HMC beyond the slots, not flagged by the getters: not confirmed");
+    check(identify(beyond, true, full).source == Source::Camera && identify(beyond, true, full).player == beyond,
+          "...but flagged by the getters themselves it is the player, however big the crowd (flight of .35: 8+ HMCs)");
+    check(identify(0x3000, true, c).source == Source::Camera, "the getters' own flag is enough without the census");
     Census zero;
     note(zero, 0);
     check(countOf(zero) == 0, "a null HMC is not counted");
@@ -205,7 +209,7 @@ void partLines() {
     Census two;
     note(two, 1);
     note(two, 2);
-    formatIdentity(identify(0, two), 2, false, line, sizeof(line));
+    formatIdentity(identify(0, false, two), 2, false, line, sizeof(line));
     check(std::strcmp(line, "head aim probe: player not identified (several HMCs and no camera), hmcs=2") == 0, "the not identified line");
     formatShiftEdge(true, Mode::Angle1, Comp::Plus, line, sizeof(line));
     check(std::strcmp(line, "head aim probe: shift on, angle1, compensate=plus") == 0, "the shift on line");
@@ -221,12 +225,21 @@ void partLines() {
     formatWatch(f, kShiftRad, 0.0f, 1, false, true, line, sizeof(line));
     char want[512];
     std::snprintf(want, sizeof(want), "head_aim_watch,a1=%.2f,a1_out=%.2f,a2=%.2f,a2_out=%.2f,f6f0=1.0000,f6fc=0.2500,f70c=0.2500,f710=0.5000,"
-                  "f748=0.0000,f754=0.0000,f764=0.0000,f768=0.0000,hmcs=1,player=yes",
+                  "f748=0.0000,f754=0.0000,f764=0.0000,f768=0.0000,hmcs=1,player=yes,src=player",
                   0.5 * kDegPerRad, 0.5 * kDegPerRad + 10.0, 0.5 * kDegPerRad, 0.5 * kDegPerRad);
     check(std::strcmp(line, want) == 0, "the watch line: both angles in degrees as built and as handed on, the fields raw");
     Fields unread;
     formatWatch(unread, 0.0f, 0.0f, 9, true, false, line, sizeof(line));
-    check(std::strcmp(line, "head_aim_watch,a1=nan,a1_out=nan,a2=nan,a2_out=nan,fields=unread,hmcs=9+,player=no") == 0, "the watch line, unread");
+    check(std::strcmp(line, "head_aim_watch,a1=nan,a1_out=nan,a2=nan,a2_out=nan,fields=unread,hmcs=9+,player=no,src=none") == 0, "the watch line, unread");
+    CameraCheck cam;
+    char tail[160];
+    formatCamera(cam, tail, sizeof(tail));
+    check(std::strcmp(tail, ",cam_eye=no,eye_table=none,cam_hmc=no,hmc_table=none,cam_seen=no") == 0, "the camera part, nothing");
+    cam.eye = cam.eyeTable = cam.hmc = true;
+    formatCamera(cam, tail, sizeof(tail));
+    check(std::strcmp(tail, ",cam_eye=yes,eye_table=ok,cam_hmc=yes,hmc_table=bad,cam_seen=no") == 0, "the camera part, an HMC whose table is not the HMC's");
+    formatWatch(f, 0.0f, 0.0f, 32, true, false, line, sizeof(line), "camera", tail);
+    check(std::strstr(line, ",hmcs=32+,player=no,src=camera,cam_eye=yes,eye_table=ok,") != nullptr, "the watch line names its source and carries the camera part");
 
     Window w;
     formatSummary(w, line, sizeof(line));

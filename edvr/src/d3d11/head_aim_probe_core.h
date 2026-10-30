@@ -154,7 +154,8 @@ inline float turnOf(Comp c, const Shift& s) {
 }
 
 // Distinct HMCs seen by the getters in a window, up to kSlots (more reads "many"). The glue fills an atomic copy of this; the rig a plain one.
-constexpr int kSlots = 8;
+// 32: on foot near a settlement the getters see more humanoids than 8 (flight of .35: 8+), and the census must still say how many.
+constexpr int kSlots = 32;
 struct Census {
     uintptr_t slot[kSlots] = {};
     bool many = false;
@@ -179,7 +180,7 @@ inline bool contains(const Census& c, uintptr_t p) {
 }
 
 // Who the player is, from one window. The camera's way: the HMC behind the eye the on-foot camera reads its matrix from, confirmed only if the getters
-// were called on it in the same window. The single way: the only HMC the getters saw. Neither: no player, and why.
+// were called on it in the same window (`cameraSeen`, flagged by the getters themselves, so a crowd past the census's slots cannot hide it). The single way: the only HMC the getters saw. Neither: no player, and why.
 enum class Source : int { None = 0, Camera, Single };
 inline const char* sourceName(Source s) { return s == Source::Camera ? "camera" : s == Source::Single ? "single" : "none"; }
 struct Identity {
@@ -187,9 +188,9 @@ struct Identity {
     Source source = Source::None;
     const char* why = "no getter calls";
 };
-inline Identity identify(uintptr_t cameraHmc, const Census& c) {
+inline Identity identify(uintptr_t cameraHmc, bool cameraSeen, const Census& c) {
     Identity id;
-    if (cameraHmc && contains(c, cameraHmc)) {
+    if (cameraHmc && (cameraSeen || contains(c, cameraHmc))) {
         id.player = cameraHmc;
         id.source = Source::Camera;
         id.why = "";
@@ -232,24 +233,38 @@ inline int formatShiftEdge(bool on, Mode m, Comp c, char* out, size_t cap) {
               : std::snprintf(out, cap, "head aim probe: shift off");
 }
 
+// The camera's chain as the frame thread read it this second: did the on-foot camera hand its matrix getter an eye, is that eye's table the eye's
+// (+0x5200038), is there an HMC at [eye+0xD0], is ITS table the HMC's (+0x5206AA8), and did the getters see it.
+struct CameraCheck {
+    bool eye = false, eyeTable = false, hmc = false, hmcTable = false, seen = false;
+};
+// ,cam_eye=yes|no,eye_table=ok|bad|none,cam_hmc=yes|no,hmc_table=ok|bad|none,cam_seen=yes|no  -- appended to the watch line.
+inline int formatCamera(const CameraCheck& c, char* out, size_t cap) {
+    return std::snprintf(out, cap, ",cam_eye=%s,eye_table=%s,cam_hmc=%s,hmc_table=%s,cam_seen=%s", c.eye ? "yes" : "no",
+                         !c.eye ? "none" : c.eyeTable ? "ok" : "bad", c.hmc ? "yes" : "no", !c.hmc ? "none" : c.hmcTable ? "ok" : "bad",
+                         c.seen ? "yes" : "no");
+}
+
 // The fields of the player's HMC, raw, and whether they could be read.
 struct Fields {
     bool read = false;
     float f6f0 = 0, f6fc = 0, f70c = 0, f710 = 0, f748 = 0, f754 = 0, f764 = 0, f768 = 0;
 };
 constexpr double kDegPerRad = 57.29577951308232;
-// head_aim_watch,a1=..,a1_out=..,a2=..,a2_out=..,f6f0=..,...,hmcs=N,player=yes|no  -- the angles in degrees as the game built them and as the probe
-// handed them on; the fields as they are. "nan" for anything not read.
-inline int formatWatch(const Fields& f, float shift1Rad, float shift2Rad, int hmcs, bool many, bool player, char* out, size_t cap) {
+// head_aim_watch,a1=..,a1_out=..,a2=..,a2_out=..,f6f0=..,...,hmcs=N,player=yes|no,src=player|camera|none<tail>  -- the angles in degrees as the game
+// built them and as the probe handed them on; the fields as they are, of the player's HMC, or while there is none of the camera's HMC when its table
+// is the HMC's (src says which). "nan" for anything not read. `tail` is formatCamera's part.
+inline int formatWatch(const Fields& f, float shift1Rad, float shift2Rad, int hmcs, bool many, bool player, char* out, size_t cap,
+                       const char* src = "player", const char* tail = "") {
     if (!f.read)
-        return std::snprintf(out, cap, "head_aim_watch,a1=nan,a1_out=nan,a2=nan,a2_out=nan,fields=unread,hmcs=%d%s,player=%s", hmcs, many ? "+" : "",
-                             player ? "yes" : "no");
+        return std::snprintf(out, cap, "head_aim_watch,a1=nan,a1_out=nan,a2=nan,a2_out=nan,fields=unread,hmcs=%d%s,player=%s,src=none%s", hmcs,
+                             many ? "+" : "", player ? "yes" : "no", tail);
     const double a1 = double(f.f6f0) - double(f.f710), a2 = double(f.f70c) + double(f.f6fc);
     return std::snprintf(out, cap,
                          "head_aim_watch,a1=%.2f,a1_out=%.2f,a2=%.2f,a2_out=%.2f,f6f0=%.4f,f6fc=%.4f,f70c=%.4f,f710=%.4f,f748=%.4f,f754=%.4f,"
-                         "f764=%.4f,f768=%.4f,hmcs=%d%s,player=%s",
+                         "f764=%.4f,f768=%.4f,hmcs=%d%s,player=%s,src=%s%s",
                          a1 * kDegPerRad, (a1 + shift1Rad) * kDegPerRad, a2 * kDegPerRad, (a2 + shift2Rad) * kDegPerRad, f.f6f0, f.f6fc, f.f70c,
-                         f.f710, f.f748, f.f754, f.f764, f.f768, hmcs, many ? "+" : "", player ? "yes" : "no");
+                         f.f710, f.f748, f.f754, f.f764, f.f768, hmcs, many ? "+" : "", player ? "yes" : "no", src, tail);
 }
 
 // The 30 s window's counts.

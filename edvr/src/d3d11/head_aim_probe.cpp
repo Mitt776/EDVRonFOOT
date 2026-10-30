@@ -24,6 +24,7 @@ constexpr uintptr_t kSlotAngle2 = 0x5206B70, kAngle2 = 0x1A49040;   // HMC vf+0x
 constexpr uintptr_t kSlotEyeMatrix = 0x5200058, kEyeMatrix = 0xF893D0;   // the character eye's vf+0x20
 constexpr uintptr_t kCameraCall = 0x10743C2, kCameraReturn = 0x10743CB;   // mov rdx,[rax]; mov rcx,rax; call [rdx+0x20]
 constexpr uintptr_t kEyeToHmc = 0xD0;   // [eye - 0x58 + 0x128]
+constexpr uintptr_t kEyeTable = 0x5200038, kHmcTable = 0x5206AA8;   // what the eye's and the HMC's first quadword must be
 const uint8_t kAngle1Bytes[] = {0xF3, 0x0F, 0x10, 0x81, 0xF0, 0x06, 0x00, 0x00, 0xF3, 0x0F, 0x5C, 0x81, 0x10, 0x07, 0x00, 0x00, 0xC3};
 const uint8_t kAngle2Bytes[] = {0xF3, 0x0F, 0x10, 0x81, 0x0C, 0x07, 0x00, 0x00, 0xF3, 0x0F, 0x58, 0x81, 0xFC, 0x06, 0x00, 0x00, 0xC3};
 const uint8_t kEyeMatrixBytes[] = {0x48, 0x8D, 0x81, 0x68, 0x02, 0x00, 0x00, 0xC3};
@@ -51,6 +52,11 @@ std::atomic<uint64_t> g_latchMs{0};
 std::atomic<uintptr_t> g_census[hap::kSlots];
 std::atomic<bool> g_censusMany{false};
 std::atomic<uintptr_t> g_cameraEye{0};
+// The camera's HMC as the frame thread last read it, and whether a getter has been called on it since (set by the getters, so a crowd past the
+// census's slots cannot hide the player).
+std::atomic<uintptr_t> g_cameraCandidate{0};
+std::atomic<bool> g_cameraSeen{false};
+uintptr_t g_base = 0;
 std::atomic<uint64_t> g_calls1{0}, g_calls2{0}, g_playerCalls1{0};
 
 // The latch's own state (the provider's thread, under its mutex) and the window both it and the frame thread write.
@@ -75,6 +81,7 @@ void noteCensus(uintptr_t p) {
 float shiftFor(void* self, int angle) {
     const uintptr_t me = reinterpret_cast<uintptr_t>(self);
     noteCensus(me);
+    if (me == g_cameraCandidate.load(std::memory_order_relaxed)) g_cameraSeen.store(true, std::memory_order_relaxed);
     if (me != g_player.load(std::memory_order_relaxed) || g_latchAngle.load(std::memory_order_relaxed) != angle) return 0.0f;
     if (GetTickCount64() - g_latchMs.load(std::memory_order_relaxed) > kLatchFreshMs) return 0.0f;
     return g_latchRad.load(std::memory_order_relaxed);
@@ -187,6 +194,7 @@ void headAimProbeInstall(bool flatProfile) {
         return;
     }
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    g_base = base;
     if (!slotHolds(base + kSlotAngle1, base + kAngle1) || !slotHolds(base + kSlotAngle2, base + kAngle2) ||
         !bytesAre(base + kAngle1, kAngle1Bytes, sizeof(kAngle1Bytes)) || !bytesAre(base + kAngle2, kAngle2Bytes, sizeof(kAngle2Bytes))) {
         hap::formatInert("the angle getters or their table entries are not 334925's", line, sizeof(line));
@@ -232,6 +240,8 @@ void headAimProbeFrameBoundary() {
     static bool shiftOn = false;
     static int hmcs = 0;
     static bool many = false;
+    static hap::CameraCheck camera;
+    static uintptr_t cameraHmc = 0;
     char line[400];
 
     const Config& cfg = Config::get();
@@ -270,9 +280,19 @@ void headAimProbeFrameBoundary() {
         for (int i = 0; i < hap::kSlots; ++i) c.slot[i] = g_census[i].exchange(0, std::memory_order_relaxed);
         c.many = g_censusMany.exchange(false, std::memory_order_relaxed);
         const uintptr_t eye = g_cameraEye.exchange(0, std::memory_order_relaxed);
-        uintptr_t cameraHmc = 0;
+        const uintptr_t candidate = cameraHmc;
+        const bool candidateSeen = g_cameraSeen.exchange(false, std::memory_order_relaxed);
+        cameraHmc = 0;
         if (eye && !readBytes(eye + kEyeToHmc, &cameraHmc, sizeof(cameraHmc))) cameraHmc = 0;
-        const hap::Identity id = onFoot ? hap::identify(cameraHmc, c) : hap::Identity{};
+        uintptr_t eyeTable = 0, hmcTable = 0;
+        camera = hap::CameraCheck{};
+        camera.eye = eye != 0;
+        camera.eyeTable = eye && readBytes(eye, &eyeTable, sizeof(eyeTable)) && eyeTable == g_base + kEyeTable;
+        camera.hmc = cameraHmc != 0;
+        camera.hmcTable = cameraHmc && readBytes(cameraHmc, &hmcTable, sizeof(hmcTable)) && hmcTable == g_base + kHmcTable;
+        camera.seen = cameraHmc && candidateSeen && candidate == cameraHmc;
+        g_cameraCandidate.store(cameraHmc, std::memory_order_relaxed);
+        const hap::Identity id = onFoot ? hap::identify(cameraHmc, camera.seen, c) : hap::Identity{};
         hmcs = hap::countOf(c);
         many = c.many;
         player = id.player;
@@ -302,10 +322,14 @@ void headAimProbeFrameBoundary() {
     if (mode != hap::Mode::Off && onFoot && now - lastWatchMs >= 500) {
         lastWatchMs = now;
         hap::Fields f;
-        if (player) readFields(player, f);
+        const char* src = "none";
+        if (player && readFields(player, f)) src = "player";
+        else if (camera.hmcTable && readFields(cameraHmc, f)) src = "camera";
         const int angle = g_latchAngle.load(std::memory_order_relaxed);
         const float rad = shifting ? g_latchRad.load(std::memory_order_relaxed) : 0.0f;
-        hap::formatWatch(f, angle == 1 ? rad : 0.0f, angle == 2 ? rad : 0.0f, hmcs, many, player != 0, line, sizeof(line));
+        char tail[160];
+        hap::formatCamera(camera, tail, sizeof(tail));
+        hap::formatWatch(f, angle == 1 ? rad : 0.0f, angle == 2 ? rad : 0.0f, hmcs, many, player != 0, line, sizeof(line), src, tail);
         say(line);
     }
 
