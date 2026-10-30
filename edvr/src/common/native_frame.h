@@ -38,6 +38,12 @@
 // to 6 caller never learns of them, and a runtime that asks version 7 of a
 // d3d11.dll that refuses the shape steps down and reads "no turn" (0).
 #define EDVR_NATIVE_FRAME_VERSION_7 7u
+// Version 8 adds headAimPitchRad and headAimFeature to the END and nothing else
+// (the on-foot head aim feature, head_aim_signal.h; openspec change
+// on-foot-head-aim), under the same hand-copied-DLLs rule: a version 1 to 7
+// caller never learns of them, and a runtime that asks version 8 of a
+// d3d11.dll that refuses the shape steps down and reads "no tilt" (0).
+#define EDVR_NATIVE_FRAME_VERSION_8 8u
 
 // The game producer owns the device and generation passed at acquire. The
 // methods in the table are CPU-only and are called by the XR owner after the
@@ -112,6 +118,15 @@ struct EdvrNativeFrameOutput {
     // runtime's summary line.
     float headAimYawRad;
     uint32_t headAimProbe;
+    // Version 8 and later. The on-foot head aim feature (head_aim_signal.h):
+    // headAimPitchRad is the angle the runtime turns the head pose it gives
+    // the GAME by, about the seated space's horizontal (X) axis, after the
+    // yaw turn, already with the sign of the pitch compensation key; 0 (no
+    // tilt, the only value an older provider can mean) whenever the feature
+    // adds no tilt. headAimFeature 1 while the feature (not the probe) leads
+    // the frame, for the runtime's summary line.
+    float headAimPitchRad;
+    uint32_t headAimFeature;
 };
 
 // The size the fields through resubmitEnabled occupy, which is what a
@@ -141,6 +156,10 @@ struct EdvrNativeFrameOutput {
 // caller's struct is, with no tail padding before headAimYawRad.
 #define EDVR_NATIVE_FRAME_OUTPUT_SIZE_6 \
     ((uint32_t)offsetof(EdvrNativeFrameOutput, headAimYawRad))
+// The size the fields through headAimProbe occupy, which is what a version 7
+// caller's struct is, with no tail padding before headAimPitchRad.
+#define EDVR_NATIVE_FRAME_OUTPUT_SIZE_7 \
+    ((uint32_t)offsetof(EdvrNativeFrameOutput, headAimPitchRad))
 
 struct EdvrNativeFrameDecision {
     uint32_t size, version;

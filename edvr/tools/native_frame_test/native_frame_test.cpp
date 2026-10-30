@@ -133,7 +133,7 @@ int wmain(int argc, wchar_t** argv) {
     // a different XR-owner thread.  The provider must not use a producer-ID
     // gate for callbacks.
     EdvrNativeFrameOutput firstOutput{sizeof(firstOutput),
-                                      EDVR_NATIVE_FRAME_VERSION_7};
+                                      EDVR_NATIVE_FRAME_VERSION_8};
     HRESULT workerBegin = E_FAIL;
     HRESULT workerLatch = E_FAIL;
     EdvrNativeFrameDecision firstDecision{
@@ -163,9 +163,9 @@ int wmain(int argc, wchar_t** argv) {
     check(firstOutput.sceneReady && firstOutput.transitionEnabled &&
               firstOutput.resubmitEnabled,
           "scene and transition outputs");
-    check(firstOutput.version == EDVR_NATIVE_FRAME_VERSION_7 &&
+    check(firstOutput.version == EDVR_NATIVE_FRAME_VERSION_8 &&
               firstOutput.size == sizeof(firstOutput),
-          "version 7 answered in kind");
+          "version 8 answered in kind");
     check(firstOutput.trimOuterDeg == 7.0f &&
               firstOutput.trimNasalDeg == 0.0f &&
               firstOutput.trimVerticalDeg == 0.0f,
@@ -189,7 +189,7 @@ int wmain(int argc, wchar_t** argv) {
     EdvrNativeFrameInput lost = input(41, 7, 2, false);
     lost.physicalHead[0] = std::numeric_limits<float>::quiet_NaN();
     EdvrNativeFrameOutput lostOutput{sizeof(lostOutput),
-                                     EDVR_NATIVE_FRAME_VERSION_7};
+                                     EDVR_NATIVE_FRAME_VERSION_8};
     check(table.beginFrame(table.context, &lost, &lostOutput) == S_OK,
           "lost pose succeeds");
     EdvrNativeFrameDecision lostDecision{
@@ -200,7 +200,7 @@ int wmain(int argc, wchar_t** argv) {
     EdvrNativeFrameInput bad = input(41, 7, 3);
     bad.physicalHead[0] = 2.0f;
     EdvrNativeFrameOutput badOutput{sizeof(badOutput),
-                                    EDVR_NATIVE_FRAME_VERSION_7};
+                                    EDVR_NATIVE_FRAME_VERSION_8};
     check(table.beginFrame(table.context, &bad, &badOutput) == E_INVALIDARG,
           "non-rigid physical pose rejected");
 
@@ -287,8 +287,11 @@ int wmain(int argc, wchar_t** argv) {
               EDVR_NATIVE_FRAME_OUTPUT_SIZE_6,
           "version 6 adds exactly the aiming eye, its blend and the on-foot flag");
     check(EDVR_NATIVE_FRAME_OUTPUT_SIZE_6 + sizeof(float) + sizeof(uint32_t) ==
-              sizeof(EdvrNativeFrameOutput),
+              EDVR_NATIVE_FRAME_OUTPUT_SIZE_7,
           "version 7 adds exactly the head aim turn and the probe flag");
+    check(EDVR_NATIVE_FRAME_OUTPUT_SIZE_7 + sizeof(float) + sizeof(uint32_t) ==
+              sizeof(EdvrNativeFrameOutput),
+          "version 8 adds exactly the head aim tilt and the feature flag");
 
     // A runtime-only entry applies to any headset on that runtime with no
     // entry of its own; a key with no entry for the worn headset is no trim,
@@ -296,7 +299,7 @@ int wmain(int argc, wchar_t** argv) {
     edvr::Config::get().set("experimental.fov_trim_vertical", "oculus:3");
     edvr::Config::get().set("experimental.fov_trim_outer", "");
     edvr::Config::get().set("experimental.fov_trim_nasal", "virtualdesktopxr/meta-quest-3:9");
-    EdvrNativeFrameOutput trimOutput{sizeof(trimOutput), EDVR_NATIVE_FRAME_VERSION_7};
+    EdvrNativeFrameOutput trimOutput{sizeof(trimOutput), EDVR_NATIVE_FRAME_VERSION_8};
     EdvrNativeFrameInput trimFrame = input(41, 7, 10);
     check(table.beginFrame(table.context, &trimFrame, &trimOutput) == S_OK &&
               trimOutput.trimVerticalDeg == 3.0f && trimOutput.trimOuterDeg == 0.0f &&
@@ -320,14 +323,14 @@ int wmain(int argc, wchar_t** argv) {
           "a version 3 caller is answered in kind, its absent tail untouched");
 
     g_journalActive = g_onFootKnown = g_onFoot = true;
-    EdvrNativeFrameOutput onFootOutput{sizeof(onFootOutput), EDVR_NATIVE_FRAME_VERSION_7};
+    EdvrNativeFrameOutput onFootOutput{sizeof(onFootOutput), EDVR_NATIVE_FRAME_VERSION_8};
     EdvrNativeFrameInput onFootFrame = input(41, 7, 12);
     check(table.beginFrame(table.context, &onFootFrame, &onFootOutput) == S_OK &&
               onFootOutput.deferredPacing == 1,
           "weapon stability on foot defers pacing");
 
     g_onFoot = false;
-    EdvrNativeFrameOutput inShipOutput{sizeof(inShipOutput), EDVR_NATIVE_FRAME_VERSION_7};
+    EdvrNativeFrameOutput inShipOutput{sizeof(inShipOutput), EDVR_NATIVE_FRAME_VERSION_8};
     EdvrNativeFrameInput inShipFrame = input(41, 7, 13);
     check(table.beginFrame(table.context, &inShipFrame, &inShipOutput) == S_OK &&
               inShipOutput.deferredPacing == 0,
@@ -335,7 +338,7 @@ int wmain(int argc, wchar_t** argv) {
 
     g_onFoot = true;
     edvr::Config::get().set("fix.weapon_stability", "0");
-    EdvrNativeFrameOutput disabledOutput{sizeof(disabledOutput), EDVR_NATIVE_FRAME_VERSION_7};
+    EdvrNativeFrameOutput disabledOutput{sizeof(disabledOutput), EDVR_NATIVE_FRAME_VERSION_8};
     EdvrNativeFrameInput disabledFrame = input(41, 7, 14);
     check(table.beginFrame(table.context, &disabledFrame, &disabledOutput) == S_OK &&
               disabledOutput.deferredPacing == 0,
@@ -373,7 +376,7 @@ int wmain(int argc, wchar_t** argv) {
     // in a file still works -- Config reads it as the new name through the
     // moved-from map, which this rig does not register; tools/config_test does,
     // with the shipped tables.)
-    EdvrNativeFrameOutput newNames{sizeof(newNames), EDVR_NATIVE_FRAME_VERSION_7};
+    EdvrNativeFrameOutput newNames{sizeof(newNames), EDVR_NATIVE_FRAME_VERSION_8};
     EdvrNativeFrameInput newNamesFrame = input(41, 7, 18);
     check(table.beginFrame(table.context, &newNamesFrame, &newNames) == S_OK &&
               newNames.trimVerticalDeg == 3.0f,
@@ -384,7 +387,7 @@ int wmain(int argc, wchar_t** argv) {
     edvr::Config::get().set("fix.fov_trim_vertical", "oculus/meta-quest-3:9");
     edvr::Config::get().set("fix.fov_trim_outer", "oculus/meta-quest-3:9");
     edvr::Config::get().set("fix.fov_trim_nasal", "oculus/meta-quest-3:9");
-    EdvrNativeFrameOutput retiredNames{sizeof(retiredNames), EDVR_NATIVE_FRAME_VERSION_7};
+    EdvrNativeFrameOutput retiredNames{sizeof(retiredNames), EDVR_NATIVE_FRAME_VERSION_8};
     EdvrNativeFrameInput retiredFrame = input(41, 7, 19);
     check(table.beginFrame(table.context, &retiredFrame, &retiredNames) == S_OK &&
               retiredNames.trimVerticalDeg == 0.0f && retiredNames.trimOuterDeg == 0.0f &&
@@ -395,7 +398,7 @@ int wmain(int argc, wchar_t** argv) {
     {
         uint64_t seq = 40;
         auto ask5 = [&](float* fade) {
-            EdvrNativeFrameOutput o{sizeof(o), EDVR_NATIVE_FRAME_VERSION_7};
+            EdvrNativeFrameOutput o{sizeof(o), EDVR_NATIVE_FRAME_VERSION_8};
             o.fadeAlpha = -77.0f;   // a sentinel the answer must overwrite
             EdvrNativeFrameInput f = input(41, 7, ++seq);
             const HRESULT r = table.beginFrame(table.context, &f, &o);
@@ -448,7 +451,7 @@ int wmain(int argc, wchar_t** argv) {
 
         // ---- the aiming eye while LT is held on foot (aim_eye_signal.h; version 6) -------------------------------------------------------------------------
         auto ask6 = [&](EdvrNativeFrameOutput* o) {
-            *o = EdvrNativeFrameOutput{sizeof(*o), EDVR_NATIVE_FRAME_VERSION_7};
+            *o = EdvrNativeFrameOutput{sizeof(*o), EDVR_NATIVE_FRAME_VERSION_8};
             o->aimEye = 77; o->aimEyeBlend = -77.0f; o->aimOnFoot = 77;   // sentinels the answer must overwrite
             EdvrNativeFrameInput f = input(41, 7, ++seq);
             return table.beginFrame(table.context, &f, o);
@@ -480,34 +483,59 @@ int wmain(int argc, wchar_t** argv) {
         check(table.beginFrame(table.context, &fullAsV6Frame, &fullAsV6) == E_INVALIDARG, "...and a full-size struct claiming version 6 is refused");
         edvr::aim_eye::clear();
 
-        // ---- the head aim probe's turn (head_aim_signal.h; version 7) --------------------------------------------------------------------------------
+        // ---- the head aim's turn and tilt (head_aim_signal.h; versions 7 and 8) --------------------------------------------------------------------------
         static int latches = 0;
         static uint64_t latchedSequence = 0;
+        static uint32_t latchedVersion = 0;
+        static bool latchedHead = false;
+        static float latchedHeadFirst = -1.0f;
         auto ask7 = [&](EdvrNativeFrameOutput* o) {
-            *o = EdvrNativeFrameOutput{sizeof(*o), EDVR_NATIVE_FRAME_VERSION_7};
-            o->headAimYawRad = -77.0f; o->headAimProbe = 77;   // sentinels the answer must overwrite
+            *o = EdvrNativeFrameOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_7, EDVR_NATIVE_FRAME_VERSION_7};
+            o->headAimPitchRad = -77.0f; o->headAimFeature = 0xA5A5A5A5u;   // past a version 7 struct: the answer must leave them alone
             EdvrNativeFrameInput f = input(41, 7, ++seq);
             return table.beginFrame(table.context, &f, o);
         };
+        auto ask8 = [&](EdvrNativeFrameOutput* o, bool valid = true) {
+            *o = EdvrNativeFrameOutput{sizeof(*o), EDVR_NATIVE_FRAME_VERSION_8};
+            o->headAimYawRad = -77.0f; o->headAimProbe = 77; o->headAimPitchRad = -77.0f; o->headAimFeature = 77;   // sentinels the answer must overwrite
+            EdvrNativeFrameInput f = input(41, 7, ++seq, valid);
+            return table.beginFrame(table.context, &f, o);
+        };
         EdvrNativeFrameOutput t{};
-        check(ask7(&t) == S_OK && t.headAimYawRad == 0.0f && t.headAimProbe == 0, "NO PROBE REGISTERED: a version 7 caller reads no turn, no probe");
-        edvr::head_aim::registerLatch([](uint64_t sequence, uint64_t) {
-            ++latches; latchedSequence = sequence;
-            edvr::head_aim::Turn turn; turn.yawRad = -0.25f; turn.probe = 1; return turn;
+        check(ask8(&t) == S_OK && t.headAimYawRad == 0.0f && t.headAimProbe == 0 && t.headAimPitchRad == 0.0f && t.headAimFeature == 0,
+              "NO LATCH REGISTERED: a version 8 caller reads no turn, no tilt, no flags");
+        edvr::head_aim::registerLatch([](uint64_t sequence, uint64_t, const float* head, uint32_t version) {
+            ++latches; latchedSequence = sequence; latchedVersion = version; latchedHead = head != nullptr; latchedHeadFirst = head ? head[0] : -1.0f;
+            edvr::head_aim::Turn turn; turn.yawRad = -0.25f; turn.pitchRad = 0.125f; turn.probe = 1; turn.feature = 1; return turn;
         });
-        check(ask7(&t) == S_OK && t.headAimYawRad == -0.25f && t.headAimProbe == 1 && latches == 1 && latchedSequence == seq,
-              "A REGISTERED PROBE: the version 7 caller gets its turn, latched once with the frame's sequence");
+        check(ask8(&t) == S_OK && t.headAimYawRad == -0.25f && t.headAimProbe == 1 && t.headAimPitchRad == 0.125f && t.headAimFeature == 1 && latches == 1 &&
+                  latchedSequence == seq && latchedVersion == 8,
+              "A REGISTERED LATCH: the version 8 caller gets turn, tilt and both flags, latched once with the frame's sequence and the version 8");
+        check(latchedHead && latchedHeadFirst == input(41, 7, 1).physicalHead[0], "...and with the frame's real head pose");
+        check(ask8(&t, false) == S_OK && !latchedHead, "a frame with no pose latches with nullptr for the head");
+        const int before = latches;
+        check(ask7(&t) == S_OK && t.headAimYawRad == -0.25f && t.headAimProbe == 1 && latches == before + 1 && latchedVersion == 7 &&
+                  t.headAimPitchRad == -77.0f && t.headAimFeature == 0xA5A5A5A5u && t.size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_7 && t.version == EDVR_NATIVE_FRAME_VERSION_7,
+              "A VERSION 7 CALLER (a runtime from .36) gets the turn and the probe flag, the latch is told version 7, and the slots past its struct are untouched");
+        EdvrNativeFrameOutput fullAsV7{sizeof(fullAsV7), EDVR_NATIVE_FRAME_VERSION_7};
+        EdvrNativeFrameInput fullAsV7Frame = input(41, 7, ++seq);
+        check(table.beginFrame(table.context, &fullAsV7Frame, &fullAsV7) == E_INVALIDARG, "...and a full-size struct claiming version 7 is refused");
+        EdvrNativeFrameOutput v7AsV8{EDVR_NATIVE_FRAME_OUTPUT_SIZE_7, EDVR_NATIVE_FRAME_VERSION_8};
+        EdvrNativeFrameInput v7AsV8Frame = input(41, 7, ++seq);
+        check(table.beginFrame(table.context, &v7AsV8Frame, &v7AsV8) == E_INVALIDARG, "...and a version 7 sized struct claiming version 8 is refused");
         EdvrNativeFrameOutput v6c{EDVR_NATIVE_FRAME_OUTPUT_SIZE_6, EDVR_NATIVE_FRAME_VERSION_6};
         EdvrNativeFrameInput v6cFrame = input(41, 7, ++seq);
-        check(table.beginFrame(table.context, &v6cFrame, &v6c) == S_OK && latches == 1,
-              "A VERSION 6 CALLER never latches the probe: the game's angle is never shifted under a pose that cannot be turned back");
-        edvr::head_aim::registerLatch([](uint64_t, uint64_t) {
-            edvr::head_aim::Turn turn; turn.yawRad = std::numeric_limits<float>::quiet_NaN(); turn.probe = 7; return turn;
+        const int beforeV6 = latches;
+        check(table.beginFrame(table.context, &v6cFrame, &v6c) == S_OK && latches == beforeV6,
+              "A VERSION 6 CALLER never latches: the game's angle is never shifted under a pose that cannot be turned back");
+        edvr::head_aim::registerLatch([](uint64_t, uint64_t, const float*, uint32_t) {
+            edvr::head_aim::Turn turn; turn.yawRad = std::numeric_limits<float>::quiet_NaN(); turn.pitchRad = std::numeric_limits<float>::infinity();
+            turn.probe = 7; turn.feature = 9; return turn;
         });
-        check(ask7(&t) == S_OK && t.headAimYawRad == 0.0f && t.headAimProbe == 1, "a turn that is not a number reads 0; a probe flag reads 0 or 1");
+        check(ask8(&t) == S_OK && t.headAimYawRad == 0.0f && t.headAimPitchRad == 0.0f && t.headAimProbe == 1 && t.headAimFeature == 1,
+              "a turn or a tilt that is not a number reads 0; the flags read 0 or 1");
         edvr::head_aim::registerLatch(nullptr);
     }
-
     check(table.close(table.context) == S_OK && !edvr::glitchConsumerPresent(),
           "close retires announced consumer");
     check(table.close(table.context) == S_FALSE, "close is idempotent");

@@ -11,6 +11,12 @@
 // No direct call or jump to any of the three exists in the executable (checked 2026-10-31), so the tables are every way in. With `off` the getters
 // only call the original.
 //
+// THE FEATURE (openspec change on-foot-head-aim; head_aim_core.h, experimental.native_vr_on_foot_head_aim and _pitch_comp) rides the same hooks and the
+// same latch. When its key is not off and the runtime asked channel version 8 the latch runs the feature's step on the frame's head pose instead of the
+// probe's shift (the probe's shifts are ignored, its watch line still written, showing the angles the game got): angle 2 gets the head's turn added,
+// angle 1 becomes the head's tilt (blended by the level), and the latch answers the turn and the tilt the runtime turns the game's head pose back by.
+// A version 7 runtime never engages the feature (reason channel) and gets the probe exactly as in .36; with the feature's key off the probe is as it was.
+//
 // THREADS. The getters run on game threads: atomics only, no lock, no log. The provider's beginFrame latches the frame's shift
 // (head_aim_signal.h) and gets the turn for the runtime. The frame thread (headAimProbeFrameBoundary) reads the keys and the journal, identifies the
 // player once a second, publishes what the latch may do, and writes every line.

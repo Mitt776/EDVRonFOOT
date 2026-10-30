@@ -4,6 +4,7 @@
 // The position snap (on-foot-ads-position-snap): the wander kept once per press, the game's aiming eye back at the origin, the 0.5 m limit, the log fields.
 #include "../../src/openxr/aim_eye_shift.h"
 #include "../../src/openxr/native_frame_client.h"
+#include "../../src/d3d11/head_aim_core.h"
 #include <cmath>
 #include <limits>
 #include <string>
@@ -42,7 +43,7 @@ struct Provider {
   uint32_t maxVersion = 6, eye = 2, onFoot = 1; float blend = 1.0f; bool scribble = false;
   HRESULT answer(EdvrNativeFrameOutput& o) {
     if (o.version > maxVersion || o.version < EDVR_NATIVE_FRAME_VERSION_1) return E_INVALIDARG;
-    const uint32_t want = o.version == 7 ? uint32_t(sizeof(o)) : o.version == 6 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_6 : o.version == 5 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_5 : o.version == 4 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_4
+    const uint32_t want = o.version == 8 ? uint32_t(sizeof(o)) : o.version == 7 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_7 : o.version == 6 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_6 : o.version == 5 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_5 : o.version == 4 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_4
       : o.version == 3 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_3 : o.version == 2 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_2 : EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
     if (o.size != want) return E_INVALIDARG;
     if (o.version >= 6 || scribble) { o.aimEye = eye; o.aimEyeBlend = blend; o.aimOnFoot = onFoot; }
@@ -250,8 +251,9 @@ template<class Check> void runAimEyeCases(Check&& check) {
   }
 }
 
-// The head aim probe, runtime side (aim_eye_shift.h; openspec change on-foot-head-aim-probe): the turn of the game's head pose about the seated vertical,
-// the version ladder against a d3d11.dll of either age (6/7), and the runtime's line.
+// The head aim, runtime side (aim_eye_shift.h; openspec changes on-foot-head-aim-probe and on-foot-head-aim): the turn of the game's head pose about the
+// seated vertical and the tilt about the horizontal (their order, and end to end with head_aim_core.h), the version ladder against a d3d11.dll of any
+// age (6/7/8), and the runtime's line.
 template<class Check> void runHeadAimCases(Check&& check) {
   using namespace aim_fixture;
   const double k = 3.14159265358979323846 / 180.0;
@@ -289,51 +291,176 @@ template<class Check> void runHeadAimCases(Check&& check) {
     turnAboutVertical(z, std::numeric_limits<double>::quiet_NaN());
     check(same(z, start, 0.0), "0 and an angle that is not a number leave the pose alone");
   }
-  // ---- the ladder: runtime 7 against a d3d11.dll of either age (6/7) ----------------------------------------------------------------------------------------
+  // ---- the tilt: turnAboutHorizontal (openspec change on-foot-head-aim) -------------------------------------------------------------------------------------
+  {
+    auto tiltPose = [&](double upDeg, double x, double y, double z) {
+      // R_x(+up): a head looking `up` degrees above the horizon.
+      const double c = std::cos(upDeg * k), s = std::sin(upDeg * k);
+      vr::HmdMatrix34_t m{};
+      m.m[0][0] = 1.0f; m.m[1][1] = float(c); m.m[1][2] = float(-s); m.m[2][1] = float(s); m.m[2][2] = float(c);
+      m.m[0][3] = float(x); m.m[1][3] = float(y); m.m[2][3] = float(z);
+      return m;
+    };
+    auto identityRotation = [](const vr::HmdMatrix34_t& a, double eps) {
+      for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+          if (std::fabs(double(a.m[i][j]) - (i == j ? 1.0 : 0.0)) > eps) return false;
+      return true;
+    };
+    vr::HmdMatrix34_t up = tiltPose(20, 0.0, 0.0, 0.0);
+    turnAboutHorizontal(up, -20 * k);
+    check(identityRotation(up, 1e-5), "TILT: a head 20 degrees up (R_x(+20)) turned by the game's angle 1 of -20 gives the identity rotation");
+    // 45 right and 30 up: pose = R_y(-45) * R_x(+30). The yaw turn by +45 (angle 2), then the tilt by -30 (angle 1) gives the identity.
+    const vr::HmdMatrix34_t rx30 = tiltPose(30, 0.0, 0.0, 0.0);
+    vr::HmdMatrix34_t both{};
+    {
+      const double c = std::cos(-45 * k), s = std::sin(-45 * k);
+      const double ry[3][3] = {{c, 0, s}, {0, 1, 0}, {-s, 0, c}};
+      for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) {
+          double v = 0;
+          for (int n = 0; n < 3; ++n) v += ry[i][n] * rx30.m[n][j];
+          both.m[i][j] = float(v);
+        }
+    }
+    vr::HmdMatrix34_t b = both;
+    turnAboutVertical(b, 45 * k);
+    turnAboutHorizontal(b, -30 * k);
+    check(identityRotation(b, 1e-5), "45 RIGHT AND 30 UP: the turn by angle 2 (+45), then the tilt by angle 1 (-30), gives the identity rotation");
+    vr::HmdMatrix34_t wrongOrder = both;
+    turnAboutHorizontal(wrongOrder, -30 * k);
+    turnAboutVertical(wrongOrder, 45 * k);
+    check(!identityRotation(wrongOrder, 1e-3), "the other order does not (the order matters: turn first, then tilt)");
+    // End to end: the angles extracted from that pose by head_aim_core.h, through its own outputs, bring the rotation back.
+    {
+      float p[12];
+      for (int r = 0; r < 3; ++r) { for (int c = 0; c < 4; ++c) p[r * 4 + c] = both.m[r][c]; }
+      edvr::ha::Angles a;
+      check(edvr::ha::anglesFromPose(p, &a) && std::fabs(a.yaw - 45 * k) < 1e-5 && std::fabs(a.pitchUp - 30 * k) < 1e-5,
+            "the core reads 45 right and 30 up out of that pose");
+      edvr::ha::State st;
+      edvr::ha::Inputs in;
+      in.key = edvr::ha::Key::Raw; in.nativeOnFoot = in.journalKnown = in.journalOnFoot = in.player = in.channel8 = true; in.focusKnown = true; in.head = p;
+      edvr::ha::Output o;
+      for (int i = 0; i < 40; ++i) { in.nowMs = 1000 + 28 * i; o = edvr::ha::step(st, in); }
+      const float orig = 0.0f;   // the stick holds the tilt at 0
+      const float added = edvr::ha::pitchAdded(orig, o.pitchTarget, o.level);
+      check(std::fabs(double(o.yawAdded) - 45 * k) < 1e-5 && std::fabs(double(added) + 30 * k) < 1e-5, "the core's yaw added is +45 and its pitch added -30");
+      vr::HmdMatrix34_t e = both;
+      turnAboutVertical(e, double(o.yawAdded));
+      turnAboutHorizontal(e, double(edvr::ha::runtimePitch(edvr::ha::PitchComp::Plus, added)));
+      check(identityRotation(e, 1e-4), "END TO END, sign plus: the core's numbers through both turns give the identity rotation");
+      vr::HmdMatrix34_t m = both;
+      turnAboutVertical(m, double(o.yawAdded));
+      turnAboutHorizontal(m, double(edvr::ha::runtimePitch(edvr::ha::PitchComp::Minus, added)));
+      check(!identityRotation(m, 1e-2), "sign minus does not (the flight picks the sign)");
+      vr::HmdMatrix34_t n = both;
+      turnAboutVertical(n, double(o.yawAdded));
+      turnAboutHorizontal(n, double(edvr::ha::runtimePitch(edvr::ha::PitchComp::Off, added)));
+      check(!identityRotation(n, 1e-2), "sign off leaves the tilt in the pose");
+    }
+    vr::HmdMatrix34_t t0 = tiltPose(20, 0.3, 1.2, -0.5);
+    const vr::HmdMatrix34_t keep = t0;
+    turnAboutHorizontal(t0, 17 * k);
+    turnAboutHorizontal(t0, -17 * k);
+    check(same(t0, keep, 1e-5), "TILT: +17 then -17 degrees gives the pose back");
+    vr::HmdMatrix34_t carried = tiltPose(0, 0.0, 0.0, -1.0);
+    turnAboutHorizontal(carried, 90 * k);
+    check(std::fabs(carried.m[0][3]) < 1e-5 && std::fabs(carried.m[1][3] - 1.0) < 1e-5 && std::fabs(carried.m[2][3]) < 1e-5,
+          "a head 1 m ahead (-Z) is carried round the X axis: +90 degrees puts it 1 m up, the x kept");
+    vr::HmdMatrix34_t q = headPose(30, 20, 0.1, 1.2, -0.3);
+    turnAboutHorizontal(q, 37 * k);
+    bool ortho = true;
+    for (int a = 0; a < 3; ++a)
+      for (int c = 0; c < 3; ++c) {
+        double d = 0;
+        for (int r = 0; r < 3; ++r) d += double(q.m[r][a]) * double(q.m[r][c]);
+        if (std::fabs(d - (a == c ? 1.0 : 0.0)) > 1e-5) ortho = false;
+      }
+    check(ortho, "the tilted rotation stays orthonormal");
+    vr::HmdMatrix34_t z = tiltPose(20, 0.3, 1.2, -0.5);
+    const vr::HmdMatrix34_t zKeep = z;
+    turnAboutHorizontal(z, 0.0);
+    turnAboutHorizontal(z, std::numeric_limits<double>::quiet_NaN());
+    turnAboutHorizontal(z, std::numeric_limits<double>::infinity());
+    check(same(z, zKeep, 0.0), "TILT: 0, an angle that is not a number and infinity leave the pose alone");
+  }
+  // ---- the ladder: runtime 8 against a d3d11.dll of either age (6/7/8) -------------------------------------------------------------------------------------
   {
     using Client = edvr::openxr::NativeFrameClient;
-    struct P7 {
-      uint32_t maxVersion = 7; float yaw = 0.2f; uint32_t probe = 1;
+    struct P8 {
+      uint32_t maxVersion = 8; float yaw = 0.2f, pitch = -0.1f; uint32_t probe = 1, feature = 1;
       HRESULT answer(EdvrNativeFrameOutput& o) {
         if (o.version > maxVersion) return E_INVALIDARG;
-        const uint32_t want = o.version == 7 ? uint32_t(sizeof(o)) : o.version == 6 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_6 : 0u;
+        const uint32_t want = o.version == 8 ? uint32_t(sizeof(o)) : o.version == 7 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_7 : o.version == 6 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_6 : 0u;
         if (o.size != want) return E_INVALIDARG;
         o.aimEye = 2; o.aimEyeBlend = 1.0f; o.aimOnFoot = 1;
         if (o.version >= 7) { o.headAimYawRad = yaw; o.headAimProbe = probe; }
+        if (o.version >= 8) { o.headAimPitchRad = pitch; o.headAimFeature = feature; }
         return S_OK;
       }
     };
-    auto ladder = [&](P7& p, uint32_t& version, EdvrNativeFrameOutput& out) {
+    auto ladder = [&](P8& p, uint32_t& version, EdvrNativeFrameOutput& out) {
       return Client::beginLadder([&](EdvrNativeFrameOutput& o) { return p.answer(o); }, version, out);
     };
-    P7 p; uint32_t v = 7; EdvrNativeFrameOutput out{};
-    check(ladder(p, v, out) == S_OK && out.version == 7 && out.headAimYawRad == 0.2f && out.headAimProbe == 1 && out.aimEye == 2,
-          "RUNTIME 7, D3D11 7: the turn, the probe flag and the aim arrive");
-    P7 old; old.maxVersion = 6; v = 7;
-    check(ladder(old, v, out) == S_OK && out.version == 6 && v == 6 && out.headAimYawRad == 0.0f && out.headAimProbe == 0 && out.aimEye == 2,
-          "RUNTIME 7, D3D11 6: one step down, the aim still arrives, no turn");
-    P7 bad; bad.yaw = std::numeric_limits<float>::infinity(); bad.probe = 9; v = 7;
-    check(ladder(bad, v, out) == S_OK && out.headAimYawRad == 0.0f && out.headAimProbe == 0, "a turn that is not finite, or a flag above 1, reads no turn");
+    P8 p; uint32_t v = 8; EdvrNativeFrameOutput out{};
+    check(ladder(p, v, out) == S_OK && out.version == 8 && out.headAimYawRad == 0.2f && out.headAimProbe == 1 && out.headAimPitchRad == -0.1f &&
+              out.headAimFeature == 1 && out.aimEye == 2,
+          "RUNTIME 8, D3D11 8: the turn, the tilt, both flags and the aim arrive");
+    P8 d7; d7.maxVersion = 7; v = 8;
+    check(ladder(d7, v, out) == S_OK && out.version == 7 && v == 7 && out.headAimYawRad == 0.2f && out.headAimProbe == 1 && out.headAimPitchRad == 0.0f &&
+              out.headAimFeature == 0,
+          "RUNTIME 8, OLD D3D11 (7): one step down, the probe's turn still arrives, the tilt reads 0 and the feature flag 0");
+    P8 d6; d6.maxVersion = 6; v = 8;
+    check(ladder(d6, v, out) == S_OK && out.version == 6 && v == 6 && out.headAimYawRad == 0.0f && out.headAimProbe == 0 && out.headAimPitchRad == 0.0f &&
+              out.headAimFeature == 0 && out.aimEye == 2,
+          "RUNTIME 8, D3D11 6: two steps down, the aim still arrives, no turn, no tilt");
+    P8 bad; bad.pitch = std::numeric_limits<float>::infinity(); bad.feature = 9; v = 8;
+    check(ladder(bad, v, out) == S_OK && out.headAimPitchRad == 0.0f && out.headAimFeature == 0 && out.headAimYawRad == 0.2f,
+          "a tilt that is not finite, or a flag above 1, reads no tilt (and leaves the turn)");
+    P8 nan; nan.pitch = std::numeric_limits<float>::quiet_NaN(); v = 8;
+    check(ladder(nan, v, out) == S_OK && out.headAimPitchRad == 0.0f, "a NaN tilt reads 0");
+    P8 badYaw; badYaw.yaw = std::numeric_limits<float>::infinity(); badYaw.probe = 9; v = 8;
+    check(ladder(badYaw, v, out) == S_OK && out.headAimYawRad == 0.0f && out.headAimProbe == 0, "a turn that is not finite, or a flag above 1, reads no turn");
   }
   // ---- the runtime's line ---------------------------------------------------------------------------------------------------------------------------------
   {
     std::vector<std::string> lines;
     auto sink = [&](const char* line) { lines.emplace_back(line); };
     HeadAimLog log;
-    log.frame(7, 0, 0.0, 1000, sink);
-    log.frame(7, 0, 0.0, 31000, sink);
-    check(lines.empty(), "probe off, channel 7: no line");
-    log.frame(7, 1, 10 * k, 32000, sink);
-    log.frame(7, 1, -5 * k, 33000, sink);
-    log.frame(7, 1, 0.0, 61000, sink);
-    check(lines.size() == 1 && lines[0] == "head_aim_runtime,frames=3,probe=3,turned=2,max_deg=10.0,channel=7\n",
-          "THE PROBE ACTING: frames, probe frames, turned frames and the largest turn of the window");
+    log.frame(8, 0, 0, 0.0, 0.0, 1000, sink);
+    log.frame(8, 0, 0, 0.0, 0.0, 31000, sink);
+    check(lines.empty(), "probe and feature off, channel 8: no line");
+    log.frame(8, 1, 0, 10 * k, 0.0, 32000, sink);
+    log.frame(8, 1, 0, -5 * k, 0.0, 33000, sink);
+    log.frame(8, 1, 0, 0.0, 0.0, 61000, sink);
+    check(lines.size() == 1 && lines[0] == "head_aim_runtime,frames=3,probe=3,turned=2,max_deg=10.0,channel=8,pitched=0,max_pitch_deg=0.0\n",
+          "THE PROBE ACTING: frames, probe frames, turned frames and the largest turn of the window, no tilt");
+    HeadAimLog feature;
+    lines.clear();
+    feature.frame(8, 0, 1, 10 * k, -30 * k, 1000, sink);
+    feature.frame(8, 0, 1, -20 * k, 12 * k, 2000, sink);
+    feature.frame(8, 0, 1, 0.0, 0.0, 31000, sink);
+    check(lines.size() == 1 && lines[0] == "head_aim_runtime,frames=3,probe=0,turned=2,max_deg=20.0,channel=8,pitched=2,max_pitch_deg=30.0\n",
+          "THE FEATURE ACTING: turned and pitched frames and the largest of each, written without the probe");
+    HeadAimLog next;
+    lines.clear();
+    next.frame(8, 0, 1, 1 * k, 1 * k, 0, sink);
+    next.frame(8, 0, 0, 0.0, 0.0, 30000, sink);
+    next.frame(8, 0, 0, 0.0, 0.0, 60000, sink);
+    check(lines.size() == 1 && lines.back().find("pitched=1,max_pitch_deg=1.0") != std::string::npos, "the window resets after a line (the second window is quiet and writes nothing)");
     HeadAimLog older;
     lines.clear();
-    older.frame(6, 0, 0.0, 0, sink);
-    older.frame(6, 0, 0.0, 30000, sink);
-    check(lines.size() == 1 && lines[0] == "head_aim_runtime,frames=2,probe=0,turned=0,max_deg=0.0,channel=6\n",
-          "AN OLDER D3D11.DLL: the line comes anyway, saying the turn never reached the runtime");
+    older.frame(7, 0, 0, 0.0, 0.0, 0, sink);
+    older.frame(7, 0, 0, 0.0, 0.0, 30000, sink);
+    check(lines.size() == 1 && lines[0] == "head_aim_runtime,frames=2,probe=0,turned=0,max_deg=0.0,channel=7,pitched=0,max_pitch_deg=0.0\n",
+          "AN OLDER D3D11.DLL (7): the line comes anyway, saying the tilt never reached the runtime");
+    HeadAimLog oldest;
+    lines.clear();
+    oldest.frame(6, 0, 0, 0.0, 0.0, 0, sink);
+    oldest.frame(6, 0, 0, 0.0, 0.0, 30000, sink);
+    check(lines.size() == 1 && lines[0] == "head_aim_runtime,frames=2,probe=0,turned=0,max_deg=0.0,channel=6,pitched=0,max_pitch_deg=0.0\n",
+          "AN OLDER D3D11.DLL (6): the line comes anyway");
   }
 }
 }  // namespace edvr::openxr::test

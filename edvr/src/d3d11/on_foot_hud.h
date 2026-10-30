@@ -31,10 +31,16 @@ namespace edvr {
 
 namespace detail {
 extern std::atomic<bool> g_onFootHudWants;
+extern std::atomic<bool> g_onFootMenuHeld;
 }
 
 // The draw path's one load: on foot (journal), native VR on foot on, the HUD key not off.
 inline bool onFootHudWantsDraws() { return detail::g_onFootHudWants.load(std::memory_order_relaxed); }
+
+// A menu layer on foot (the lift, the answers, the dialog, the mission, the trader, the biologist, the arms: any layer but the HUD) is held -- shown
+// or kept by its hold, not merely drawn this frame. Set by the door's decision each frame, dropped when the HUD does not want draws (the head aim,
+// head_aim_probe.cpp, lets go of the aim while it holds).
+inline bool onFootMenuHeld() { return detail::g_onFootMenuHeld.load(std::memory_order_relaxed); }
 
 // `eye`: the bound target is an eye texture (vscreen's rtv0Eye); `count`: the draw's index (or vertex) count. True: withhold this
 // draw (the trader's menu at the head), the caller returns DrawVerdict::kSkip.

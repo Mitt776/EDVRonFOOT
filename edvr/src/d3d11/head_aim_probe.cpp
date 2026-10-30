@@ -1,10 +1,14 @@
-// The on-foot head aim probe: the table entries, the getters, the latch and the frame thread's step (head_aim_probe.h says what and why).
+// The on-foot head aim probe and, on the same hooks, the head aim feature: the table entries, the getters, the latch and the frame thread's step
+// (head_aim_probe.h says what and why).
 #include "head_aim_probe.h"
 #include "head_aim_probe_core.h"
+#include "head_aim_core.h"
 #include "journal_watch.h"
+#include "on_foot_hud.h"
 #include "../common/config.h"
 #include "../common/head_aim_signal.h"
 #include "../common/log.h"
+#include "../common/native_frame.h"
 #include <windows.h>
 #include <intrin.h>
 #include <atomic>
@@ -44,10 +48,21 @@ uintptr_t g_cameraReturnAddress = 0;
 std::atomic<int> g_mode{int(hap::Mode::Off)}, g_comp{int(hap::Comp::Off)};
 std::atomic<bool> g_allowed{false}, g_onFoot{false};
 std::atomic<uintptr_t> g_player{0};
+// The feature (head_aim_core.h), published by the frame thread, read by the latch.
+std::atomic<int> g_featKey{int(ha::Key::Off)}, g_featComp{int(ha::PitchComp::Plus)};
+std::atomic<bool> g_menu{false}, g_focusKnown{false};
+std::atomic<uint32_t> g_focus{0};
 // Written by the latch, read by the getters.
 std::atomic<int> g_latchAngle{0};
 std::atomic<float> g_latchRad{0.0f};
 std::atomic<uint64_t> g_latchMs{0};
+// The feature's frame as the latch made it (read by the getters, and by the frame thread for its lines): who leads the frame, the yaw added to angle 2,
+// the tilt the head asks angle 1 to be (the game's sign) and the level that blends it in, the tilt added in that frame, and the first shut gate.
+std::atomic<bool> g_featLead{false};
+std::atomic<float> g_featYaw{0.0f}, g_featTarget{0.0f}, g_featLevel{0.0f}, g_featPitchAdded{0.0f};
+std::atomic<int> g_featReason{int(ha::Reason::Key)};
+// The player's angle 1 as the game built it, from the last getter call on the player (the latch needs it for the tilt added).
+std::atomic<float> g_lastOrig1{0.0f};
 // Written by the getters and the eye's matrix getter, taken by the frame thread and the latch.
 std::atomic<uintptr_t> g_census[hap::kSlots];
 std::atomic<bool> g_censusMany{false};
@@ -61,6 +76,9 @@ std::atomic<uint64_t> g_calls1{0}, g_calls2{0}, g_playerCalls1{0};
 
 // The latch's own state (the provider's thread, under its mutex) and the window both it and the frame thread write.
 hap::Ramp g_ramp;
+ha::State g_featState;   // the feature's filter and level: the latch only
+std::mutex g_featWindowMutex;
+ha::Window g_featWindow;
 uint64_t g_lastLatchMs = 0;
 LARGE_INTEGER g_qpcFrequency{}, g_qpcStart{};
 std::mutex g_windowMutex;
@@ -87,16 +105,31 @@ float shiftFor(void* self, int angle) {
     return g_latchRad.load(std::memory_order_relaxed);
 }
 
+// The feature leads the frame the latch last made, and that frame is fresh.
+bool featureLeads() {
+    return g_featLead.load(std::memory_order_relaxed) && GetTickCount64() - g_latchMs.load(std::memory_order_relaxed) <= kLatchFreshMs;
+}
+
+// The probe's shift is 0 while the feature leads (the latch latches no angle then). The player's angle 1 is remembered for the latch, and under the
+// feature becomes the head's tilt blended in by the level; angle 2 gets the head's turn on top of what the game built.
 float angle1Detour(void* self) {
     const float v = g_orig1(self);
     g_calls1.fetch_add(1, std::memory_order_relaxed);
-    if (reinterpret_cast<uintptr_t>(self) == g_player.load(std::memory_order_relaxed)) g_playerCalls1.fetch_add(1, std::memory_order_relaxed);
-    return v + shiftFor(self, 1);
+    const bool player = reinterpret_cast<uintptr_t>(self) == g_player.load(std::memory_order_relaxed);
+    if (player) g_playerCalls1.fetch_add(1, std::memory_order_relaxed);
+    const float shift = shiftFor(self, 1);
+    if (player) {
+        g_lastOrig1.store(v, std::memory_order_relaxed);
+        if (featureLeads()) return ha::blendPitch(v, g_featTarget.load(std::memory_order_relaxed), g_featLevel.load(std::memory_order_relaxed));
+    }
+    return v + shift;
 }
 float angle2Detour(void* self) {
     const float v = g_orig2(self);
     g_calls2.fetch_add(1, std::memory_order_relaxed);
-    return v + shiftFor(self, 2);
+    const float shift = shiftFor(self, 2);
+    if (reinterpret_cast<uintptr_t>(self) == g_player.load(std::memory_order_relaxed) && featureLeads()) return v + g_featYaw.load(std::memory_order_relaxed);
+    return v + shift;
 }
 void* eyeMatrixDetour(void* self) {
     if (reinterpret_cast<uintptr_t>(_ReturnAddress()) == g_cameraReturnAddress)
@@ -105,7 +138,60 @@ void* eyeMatrixDetour(void* self) {
 }
 
 // ---- the latch (the provider's beginFrame, once a runtime frame) -----------------------------------------------------------------------------------
-head_aim::Turn latch(uint64_t, uint64_t nowMs) {
+// The feature's step for this frame, when the key is not off or its level still runs out. Fills `out` and the atomics the getters read when the runtime
+// asked version 8 (only then can it turn the pose back by the tilt); a version 7 runtime gets the gates' answer (reason channel) and the probe leads.
+bool latchFeature(uint64_t nowMs, const float* head, uint32_t version, head_aim::Turn* out) {
+    const ha::Key key = ha::Key(g_featKey.load(std::memory_order_acquire));
+    if (key == ha::Key::Off && g_featState.level <= 0.0) {
+        g_featLead.store(false, std::memory_order_relaxed);
+        g_featLevel.store(0.0f, std::memory_order_relaxed);
+        g_featReason.store(int(ha::Reason::Key), std::memory_order_relaxed);
+        return false;
+    }
+    const ha::PitchComp comp = ha::PitchComp(g_featComp.load(std::memory_order_acquire));
+    const bool onFoot = g_onFoot.load(std::memory_order_relaxed);
+    ha::Inputs in;
+    in.key = key;
+    in.nativeOnFoot = in.journalKnown = in.journalOnFoot = onFoot;   // the frame thread's verdict on all three: a failure reads "ship"
+    in.player = g_player.load(std::memory_order_relaxed) != 0;
+    in.channel8 = version >= EDVR_NATIVE_FRAME_VERSION_8;
+    in.menu = g_menu.load(std::memory_order_relaxed);
+    in.focusKnown = g_focusKnown.load(std::memory_order_relaxed);
+    in.focus = g_focus.load(std::memory_order_relaxed);
+    in.head = head;
+    in.nowMs = nowMs;
+    const ha::Output o = ha::step(g_featState, in);
+    const bool lead = in.channel8;
+    float pitchAdded = 0.0f;
+    if (lead) {
+        pitchAdded = ha::pitchAdded(g_lastOrig1.load(std::memory_order_relaxed), o.pitchTarget, o.level);
+        g_featYaw.store(o.yawAdded, std::memory_order_relaxed);
+        g_featTarget.store(o.pitchTarget, std::memory_order_relaxed);
+        g_featLevel.store(o.level, std::memory_order_relaxed);
+        g_featPitchAdded.store(pitchAdded, std::memory_order_relaxed);
+        g_latchAngle.store(0, std::memory_order_relaxed);   // the probe's shifts are ignored while the feature leads
+        g_latchRad.store(0.0f, std::memory_order_relaxed);
+        g_latchMs.store(nowMs, std::memory_order_relaxed);
+        g_featLead.store(true, std::memory_order_release);
+        out->yawRad = o.yawAdded;
+        out->pitchRad = ha::runtimePitch(comp, pitchAdded);
+        out->probe = 0;
+        out->feature = o.level > 0.0f ? 1u : 0u;   // "acts", for the runtime's line: a feature that only waits at level 0 keeps it quiet
+    } else {
+        g_featLead.store(false, std::memory_order_relaxed);
+        g_featLevel.store(0.0f, std::memory_order_relaxed);
+    }
+    g_featReason.store(int(o.reason), std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(g_featWindowMutex);
+        ha::noteFrame(g_featWindow, o, pitchAdded, version);
+    }
+    return lead;
+}
+
+head_aim::Turn latch(uint64_t, uint64_t nowMs, const float* head, uint32_t requestVersion) {
+    head_aim::Turn featureTurn;
+    if (latchFeature(nowMs, head, requestVersion, &featureTurn)) return featureTurn;
     const hap::Mode mode = hap::Mode(g_mode.load(std::memory_order_acquire));
     const hap::Comp comp = hap::Comp(g_comp.load(std::memory_order_acquire));
     const bool allowed = g_allowed.load(std::memory_order_acquire);
@@ -242,6 +328,11 @@ void headAimProbeFrameBoundary() {
     static bool many = false;
     static hap::CameraCheck camera;
     static uintptr_t cameraHmc = 0;
+    static ha::Key featKey = ha::Key::Off;
+    static ha::PitchComp featComp = ha::PitchComp::Plus;
+    static bool saidFeatKeys = false, featOn = false;
+    static std::string badKey, badComp;   // the unknown values already said
+    static uint64_t featWindowBeganMs = 0;
     char line[400];
 
     const Config& cfg = Config::get();
@@ -263,6 +354,24 @@ void headAimProbeFrameBoundary() {
         mode = m;
         comp = c;
         nativeOnFoot = cfg.getBool("experimental.native_vr_on_foot", true);
+
+        // The feature's keys, live like the probe's. Unknown values read off / plus, said once per value.
+        const std::string rawFeat = cfg.getString("experimental.native_vr_on_foot_head_aim", "off");
+        const std::string rawPitch = cfg.getString("experimental.native_vr_on_foot_head_aim_pitch_comp", "plus");
+        bool validFeat = true, validPitch = true;
+        const ha::Key fk = ha::parseKey(rawFeat.c_str(), &validFeat);
+        const ha::PitchComp fc = ha::parsePitchComp(rawPitch.c_str(), &validPitch);
+        if (!validFeat && rawFeat != badKey) { ha::formatUnknownKey("native_vr_on_foot_head_aim", rawFeat.c_str(), "off", line, sizeof(line)); say(line); }
+        if (!validPitch && rawPitch != badComp) { ha::formatUnknownKey("native_vr_on_foot_head_aim_pitch_comp", rawPitch.c_str(), "plus", line, sizeof(line)); say(line); }
+        badKey = validFeat ? std::string() : rawFeat;
+        badComp = validPitch ? std::string() : rawPitch;
+        if (!saidFeatKeys || fk != featKey || fc != featComp) {
+            ha::formatKeys(fk, fc, line, sizeof(line));
+            say(line);
+            saidFeatKeys = true;
+        }
+        featKey = fk;
+        featComp = fc;
     }
 
     hap::Gate gate;
@@ -306,6 +415,14 @@ void headAimProbeFrameBoundary() {
     gate.player = player != 0;
     g_player.store(player, std::memory_order_relaxed);
     g_onFoot.store(onFoot, std::memory_order_relaxed);
+    // The feature's gates that only the frame thread can read: a menu layer held on foot, and the journal's GuiFocus (unknown reads open).
+    uint32_t focus = 0;
+    const bool focusKnown = journalGuiFocus(&focus);
+    g_menu.store(onFootMenuHeld(), std::memory_order_relaxed);
+    g_focus.store(focus, std::memory_order_relaxed);
+    g_focusKnown.store(focusKnown, std::memory_order_relaxed);
+    g_featComp.store(int(featComp), std::memory_order_release);
+    g_featKey.store(int(featKey), std::memory_order_release);
     g_comp.store(int(comp), std::memory_order_release);
     g_mode.store(int(mode), std::memory_order_release);
     g_allowed.store(hap::shiftAllowed(gate), std::memory_order_release);
@@ -316,6 +433,16 @@ void headAimProbeFrameBoundary() {
         hap::formatShiftEdge(shifting, mode, comp, line, sizeof(line));
         say(line);
         shiftOn = shifting;
+    }
+
+    // The feature's edges, as the latch made them: the level leaving 0 and coming back to it (the reason of the first shut gate at the fall).
+    const bool featFresh = now - g_latchMs.load(std::memory_order_relaxed) <= kLatchFreshMs;
+    const bool featNow = g_featLevel.load(std::memory_order_relaxed) > 0.0f && featFresh;
+    if (featNow != featOn) {
+        // A latch gone quiet (no runtime asking) is the channel's doing.
+        ha::formatEdge(featNow, featFresh ? ha::Reason(g_featReason.load(std::memory_order_relaxed)) : ha::Reason::Channel, line, sizeof(line));
+        say(line);
+        featOn = featNow;
     }
 
     // The watch line, twice a second on foot.
@@ -329,7 +456,13 @@ void headAimProbeFrameBoundary() {
         const float rad = shifting ? g_latchRad.load(std::memory_order_relaxed) : 0.0f;
         char tail[160];
         hap::formatCamera(camera, tail, sizeof(tail));
-        hap::formatWatch(f, angle == 1 ? rad : 0.0f, angle == 2 ? rad : 0.0f, hmcs, many, player != 0, line, sizeof(line), src, tail);
+        // While the feature leads the angles shown are the ones the game got from it, not the probe's shift.
+        float shown1 = angle == 1 ? rad : 0.0f, shown2 = angle == 2 ? rad : 0.0f;
+        if (featFresh && g_featLead.load(std::memory_order_relaxed)) {
+            shown1 = g_featPitchAdded.load(std::memory_order_relaxed);
+            shown2 = g_featYaw.load(std::memory_order_relaxed);
+        }
+        hap::formatWatch(f, shown1, shown2, hmcs, many, player != 0, line, sizeof(line), src, tail);
         say(line);
     }
 
@@ -347,6 +480,22 @@ void headAimProbeFrameBoundary() {
         w.calls2 = g_calls2.exchange(0, std::memory_order_relaxed);
         if (mode != hap::Mode::Off && onFoot) {
             hap::formatSummary(w, line, sizeof(line));
+            say(line);
+        }
+    }
+
+    // The feature's summary, every 30 s on foot with its key not off, zeros included (channel=7 or frames=0 then say why nothing acted).
+    if (!featWindowBeganMs) featWindowBeganMs = now;
+    if (now - featWindowBeganMs >= 30000) {
+        featWindowBeganMs = now;
+        ha::Window fw;
+        {
+            std::lock_guard<std::mutex> lock(g_featWindowMutex);
+            fw = g_featWindow;
+            g_featWindow = ha::Window{};
+        }
+        if (featKey != ha::Key::Off && onFoot) {
+            ha::formatSummary(fw, line, sizeof(line));
             say(line);
         }
     }

@@ -13,6 +13,7 @@
 // game's head pose is turned by about the seated space's vertical (EdvrNativeFrameOutput::headAimYawRad, version 7), so that the game's camera (head
 // pose x the character's eye) can be held still while the character turns. The whole pose turns, rotation and translation, about the axis through the
 // seated origin, last of all, after the eye shift and the snap. Never the layer.
+// The head aim feature (openspec change on-foot-head-aim): the same, then a second turn about the seated X axis by headAimPitchRad (version 8).
 // Pure: no OpenXR calls, no globals, so a rig can drive every case.
 #include "geometry_snapshot.h"
 #include <cmath>
@@ -72,36 +73,57 @@ inline void turnAboutVertical(vr::HmdMatrix34_t& pose, double yawRad) {
   }
 }
 
-// The head aim probe's runtime line:
-//   head_aim_runtime,frames=F,probe=P,turned=T,max_deg=M,channel=C   every 30 s while the d3d11 half says the probe acts (probe > 0), or ALWAYS when
-//     the channel is below 7 (an older d3d11.dll cannot turn anything): channel=6 with turned=0 then reads "the turn never reached the runtime".
+// Turns a head-to-tracking pose about the tracking space's X axis (the horizontal) through the origin by `pitchRad`: pose = R_x(pitchRad) * pose,
+// rotation and translation alike, right-handed like turnAboutVertical (y' = c*y - s*z, z' = s*y + c*z). A head 20 degrees up is R_x(+20), so the
+// angle -20 (the game's tilt, + = down) brings it back to the identity. 0 and anything that is not a finite angle leave the pose alone.
+inline void turnAboutHorizontal(vr::HmdMatrix34_t& pose, double pitchRad) {
+  if (pitchRad == 0.0 || !std::isfinite(pitchRad)) return;
+  const double c = std::cos(pitchRad), s = std::sin(pitchRad);
+  for (int col = 0; col < 4; ++col) {
+    const double y = pose.m[1][col], z = pose.m[2][col];
+    pose.m[1][col] = float(c * y - s * z);
+    pose.m[2][col] = float(s * y + c * z);
+  }
+}
+
+// The head aim's runtime line:
+//   head_aim_runtime,frames=F,probe=P,turned=T,max_deg=M,channel=C,pitched=N,max_pitch_deg=X   every 30 s while the d3d11 half says the probe or the
+//     feature acts (probe or feature > 0), or ALWAYS when the channel is below 8 (an older d3d11.dll cannot tilt anything): channel=7 with pitched=0
+//     then reads "the tilt never reached the runtime", channel=6 "the turn never did either".
 class HeadAimLog {
  public:
   static constexpr uint64_t kWindowMs = 30000;
   template<class Sink>
-  void frame(uint32_t channel, uint32_t probe, double yawRad, uint64_t nowMs, Sink&& sink) {
+  void frame(uint32_t channel, uint32_t probe, uint32_t feature, double yawRad, double pitchRad, uint64_t nowMs, Sink&& sink) {
     if (!windowStarted_) { windowStarted_ = true; windowBegan_ = nowMs; }
     ++frames_;
     if (probe) ++probe_;
+    if (feature) ++feature_;
     if (yawRad != 0.0 && std::isfinite(yawRad)) {
       ++turned_;
       const double deg = std::fabs(yawRad) * 57.29577951308232;
       if (deg > maxDeg_) maxDeg_ = deg;
     }
+    if (pitchRad != 0.0 && std::isfinite(pitchRad)) {
+      ++pitched_;
+      const double deg = std::fabs(pitchRad) * 57.29577951308232;
+      if (deg > maxPitchDeg_) maxPitchDeg_ = deg;
+    }
     if (nowMs - windowBegan_ >= kWindowMs) {
-      if (probe_ || channel < 7) {
-        char line[160];
-        std::snprintf(line, sizeof(line), "head_aim_runtime,frames=%llu,probe=%llu,turned=%llu,max_deg=%.1f,channel=%u\n", (unsigned long long)frames_,
-                      (unsigned long long)probe_, (unsigned long long)turned_, maxDeg_, channel);
+      if (probe_ || feature_ || channel < 8) {
+        char line[200];
+        std::snprintf(line, sizeof(line), "head_aim_runtime,frames=%llu,probe=%llu,turned=%llu,max_deg=%.1f,channel=%u,pitched=%llu,max_pitch_deg=%.1f\n",
+                      (unsigned long long)frames_, (unsigned long long)probe_, (unsigned long long)turned_, maxDeg_, channel,
+                      (unsigned long long)pitched_, maxPitchDeg_);
         sink(line);
       }
-      windowBegan_ = nowMs; frames_ = probe_ = turned_ = 0; maxDeg_ = 0.0;
+      windowBegan_ = nowMs; frames_ = probe_ = feature_ = turned_ = pitched_ = 0; maxDeg_ = maxPitchDeg_ = 0.0;
     }
   }
  private:
   bool windowStarted_ = false;
-  uint64_t windowBegan_ = 0, frames_ = 0, probe_ = 0, turned_ = 0;
-  double maxDeg_ = 0.0;
+  uint64_t windowBegan_ = 0, frames_ = 0, probe_ = 0, feature_ = 0, turned_ = 0, pitched_ = 0;
+  double maxDeg_ = 0.0, maxPitchDeg_ = 0.0;
 };
 
 // A head further than this from the origin as LT is pressed is not "slid down in the chair": no snap for that press.

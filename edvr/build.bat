@@ -3088,6 +3088,21 @@ if errorlevel 1 ( echo [edvr] ERROR: head aim probe test build failed & exit /b 
 "%BUILD%\head_aim_probe_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_head_aim_test
+echo [edvr] === head_aim_test.exe ===
+REM EDVRonFOOT: build gate for the on-foot head aim (src\d3d11\head_aim_core.h, experimental.native_vr_on_foot_head_aim and _pitch_comp; temporary,
+REM openspec change on-foot-head-aim). Drives the pure half: both keys' reading (every value, empty, junk), the head's turn and tilt out of a pose
+REM (straight, 30 right, 20 up, both, with roll), the one-euro filter (rest noise damped, a fast turn arriving, no dead zone, no jump across 180
+REM degrees, raw = input), the ramp (0.5 s up and down) and each gate's reason, the 90 degree limit, the angle 1 blend and the tilt's sign, and the
+REM text of every line.
+if not exist "%OBJ%\headaim" mkdir "%OBJ%\headaim"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\headaim"\ /Fe"%BUILD%\head_aim_test.exe" ^
+    "tools\head_aim_test\head_aim_test.cpp" /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: head aim test build failed & exit /b 1 )
+"%BUILD%\head_aim_test.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_on_foot_markers_test
 echo [edvr] === on_foot_markers_test.exe ===
 REM EDVRonFOOT: build gate for the on-foot markers (src\d3d11\on_foot_markers.h; no key: on with native_vr_on_foot on foot). Part A

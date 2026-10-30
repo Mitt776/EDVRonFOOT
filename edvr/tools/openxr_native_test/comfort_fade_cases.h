@@ -16,7 +16,7 @@ struct Provider {
     ++calls;
     if(fail!=S_OK)return fail;
     if(o.version>maxVersion||o.version<EDVR_NATIVE_FRAME_VERSION_1)return E_INVALIDARG;
-    const uint32_t want=o.version==7?uint32_t(sizeof(o)):o.version==6?EDVR_NATIVE_FRAME_OUTPUT_SIZE_6:o.version==5?EDVR_NATIVE_FRAME_OUTPUT_SIZE_5:o.version==4?EDVR_NATIVE_FRAME_OUTPUT_SIZE_4:o.version==3?EDVR_NATIVE_FRAME_OUTPUT_SIZE_3:
+    const uint32_t want=o.version==8?uint32_t(sizeof(o)):o.version==7?EDVR_NATIVE_FRAME_OUTPUT_SIZE_7:o.version==6?EDVR_NATIVE_FRAME_OUTPUT_SIZE_6:o.version==5?EDVR_NATIVE_FRAME_OUTPUT_SIZE_5:o.version==4?EDVR_NATIVE_FRAME_OUTPUT_SIZE_4:o.version==3?EDVR_NATIVE_FRAME_OUTPUT_SIZE_3:
       o.version==2?EDVR_NATIVE_FRAME_OUTPUT_SIZE_2:EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
     if(o.size!=want)return E_INVALIDARG;
     o.sceneReady=1;
@@ -66,9 +66,9 @@ template<class Check> void runComfortFadeCases(Check&& check) {
     Provider p;p.fail=E_INVALIDARG;uint32_t v=6;EdvrNativeFrameOutput out{};
     check(ladder(p,v,out)==E_INVALIDARG&&v==1&&out.fadeAlpha==0.0f&&p.calls==6,"a provider that refuses every shape is tried down to version 1 and reads no fade");
   }
-  check(Client::ask(7).size==sizeof(EdvrNativeFrameOutput)&&Client::ask(7).version==7&&Client::ask(6).size==EDVR_NATIVE_FRAME_OUTPUT_SIZE_6&&Client::ask(6).version==6&&Client::ask(5).size==EDVR_NATIVE_FRAME_OUTPUT_SIZE_5&&Client::ask(5).version==5&&
+  check(Client::ask(8).size==sizeof(EdvrNativeFrameOutput)&&Client::ask(8).version==8&&Client::ask(7).size==EDVR_NATIVE_FRAME_OUTPUT_SIZE_7&&Client::ask(7).version==7&&Client::ask(6).size==EDVR_NATIVE_FRAME_OUTPUT_SIZE_6&&Client::ask(6).version==6&&Client::ask(5).size==EDVR_NATIVE_FRAME_OUTPUT_SIZE_5&&Client::ask(5).version==5&&
         Client::ask(4).size==EDVR_NATIVE_FRAME_OUTPUT_SIZE_4&&Client::ask(4).version==4&&
-        Client::ask(9).version==7&&Client::ask(0).version==1,"the shapes the client asks for: 7 is the whole struct, 6 stops before the probe slots, 5 before the aim slots, 4 before the fade slot, anything above is 7, 0 is 1");
+        Client::ask(9).version==8&&Client::ask(0).version==1,"the shapes the client asks for: 8 is the whole struct, 7 stops before the feature slots, 6 before the probe slots, 5 before the aim slots, 4 before the fade slot, anything above is 8, 0 is 1");
   check(Client::ask(6).fadeAlpha==0.0f,"a fresh ask carries fade 0 (no fade) until a provider says otherwise");
 }
 } // namespace edvr::openxr::test

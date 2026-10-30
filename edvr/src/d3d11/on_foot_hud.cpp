@@ -14,6 +14,7 @@
 namespace edvr {
 namespace detail {
 std::atomic<bool> g_onFootHudWants{false};
+std::atomic<bool> g_onFootMenuHeld{false};
 }
 
 namespace {
@@ -289,6 +290,7 @@ void onFootHudFrameBoundary() {
                        g_nativeOnFoot.load(std::memory_order_relaxed) && onFoot == 1;
     if (wants && !detail::g_onFootHudWants.load(std::memory_order_relaxed)) drawGateArm();
     detail::g_onFootHudWants.store(wants, std::memory_order_relaxed);
+    if (!wants) detail::g_onFootMenuHeld.store(false, std::memory_order_relaxed);   // the door does not run its decision then: no stale menu
 
     const uint64_t now = GetTickCount64();
     if (!windowStart) windowStart = now;
@@ -471,6 +473,11 @@ void decideLayers(ID3D11Device* device, ofh::Mode mode, float width) {
     }
     for (auto*& t : ranked.tex) t = nullptr;  // g_cur's, not this copy's to release
     ranked.withheldTex = nullptr;
+    // A menu layer (anything but the HUD) is held: shown, or kept by its hold. The head aim reads this (onFootMenuHeld).
+    bool menu = false;
+    for (int k = 0; k < ofh::kLayers; ++k)
+        if (ofh::Layer(k) != ofh::Layer::Hud && g_layers[k].show) menu = true;
+    detail::g_onFootMenuHeld.store(menu, std::memory_order_relaxed);
 }
 }  // namespace
 
