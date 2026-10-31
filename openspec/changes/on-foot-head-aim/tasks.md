@@ -77,7 +77,7 @@
   `Native OpenXR build and all gates passed` (`weapon_motion` — известный терпимый сбой).
 - [x] 5.2 Коммит по `edvr\AGENTS.md` (`git commit -F`), тег `v0.19.1-edvronfoot.37`, затем `build.bat --dll-only`.
   Проверка: `--dll-only` прошёл проверку квитанции.
-- [ ] 5.3 `python tools\install_edvr.py --target steam`, потом `--verify-only`. Проверка: `vr payload and profile
+- [x] 5.3 `python tools\install_edvr.py --target steam`, потом `--verify-only`. Проверка: `vr payload and profile
   verified`, стоит `.37`. После запуска игры `python tools\edvr_log.py --target steam --expect-build HEAD --grep
   "head aim"`: строки `hooked` и `head aim: key=…`.
 
@@ -107,8 +107,47 @@
   Итоги, знак наклона и `ruled out` — в `docs\research\native-vr-on-foot.md`. Проверка: в сводках `active` > 0,
   `channel=8`, наибольшие углы похожи на движения головы, в строке рантайма те же углы.
 
+## 7. Исправления после полёта `.37` (сборка `.38`)
+
+Полёт `.37` (2026-11-01): фича работала весь полёт (`active` = все кадры, `channel=8`), `on` и `raw` Диме оба
+приемлемы. Проблемы: мир дёргается при повороте головы; стик наклона сдвигает взгляд относительно ствола. Design,
+решения 10 и 11.
+
+- [x] 7.1 Счётчик такта (design, решение 10): в `head_aim_core.h` — чистая классификация кадра игры
+  (`cam_before`/`cam_after`/`cam_none`/`cam_multi`) и текст строки `head_aim_sync,…`; в `head_aim_probe.cpp` —
+  момент камеры в `eyeMatrixDetour` (адрес камеры), граница кадра в `headAimProbeFrameBoundary`, номер защёлки. Строка
+  раз в 30 с на ногах при ключе не `off`, с нулями. Проверка: случаи на стенде `head_aim_test`; сборка.
+- [x] 7.2 Ключ `experimental.native_vr_on_foot_head_aim_sync` = `latch`/`camera` (неизвестное → `latch` с флагом),
+  живой, `# ui:` в `edvr.ini`, слово «временный». В момент камеры — снимок углов фичи в силе (`yaw` и наклон для
+  рантайма); при `camera` защёлка отвечает рантайму снимком, если камера собиралась с прошлой защёлки, иначе своими
+  значениями. Строка `head aim: key=… pitch_comp=… sync=… stick_comp=…`. Проверка: стенд — разбор ключа и выбор
+  ответа в обоих режимах (чистая функция); самотест `# ui:` зелёный.
+- [x] 7.3 Ключ `experimental.native_vr_on_foot_head_aim_stick_comp` = `off`/`on` (неизвестное → `off` с флагом),
+  живой, `# ui:`: `off` — поправка `pitchAdded` как в `.37`, `on` — `pitchTarget·доля`. В сводку `head_aim_feature`
+  поле `stick_deg` в конце. Проверка: стенд — при `on` поправка не зависит от оригинала угла 1, при доле 0 обе 0;
+  тексты строк.
+- [x] 7.4 Доклад `docs\research\native-vr-on-foot.md`: раздел «Полёт `.37`» (итоги выше, цифры лога) и ключи `sync`,
+  `stick_comp` в `## Status` (не длиннее 60 строк); новые строки лога — в раздел фичи. Проверка: чтением.
+- [ ] 7.5 Полный `D:\Project VSC\EDVRonFOOT\edvr\build.bat --jobs 8`, коммит по `edvr\AGENTS.md`, тег
+  `v0.19.1-edvronfoot.38`, `--dll-only`, `install_edvr.py --target steam` и `--verify-only`; в живом `edvr.ini`
+  новые ключи — инструментом Edit. После запуска игры `edvr_log.py --expect-build HEAD --grep "head aim"`: `hooked`
+  и строка ключей с `sync=latch stick_comp=off`. Проверка: `vr payload and profile verified`, стоит `.38`.
+
+## 8. Полёт `.38` (Дима)
+
+Группа 6 летается на `.38` вместе с этой. Метки `PAUSE` до и после каждого пункта.
+
+- [ ] 8.1 Крутить головой медленно и быстро при `On-foot head aim sync` = `latch`, потом `camera`. Проверка: при
+  одном из режимов мир не дёргается; по строке `head_aim_sync` порядок камеры совпадает с выбранным режимом
+  (`cam_before` — `camera`, `cam_after` — `latch`).
+- [ ] 8.2 Достать оружие, увести стик наклона в упор вверх и вниз при `stick_comp` = `off`, потом `on`. Проверка:
+  при верном режиме стик не сдвигает ни ствол, ни картинку, ствол сразу совпадает со взглядом.
+- [ ] 8.3 Если ни один режим `sync` не убрал дёрганье — разбор `head_aim_sync` и следующий шаг по данным (design,
+  решение 10), без догадок. Проверка: итог записан в доклад.
+
 ## Workflow follow-up
 
+- Верные режимы `sync` и `stick_comp` из полёта `.38` — умолчаниями отдельной правкой до архива.
 - Если знак наклона в 6.1 оказался `minus` — поменять умолчание ключа и случай стенда отдельной правкой до архива.
 - После полёта — `/opsx:archive on-foot-head-aim`: требования лягут в `openspec\specs\on-foot-aiming\spec.md`.
 - Следующая заявка — `on-foot-hud-lazy-yaw`, потом `on-foot-aiming-cleanup` (`ROADMAP.md`).

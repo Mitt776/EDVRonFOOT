@@ -352,10 +352,10 @@ void partOutputs() {
 
 void partLines() {
     char line[300];
-    formatKeys(Key::On, PitchComp::Plus, line, sizeof(line));
-    check(std::strcmp(line, "head aim: key=on pitch_comp=plus") == 0, "the keys line");
-    formatKeys(Key::Off, PitchComp::Off, line, sizeof(line));
-    check(std::strcmp(line, "head aim: key=off pitch_comp=off") == 0, "the keys line, off");
+    formatKeys(Key::On, PitchComp::Plus, Sync::Latch, StickComp::Off, line, sizeof(line));
+    check(std::strcmp(line, "head aim: key=on pitch_comp=plus sync=latch stick_comp=off") == 0, "the keys line");
+    formatKeys(Key::Off, PitchComp::Off, Sync::Camera, StickComp::On, line, sizeof(line));
+    check(std::strcmp(line, "head aim: key=off pitch_comp=off sync=camera stick_comp=on") == 0, "the keys line, off");
     formatUnknownKey("native_vr_on_foot_head_aim", "yes", "off", line, sizeof(line));
     check(std::strcmp(line, "head aim: native_vr_on_foot_head_aim value 'yes' not understood, reads off") == 0, "the unknown key line");
     formatUnknownKey("native_vr_on_foot_head_aim_pitch_comp", "up", "plus", line, sizeof(line));
@@ -372,7 +372,7 @@ void partLines() {
     }
     Window w;
     formatSummary(w, line, sizeof(line));
-    check(std::strcmp(line, "head_aim_feature,frames=0,active=0,max_yaw_deg=0.0,max_pitch_deg=0.0,capped=0,max_lag_deg=0.0,channel=0") == 0,
+    check(std::strcmp(line, "head_aim_feature,frames=0,active=0,max_yaw_deg=0.0,max_pitch_deg=0.0,capped=0,max_lag_deg=0.0,channel=0,stick_deg=0.0") == 0,
           "the summary with zeros: a feature that never ran says so");
     Output o;
     o.level = 1.0f;
@@ -385,15 +385,80 @@ void partLines() {
     Output idle;
     idle.level = 0.0f;
     noteFrame(w, idle, 0.0f, 8);
+    w.stickDeg = 8.04;
     formatSummary(w, line, sizeof(line));
-    check(std::strcmp(line, "head_aim_feature,frames=3,active=2,max_yaw_deg=90.0,max_pitch_deg=20.0,capped=1,max_lag_deg=4.3,channel=8") == 0 ||
-              std::strcmp(line, "head_aim_feature,frames=3,active=2,max_yaw_deg=90.0,max_pitch_deg=20.0,capped=1,max_lag_deg=4.2,channel=8") == 0,
+    check(std::strcmp(line, "head_aim_feature,frames=3,active=2,max_yaw_deg=90.0,max_pitch_deg=20.0,capped=1,max_lag_deg=4.3,channel=8,stick_deg=8.0") == 0 ||
+              std::strcmp(line, "head_aim_feature,frames=3,active=2,max_yaw_deg=90.0,max_pitch_deg=20.0,capped=1,max_lag_deg=4.2,channel=8,stick_deg=8.0") == 0,
           "the summary counts frames, active frames, the largest angles, the capped and the lag");
     Window w7;
     noteFrame(w7, idle, 0.0f, 7);
     formatSummary(w7, line, sizeof(line));
     check(std::strstr(line, "frames=1,active=0,") != nullptr && std::strstr(line, ",channel=7") != nullptr,
           "channel 7 with no active frames reads differently from the key being off (no line at all)");
+}
+
+void partSyncAndStick() {
+    bool v = false;
+    check(parseSync(nullptr, &v) == Sync::Latch && v, "no sync key is latch");
+    check(parseSync("", &v) == Sync::Latch && v, "an empty sync key is latch");
+    check(parseSync("latch", &v) == Sync::Latch && v, "latch");
+    check(parseSync(" Camera \r\n", &v) == Sync::Camera && v, "camera, case and padding");
+    check(parseSync("both", &v) == Sync::Latch && !v, "junk sync reads latch and is reported");
+    check(parseStickComp(nullptr, &v) == StickComp::Off && v, "no stick key is off");
+    check(parseStickComp("", &v) == StickComp::Off && v, "an empty stick key is off");
+    check(parseStickComp("off", &v) == StickComp::Off && v, "stick off");
+    check(parseStickComp(" ON ", &v) == StickComp::On && v, "stick on, case and padding");
+    check(parseStickComp("yes", &v) == StickComp::Off && !v, "junk stick reads off and is reported");
+
+    // The camera counter: every class, and a frame without a latch (its camera moments count before).
+    check(classifyCamera(0, 0, true) == CamClass::None, "no camera moment: none");
+    check(classifyCamera(1, 0, true) == CamClass::Before, "one moment before the latch: before");
+    check(classifyCamera(0, 1, true) == CamClass::After, "one moment after the latch: after");
+    check(classifyCamera(1, 1, true) == CamClass::Multi && classifyCamera(3, 0, true) == CamClass::Multi, "more than one: multi");
+    check(classifyCamera(0, 0, false) == CamClass::None && classifyCamera(1, 0, false) == CamClass::Before && classifyCamera(2, 0, false) == CamClass::Multi,
+          "a frame without a latch is classed by its moments, all before");
+    SyncWindow sw;
+    noteSyncFrame(sw, 1, 0, true);
+    noteSyncFrame(sw, 0, 1, true);
+    noteSyncFrame(sw, 0, 1, true);
+    noteSyncFrame(sw, 0, 0, true);
+    noteSyncFrame(sw, 2, 1, true);
+    noteSyncFrame(sw, 1, 0, false);
+    noteSyncFrame(sw, 0, 0, false);
+    check(sw.frames == 7 && sw.before == 2 && sw.after == 2 && sw.none == 2 && sw.multi == 1 && sw.noLatch == 2, "the window counts each class and the no-latch frames");
+    char line[300];
+    formatSync(sw, Sync::Camera, line, sizeof(line));
+    check(std::strcmp(line, "head_aim_sync,frames=7,cam_before=2,cam_after=2,cam_none=2,cam_multi=1,no_latch=2,mode=camera") == 0, "the sync line");
+    formatSync(SyncWindow{}, Sync::Latch, line, sizeof(line));
+    check(std::strcmp(line, "head_aim_sync,frames=0,cam_before=0,cam_after=0,cam_none=0,cam_multi=0,no_latch=0,mode=latch") == 0, "the sync line with zeros");
+
+    // The answer to the runtime.
+    Snapshot fresh;   // taken since the previous latch (number 5)
+    fresh.valid = true; fresh.latchNo = 5; fresh.yaw = 0.2f; fresh.pitch = -0.1f;
+    Snapshot stale = fresh;   // from an older latch
+    stale.latchNo = 4;
+    Snapshot none;
+    Answer a = chooseAnswer(Sync::Latch, fresh, 5, 0.3f, -0.2f);
+    check(a.yaw == 0.3f && a.pitch == -0.2f, "latch: the new angles, snapshot or not");
+    a = chooseAnswer(Sync::Camera, fresh, 5, 0.3f, -0.2f);
+    check(a.yaw == 0.2f && a.pitch == -0.1f, "camera: a fresh snapshot answers");
+    a = chooseAnswer(Sync::Camera, stale, 5, 0.3f, -0.2f);
+    check(a.yaw == 0.3f && a.pitch == -0.2f, "camera: a stale snapshot is not used");
+    a = chooseAnswer(Sync::Camera, none, 0, 0.3f, -0.2f);
+    check(a.yaw == 0.3f && a.pitch == -0.2f, "camera: no snapshot, the new angles");
+
+    // The stick's part of the correction.
+    const float target = float(-20 * kDeg);
+    const float o1 = float(8 * kDeg), o2 = float(-30 * kDeg);
+    check(pitchCorrection(StickComp::On, o1, target, 1.0f) == pitchCorrection(StickComp::On, o2, target, 1.0f) &&
+              near(pitchCorrection(StickComp::On, o1, target, 1.0f), target),
+          "on: the correction does not depend on the original and is the head's tilt");
+    check(near(pitchCorrection(StickComp::On, o1, target, 0.5f), target * 0.5f), "on: the tilt times the level");
+    check(pitchCorrection(StickComp::On, o1, target, 0.0f) == 0.0f && pitchCorrection(StickComp::Off, o1, target, 0.0f) == 0.0f, "level 0: both are 0");
+    check(near(pitchCorrection(StickComp::Off, o1, target, 1.0f), pitchAdded(o1, target, 1.0f)) &&
+              near(pitchCorrection(StickComp::Off, o1, target, 0.4f), pitchAdded(o1, target, 0.4f)) &&
+              !near(pitchCorrection(StickComp::Off, o1, target, 1.0f), pitchCorrection(StickComp::Off, o2, target, 1.0f)),
+          "off: as before, what angle 1 got on top of the original");
 }
 }  // namespace
 
@@ -408,6 +473,7 @@ int main(int argc, char** argv) {
     partRampAndGates();
     partOutputs();
     partLines();
+    partSyncAndStick();
     std::printf("%s: head_aim_test, %d checks, %d failed\n", g_failures ? "FAIL" : "PASS", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

@@ -29,8 +29,17 @@ enum class Key : int { Off = 0, On, Raw };
 // experimental.native_vr_on_foot_head_aim_pitch_comp: plus (the default; also when empty and, with *valid false, for anything unknown), minus, off.
 enum class PitchComp : int { Plus = 0, Minus, Off };
 
+// experimental.native_vr_on_foot_head_aim_sync (temporary): latch (the default; also when empty and, with *valid false, for anything unknown) answers the
+// runtime with the latch's own new angles, camera answers with the angles in force at the game's last camera build, when there was one since the last latch.
+enum class Sync : int { Latch = 0, Camera };
+// experimental.native_vr_on_foot_head_aim_stick_comp (temporary): off (the default; also when empty and, with *valid false, for anything unknown) turns the
+// pose back by what angle 1 got on top of the original, on by the head's whole tilt times the level (the stick's tilt comes off the picture too).
+enum class StickComp : int { Off = 0, On };
+
 inline const char* keyName(Key k) { return k == Key::On ? "on" : k == Key::Raw ? "raw" : "off"; }
 inline const char* pitchCompName(PitchComp c) { return c == PitchComp::Minus ? "minus" : c == PitchComp::Off ? "off" : "plus"; }
+inline const char* syncName(Sync s) { return s == Sync::Camera ? "camera" : "latch"; }
+inline const char* stickCompName(StickComp s) { return s == StickComp::On ? "on" : "off"; }
 
 namespace detail {
 // Trimmed, case-insensitive: true if `text` (n characters) is `word`.
@@ -79,6 +88,24 @@ inline PitchComp parsePitchComp(const char* raw, bool* valid = nullptr) {
     if (detail::is(t, n, "off")) return PitchComp::Off;
     if (valid) *valid = false;
     return PitchComp::Plus;
+}
+inline Sync parseSync(const char* raw, bool* valid = nullptr) {
+    if (valid) *valid = true;
+    size_t n = 0;
+    const char* t = detail::trim(raw, &n);
+    if (!n || detail::is(t, n, "latch")) return Sync::Latch;
+    if (detail::is(t, n, "camera")) return Sync::Camera;
+    if (valid) *valid = false;
+    return Sync::Latch;
+}
+inline StickComp parseStickComp(const char* raw, bool* valid = nullptr) {
+    if (valid) *valid = true;
+    size_t n = 0;
+    const char* t = detail::trim(raw, &n);
+    if (!n || detail::is(t, n, "off")) return StickComp::Off;
+    if (detail::is(t, n, "on")) return StickComp::On;
+    if (valid) *valid = false;
+    return StickComp::Off;
 }
 
 // ---- the head's angles -----------------------------------------------------------------------------------------------------------------------------
@@ -249,11 +276,66 @@ inline float blendPitch(float original, float target, float level) {
 inline float pitchAdded(float original, float target, float level) { return blendPitch(original, target, level) - original; }
 // The tilt the runtime gets: the key's sign times what the game was given.
 inline float runtimePitch(PitchComp c, float added) { return c == PitchComp::Plus ? added : c == PitchComp::Minus ? -added : 0.0f; }
+// The tilt the runtime's correction is made of, before the sign: off is what angle 1 got on top of the original (.37), on is the head's tilt times the level,
+// whatever the original was. Both are 0 at level 0.
+inline float pitchCorrection(StickComp s, float original, float target, float level) {
+    return s == StickComp::On ? (level <= 0.0f ? 0.0f : target * (level >= 1.0f ? 1.0f : level)) : pitchAdded(original, target, level);
+}
+
+// ---- the frame's beat (the sync counter and the camera answer) -------------------------------------------------------------------------------------
+
+// What the game's camera builds did in one game frame: none, more than one, one before the latch, one after it.
+enum class CamClass : int { None = 0, Multi, Before, After };
+// `before`/`after`: the camera moments counted before and after this frame's latch. A frame with no latch has no "after" (its moments all count before).
+inline CamClass classifyCamera(uint32_t before, uint32_t after, bool latched) {
+    if (!latched) { before += after; after = 0; }
+    const uint32_t total = before + after;
+    if (total == 0) return CamClass::None;
+    if (total > 1) return CamClass::Multi;
+    return after ? CamClass::After : CamClass::Before;
+}
+struct SyncWindow {
+    uint64_t frames = 0, before = 0, after = 0, none = 0, multi = 0, noLatch = 0;
+};
+inline void noteSyncFrame(SyncWindow& w, uint32_t before, uint32_t after, bool latched) {
+    ++w.frames;
+    if (!latched) ++w.noLatch;
+    switch (classifyCamera(before, after, latched)) {
+        case CamClass::None: ++w.none; break;
+        case CamClass::Multi: ++w.multi; break;
+        case CamClass::Before: ++w.before; break;
+        default: ++w.after; break;
+    }
+}
+
+// The angles in force at the game's last camera build, and the latch number they came from.
+struct Snapshot {
+    bool valid = false;
+    uint64_t latchNo = 0;
+    float yaw = 0.0f, pitch = 0.0f;   // yaw added, and the tilt for the runtime (the sign key already applied)
+};
+struct Answer {
+    float yaw = 0.0f, pitch = 0.0f;
+};
+// What the latch tells the runtime. `latch`: its own new angles. `camera`: the snapshot, when it was taken since the previous latch (its number is the
+// previous latch's), else the new angles. The getters get the new angles either way.
+inline Answer chooseAnswer(Sync mode, const Snapshot& snap, uint64_t prevLatchNo, float newYaw, float newPitch) {
+    Answer a;
+    if (mode == Sync::Camera && snap.valid && snap.latchNo == prevLatchNo) { a.yaw = snap.yaw; a.pitch = snap.pitch; }
+    else { a.yaw = newYaw; a.pitch = newPitch; }
+    return a;
+}
 
 // ---- the lines -------------------------------------------------------------------------------------------------------------------------------------
 
-inline int formatKeys(Key k, PitchComp c, char* out, size_t cap) {
-    return std::snprintf(out, cap, "head aim: key=%s pitch_comp=%s", keyName(k), pitchCompName(c));
+inline int formatKeys(Key k, PitchComp c, Sync s, StickComp st, char* out, size_t cap) {
+    return std::snprintf(out, cap, "head aim: key=%s pitch_comp=%s sync=%s stick_comp=%s", keyName(k), pitchCompName(c), syncName(s), stickCompName(st));
+}
+// head_aim_sync,frames=..,cam_before=..,cam_after=..,cam_none=..,cam_multi=..,no_latch=..,mode=latch|camera
+inline int formatSync(const SyncWindow& w, Sync s, char* out, size_t cap) {
+    return std::snprintf(out, cap, "head_aim_sync,frames=%llu,cam_before=%llu,cam_after=%llu,cam_none=%llu,cam_multi=%llu,no_latch=%llu,mode=%s",
+                         (unsigned long long)w.frames, (unsigned long long)w.before, (unsigned long long)w.after, (unsigned long long)w.none,
+                         (unsigned long long)w.multi, (unsigned long long)w.noLatch, syncName(s));
 }
 inline int formatUnknownKey(const char* which, const char* raw, const char* reads, char* out, size_t cap) {
     return std::snprintf(out, cap, "head aim: %s value '%.40s' not understood, reads %s", which, raw ? raw : "", reads);
@@ -268,6 +350,7 @@ struct Window {
     uint64_t frames = 0, active = 0, capped = 0;
     double maxYawDeg = 0, maxPitchDeg = 0, maxLagDeg = 0;
     uint32_t channel = 0;   // the last request version: 8 reaches the feature, 7 or less does not, 0 no runtime asked
+    double stickDeg = 0;    // the player's last original angle 1, degrees, the game's sign (+ = down); set by the reader of the window
 };
 // One latch's account. `pitchAddedRad` is what the game's angle 1 got on top of the original.
 inline void noteFrame(Window& w, const Output& o, float pitchAddedRad, uint32_t requestVersion) {
@@ -282,11 +365,12 @@ inline void noteFrame(Window& w, const Output& o, float pitchAddedRad, uint32_t 
     }
     if (o.lagDeg > w.maxLagDeg) w.maxLagDeg = o.lagDeg;
 }
-// head_aim_feature,frames=..,active=..,max_yaw_deg=..,max_pitch_deg=..,capped=..,max_lag_deg=..,channel=..
+// head_aim_feature,frames=..,active=..,max_yaw_deg=..,max_pitch_deg=..,capped=..,max_lag_deg=..,channel=..,stick_deg=..
 inline int formatSummary(const Window& w, char* out, size_t cap) {
-    return std::snprintf(out, cap, "head_aim_feature,frames=%llu,active=%llu,max_yaw_deg=%.1f,max_pitch_deg=%.1f,capped=%llu,max_lag_deg=%.1f,channel=%u",
+    return std::snprintf(out, cap,
+                         "head_aim_feature,frames=%llu,active=%llu,max_yaw_deg=%.1f,max_pitch_deg=%.1f,capped=%llu,max_lag_deg=%.1f,channel=%u,stick_deg=%.1f",
                          (unsigned long long)w.frames, (unsigned long long)w.active, w.maxYawDeg, w.maxPitchDeg, (unsigned long long)w.capped,
-                         w.maxLagDeg, w.channel);
+                         w.maxLagDeg, w.channel, w.stickDeg);
 }
 
 }  // namespace ha

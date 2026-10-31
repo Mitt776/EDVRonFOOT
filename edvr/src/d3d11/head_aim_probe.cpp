@@ -63,6 +63,16 @@ std::atomic<float> g_featYaw{0.0f}, g_featTarget{0.0f}, g_featLevel{0.0f}, g_fea
 std::atomic<int> g_featReason{int(ha::Reason::Key)};
 // The player's angle 1 as the game built it, from the last getter call on the player (the latch needs it for the tilt added).
 std::atomic<float> g_lastOrig1{0.0f};
+// The sync keys (published by the frame thread, read by the latch), and the camera counter: whether this game frame has had its latch, and how many camera
+// builds came before it and after it (the latch sets the flag, the frame boundary takes all three).
+std::atomic<int> g_featSync{int(ha::Sync::Latch)}, g_featStick{int(ha::StickComp::Off)};
+std::atomic<bool> g_latchedThisFrame{false};
+std::atomic<uint32_t> g_camBefore{0}, g_camAfter{0};
+// The angles in force (what the latch last published: the yaw added and the tilt for the runtime, with the latch's number) and the copy a camera build
+// took of them. One mutex, so a pair is always from one latch.
+std::mutex g_forceMutex;
+ha::Snapshot g_inForce, g_cameraSnap;
+uint64_t g_latchNo = 0;   // under the mutex; counts the feature's latches
 // Written by the getters and the eye's matrix getter, taken by the frame thread and the latch.
 std::atomic<uintptr_t> g_census[hap::kSlots];
 std::atomic<bool> g_censusMany{false};
@@ -132,8 +142,15 @@ float angle2Detour(void* self) {
     return v + shift;
 }
 void* eyeMatrixDetour(void* self) {
-    if (reinterpret_cast<uintptr_t>(_ReturnAddress()) == g_cameraReturnAddress)
+    if (reinterpret_cast<uintptr_t>(_ReturnAddress()) == g_cameraReturnAddress) {
         g_cameraEye.store(reinterpret_cast<uintptr_t>(self), std::memory_order_relaxed);
+        // A camera moment: counted against this frame's latch, and the angles in force are copied while the feature leads.
+        (g_latchedThisFrame.load(std::memory_order_relaxed) ? g_camAfter : g_camBefore).fetch_add(1, std::memory_order_relaxed);
+        if (featureLeads()) {
+            std::lock_guard<std::mutex> lock(g_forceMutex);
+            g_cameraSnap = g_inForce;
+        }
+    }
     return g_origEye(self);
 }
 
@@ -161,10 +178,27 @@ bool latchFeature(uint64_t nowMs, const float* head, uint32_t version, head_aim:
     in.head = head;
     in.nowMs = nowMs;
     const ha::Output o = ha::step(g_featState, in);
+    const ha::Sync sync = ha::Sync(g_featSync.load(std::memory_order_acquire));
+    const ha::StickComp stick = ha::StickComp(g_featStick.load(std::memory_order_acquire));
     const bool lead = in.channel8;
     float pitchAdded = 0.0f;
+    g_latchedThisFrame.store(true, std::memory_order_relaxed);
     if (lead) {
-        pitchAdded = ha::pitchAdded(g_lastOrig1.load(std::memory_order_relaxed), o.pitchTarget, o.level);
+        // What the runtime turns the pose back by: off = what angle 1 got on top of the original, on = the head's whole tilt (stick_comp).
+        pitchAdded = ha::pitchCorrection(stick, g_lastOrig1.load(std::memory_order_relaxed), o.pitchTarget, o.level);
+        const float newPitch = ha::runtimePitch(comp, pitchAdded);
+        {
+            // The answer first (the snapshot is from the previous latch's angles or older), then the new angles go into force under the next number.
+            std::lock_guard<std::mutex> lock(g_forceMutex);
+            const ha::Answer ans = ha::chooseAnswer(sync, g_cameraSnap, g_latchNo, o.yawAdded, newPitch);
+            out->yawRad = ans.yaw;
+            out->pitchRad = ans.pitch;
+            ++g_latchNo;
+            g_inForce.valid = true;
+            g_inForce.latchNo = g_latchNo;
+            g_inForce.yaw = o.yawAdded;
+            g_inForce.pitch = newPitch;
+        }
         g_featYaw.store(o.yawAdded, std::memory_order_relaxed);
         g_featTarget.store(o.pitchTarget, std::memory_order_relaxed);
         g_featLevel.store(o.level, std::memory_order_relaxed);
@@ -173,8 +207,6 @@ bool latchFeature(uint64_t nowMs, const float* head, uint32_t version, head_aim:
         g_latchRad.store(0.0f, std::memory_order_relaxed);
         g_latchMs.store(nowMs, std::memory_order_relaxed);
         g_featLead.store(true, std::memory_order_release);
-        out->yawRad = o.yawAdded;
-        out->pitchRad = ha::runtimePitch(comp, pitchAdded);
         out->probe = 0;
         out->feature = o.level > 0.0f ? 1u : 0u;   // "acts", for the runtime's line: a feature that only waits at level 0 keeps it quiet
     } else {
@@ -331,8 +363,11 @@ void headAimProbeFrameBoundary() {
     static ha::Key featKey = ha::Key::Off;
     static ha::PitchComp featComp = ha::PitchComp::Plus;
     static bool saidFeatKeys = false, featOn = false;
-    static std::string badKey, badComp;   // the unknown values already said
+    static ha::Sync featSync = ha::Sync::Latch;
+    static ha::StickComp featStick = ha::StickComp::Off;
+    static std::string badKey, badComp, badSync, badStick;   // the unknown values already said
     static uint64_t featWindowBeganMs = 0;
+    static ha::SyncWindow syncWindow;
     char line[400];
 
     const Config& cfg = Config::get();
@@ -358,20 +393,30 @@ void headAimProbeFrameBoundary() {
         // The feature's keys, live like the probe's. Unknown values read off / plus, said once per value.
         const std::string rawFeat = cfg.getString("experimental.native_vr_on_foot_head_aim", "off");
         const std::string rawPitch = cfg.getString("experimental.native_vr_on_foot_head_aim_pitch_comp", "plus");
-        bool validFeat = true, validPitch = true;
+        const std::string rawSync = cfg.getString("experimental.native_vr_on_foot_head_aim_sync", "latch");
+        const std::string rawStick = cfg.getString("experimental.native_vr_on_foot_head_aim_stick_comp", "off");
+        bool validFeat = true, validPitch = true, validSync = true, validStick = true;
         const ha::Key fk = ha::parseKey(rawFeat.c_str(), &validFeat);
         const ha::PitchComp fc = ha::parsePitchComp(rawPitch.c_str(), &validPitch);
+        const ha::Sync fs = ha::parseSync(rawSync.c_str(), &validSync);
+        const ha::StickComp fst = ha::parseStickComp(rawStick.c_str(), &validStick);
         if (!validFeat && rawFeat != badKey) { ha::formatUnknownKey("native_vr_on_foot_head_aim", rawFeat.c_str(), "off", line, sizeof(line)); say(line); }
         if (!validPitch && rawPitch != badComp) { ha::formatUnknownKey("native_vr_on_foot_head_aim_pitch_comp", rawPitch.c_str(), "plus", line, sizeof(line)); say(line); }
+        if (!validSync && rawSync != badSync) { ha::formatUnknownKey("native_vr_on_foot_head_aim_sync", rawSync.c_str(), "latch", line, sizeof(line)); say(line); }
+        if (!validStick && rawStick != badStick) { ha::formatUnknownKey("native_vr_on_foot_head_aim_stick_comp", rawStick.c_str(), "off", line, sizeof(line)); say(line); }
         badKey = validFeat ? std::string() : rawFeat;
         badComp = validPitch ? std::string() : rawPitch;
-        if (!saidFeatKeys || fk != featKey || fc != featComp) {
-            ha::formatKeys(fk, fc, line, sizeof(line));
+        badSync = validSync ? std::string() : rawSync;
+        badStick = validStick ? std::string() : rawStick;
+        if (!saidFeatKeys || fk != featKey || fc != featComp || fs != featSync || fst != featStick) {
+            ha::formatKeys(fk, fc, fs, fst, line, sizeof(line));
             say(line);
             saidFeatKeys = true;
         }
         featKey = fk;
         featComp = fc;
+        featSync = fs;
+        featStick = fst;
     }
 
     hap::Gate gate;
@@ -422,10 +467,19 @@ void headAimProbeFrameBoundary() {
     g_focus.store(focus, std::memory_order_relaxed);
     g_focusKnown.store(focusKnown, std::memory_order_relaxed);
     g_featComp.store(int(featComp), std::memory_order_release);
+    g_featSync.store(int(featSync), std::memory_order_release);
+    g_featStick.store(int(featStick), std::memory_order_release);
     g_featKey.store(int(featKey), std::memory_order_release);
     g_comp.store(int(comp), std::memory_order_release);
     g_mode.store(int(mode), std::memory_order_release);
     g_allowed.store(hap::shiftAllowed(gate), std::memory_order_release);
+
+    // The game frame's beat: this boundary closes a game frame, so take its latch flag and camera counts (always, so a frame never carries over).
+    {
+        const bool latched = g_latchedThisFrame.exchange(false, std::memory_order_relaxed);
+        const uint32_t before = g_camBefore.exchange(0, std::memory_order_relaxed), after = g_camAfter.exchange(0, std::memory_order_relaxed);
+        if (featKey != ha::Key::Off && onFoot) ha::noteSyncFrame(syncWindow, before, after, latched);
+    }
 
     // The shift's edges, as the latch made them.
     const bool shifting = g_latchAngle.load(std::memory_order_relaxed) != 0 && now - g_latchMs.load(std::memory_order_relaxed) <= kLatchFreshMs;
@@ -494,10 +548,14 @@ void headAimProbeFrameBoundary() {
             fw = g_featWindow;
             g_featWindow = ha::Window{};
         }
+        fw.stickDeg = double(g_lastOrig1.load(std::memory_order_relaxed)) * ha::kDegPerRad;
         if (featKey != ha::Key::Off && onFoot) {
             ha::formatSummary(fw, line, sizeof(line));
             say(line);
+            ha::formatSync(syncWindow, featSync, line, sizeof(line));
+            say(line);
         }
+        syncWindow = ha::SyncWindow{};
     }
 }
 
