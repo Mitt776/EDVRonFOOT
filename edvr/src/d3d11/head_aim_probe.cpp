@@ -66,6 +66,7 @@ std::atomic<float> g_lastOrig1{0.0f};
 // The sync keys (published by the frame thread, read by the latch), and the camera counter: whether this game frame has had its latch, and how many camera
 // builds came before it and after it (the latch sets the flag, the frame boundary takes all three).
 std::atomic<int> g_featSync{int(ha::Sync::Latch)}, g_featStick{int(ha::StickComp::Off)};
+std::atomic<float> g_featOffsetDeg{0.0f};   // experimental.native_vr_on_foot_head_aim_pitch_offset, degrees (+ = lower)
 std::atomic<bool> g_latchedThisFrame{false};
 std::atomic<uint32_t> g_camBefore{0}, g_camAfter{0};
 // The angles in force (what the latch last published: the yaw added and the tilt for the runtime, with the latch's number) and the copy a camera build
@@ -177,7 +178,9 @@ bool latchFeature(uint64_t nowMs, const float* head, uint32_t version, head_aim:
     in.focus = g_focus.load(std::memory_order_relaxed);
     in.head = head;
     in.nowMs = nowMs;
-    const ha::Output o = ha::step(g_featState, in);
+    ha::Output o = ha::step(g_featState, in);
+    // The pitch offset goes onto the head's tilt here, so the blend, the getters and the pose correction below all carry it.
+    o.pitchTarget = ha::offsetTarget(o.pitchTarget, g_featOffsetDeg.load(std::memory_order_acquire));
     const ha::Sync sync = ha::Sync(g_featSync.load(std::memory_order_acquire));
     const ha::StickComp stick = ha::StickComp(g_featStick.load(std::memory_order_acquire));
     const bool lead = in.channel8;
@@ -365,7 +368,8 @@ void headAimProbeFrameBoundary() {
     static bool saidFeatKeys = false, featOn = false;
     static ha::Sync featSync = ha::Sync::Latch;
     static ha::StickComp featStick = ha::StickComp::Off;
-    static std::string badKey, badComp, badSync, badStick;   // the unknown values already said
+    static double featOffset = 0.0;
+    static std::string badKey, badComp, badSync, badStick, badOffset;   // the unknown values already said
     static uint64_t featWindowBeganMs = 0;
     static ha::SyncWindow syncWindow;
     char line[400];
@@ -395,7 +399,9 @@ void headAimProbeFrameBoundary() {
         const std::string rawPitch = cfg.getString("experimental.native_vr_on_foot_head_aim_pitch_comp", "plus");
         const std::string rawSync = cfg.getString("experimental.native_vr_on_foot_head_aim_sync", "latch");
         const std::string rawStick = cfg.getString("experimental.native_vr_on_foot_head_aim_stick_comp", "off");
-        bool validFeat = true, validPitch = true, validSync = true, validStick = true;
+        const std::string rawOffset = cfg.getString("experimental.native_vr_on_foot_head_aim_pitch_offset", "0");
+        bool validFeat = true, validPitch = true, validSync = true, validStick = true, validOffset = true;
+        const double fo = ha::parsePitchOffsetDeg(rawOffset.c_str(), &validOffset);
         const ha::Key fk = ha::parseKey(rawFeat.c_str(), &validFeat);
         const ha::PitchComp fc = ha::parsePitchComp(rawPitch.c_str(), &validPitch);
         const ha::Sync fs = ha::parseSync(rawSync.c_str(), &validSync);
@@ -404,12 +410,14 @@ void headAimProbeFrameBoundary() {
         if (!validPitch && rawPitch != badComp) { ha::formatUnknownKey("native_vr_on_foot_head_aim_pitch_comp", rawPitch.c_str(), "plus", line, sizeof(line)); say(line); }
         if (!validSync && rawSync != badSync) { ha::formatUnknownKey("native_vr_on_foot_head_aim_sync", rawSync.c_str(), "latch", line, sizeof(line)); say(line); }
         if (!validStick && rawStick != badStick) { ha::formatUnknownKey("native_vr_on_foot_head_aim_stick_comp", rawStick.c_str(), "off", line, sizeof(line)); say(line); }
+        if (!validOffset && rawOffset != badOffset) { ha::formatUnknownKey("native_vr_on_foot_head_aim_pitch_offset", rawOffset.c_str(), "0", line, sizeof(line)); say(line); }
+        badOffset = validOffset ? std::string() : rawOffset;
         badKey = validFeat ? std::string() : rawFeat;
         badComp = validPitch ? std::string() : rawPitch;
         badSync = validSync ? std::string() : rawSync;
         badStick = validStick ? std::string() : rawStick;
-        if (!saidFeatKeys || fk != featKey || fc != featComp || fs != featSync || fst != featStick) {
-            ha::formatKeys(fk, fc, fs, fst, line, sizeof(line));
+        if (!saidFeatKeys || fk != featKey || fc != featComp || fs != featSync || fst != featStick || fo != featOffset) {
+            ha::formatKeys(fk, fc, fs, fst, fo, line, sizeof(line));
             say(line);
             saidFeatKeys = true;
         }
@@ -417,6 +425,7 @@ void headAimProbeFrameBoundary() {
         featComp = fc;
         featSync = fs;
         featStick = fst;
+        featOffset = fo;
     }
 
     hap::Gate gate;
@@ -469,6 +478,7 @@ void headAimProbeFrameBoundary() {
     g_featComp.store(int(featComp), std::memory_order_release);
     g_featSync.store(int(featSync), std::memory_order_release);
     g_featStick.store(int(featStick), std::memory_order_release);
+    g_featOffsetDeg.store(float(featOffset), std::memory_order_release);
     g_featKey.store(int(featKey), std::memory_order_release);
     g_comp.store(int(comp), std::memory_order_release);
     g_mode.store(int(mode), std::memory_order_release);

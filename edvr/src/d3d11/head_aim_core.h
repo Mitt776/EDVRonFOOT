@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace edvr {
@@ -107,6 +108,27 @@ inline StickComp parseStickComp(const char* raw, bool* valid = nullptr) {
     if (valid) *valid = false;
     return StickComp::Off;
 }
+
+// experimental.native_vr_on_foot_head_aim_pitch_offset (temporary), degrees, + = the barrel lower: empty reads 0, a number is held to +-kPitchOffsetMaxDeg,
+// anything else (text after the number, nan, inf) reads 0 and is reported with *valid false.
+constexpr double kPitchOffsetMaxDeg = 30.0;
+inline double parsePitchOffsetDeg(const char* raw, bool* valid = nullptr) {
+    if (valid) *valid = true;
+    size_t n = 0;
+    const char* t = detail::trim(raw, &n);
+    if (!n) return 0.0;
+    char buf[48];
+    if (n >= sizeof(buf)) { if (valid) *valid = false; return 0.0; }
+    std::memcpy(buf, t, n);
+    buf[n] = '\0';
+    char* end = nullptr;
+    const double v = std::strtod(buf, &end);
+    if (end == buf || *end != '\0' || !std::isfinite(v)) { if (valid) *valid = false; return 0.0; }
+    return v > kPitchOffsetMaxDeg ? kPitchOffsetMaxDeg : v < -kPitchOffsetMaxDeg ? -kPitchOffsetMaxDeg : v;
+}
+// The tilt the head asks for with the offset on it (the game's sign, + = down). The offset goes in before the blend and before the pose correction, so the
+// runtime's correction carries it too and, with stick_comp on, only the barrel moves.
+inline float offsetTarget(float target, double offsetDeg) { return float(double(target) + offsetDeg / kDegPerRad); }
 
 // ---- the head's angles -----------------------------------------------------------------------------------------------------------------------------
 
@@ -328,8 +350,9 @@ inline Answer chooseAnswer(Sync mode, const Snapshot& snap, uint64_t prevLatchNo
 
 // ---- the lines -------------------------------------------------------------------------------------------------------------------------------------
 
-inline int formatKeys(Key k, PitchComp c, Sync s, StickComp st, char* out, size_t cap) {
-    return std::snprintf(out, cap, "head aim: key=%s pitch_comp=%s sync=%s stick_comp=%s", keyName(k), pitchCompName(c), syncName(s), stickCompName(st));
+inline int formatKeys(Key k, PitchComp c, Sync s, StickComp st, double pitchOffsetDeg, char* out, size_t cap) {
+    return std::snprintf(out, cap, "head aim: key=%s pitch_comp=%s sync=%s stick_comp=%s pitch_offset=%.1f", keyName(k), pitchCompName(c), syncName(s),
+                         stickCompName(st), pitchOffsetDeg);
 }
 // head_aim_sync,frames=..,cam_before=..,cam_after=..,cam_none=..,cam_multi=..,no_latch=..,mode=latch|camera
 inline int formatSync(const SyncWindow& w, Sync s, char* out, size_t cap) {

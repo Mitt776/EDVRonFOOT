@@ -352,10 +352,12 @@ void partOutputs() {
 
 void partLines() {
     char line[300];
-    formatKeys(Key::On, PitchComp::Plus, Sync::Latch, StickComp::Off, line, sizeof(line));
-    check(std::strcmp(line, "head aim: key=on pitch_comp=plus sync=latch stick_comp=off") == 0, "the keys line");
-    formatKeys(Key::Off, PitchComp::Off, Sync::Camera, StickComp::On, line, sizeof(line));
-    check(std::strcmp(line, "head aim: key=off pitch_comp=off sync=camera stick_comp=on") == 0, "the keys line, off");
+    formatKeys(Key::On, PitchComp::Plus, Sync::Latch, StickComp::Off, 0.0, line, sizeof(line));
+    check(std::strcmp(line, "head aim: key=on pitch_comp=plus sync=latch stick_comp=off pitch_offset=0.0") == 0, "the keys line");
+    formatKeys(Key::Off, PitchComp::Off, Sync::Camera, StickComp::On, 10.0, line, sizeof(line));
+    check(std::strcmp(line, "head aim: key=off pitch_comp=off sync=camera stick_comp=on pitch_offset=10.0") == 0, "the keys line, off");
+    formatKeys(Key::On, PitchComp::Plus, Sync::Camera, StickComp::On, -7.5, line, sizeof(line));
+    check(std::strcmp(line, "head aim: key=on pitch_comp=plus sync=camera stick_comp=on pitch_offset=-7.5") == 0, "the keys line, negative offset");
     formatUnknownKey("native_vr_on_foot_head_aim", "yes", "off", line, sizeof(line));
     check(std::strcmp(line, "head aim: native_vr_on_foot_head_aim value 'yes' not understood, reads off") == 0, "the unknown key line");
     formatUnknownKey("native_vr_on_foot_head_aim_pitch_comp", "up", "plus", line, sizeof(line));
@@ -459,6 +461,25 @@ void partSyncAndStick() {
               near(pitchCorrection(StickComp::Off, o1, target, 0.4f), pitchAdded(o1, target, 0.4f)) &&
               !near(pitchCorrection(StickComp::Off, o1, target, 1.0f), pitchCorrection(StickComp::Off, o2, target, 1.0f)),
           "off: as before, what angle 1 got on top of the original");
+
+    // The pitch offset: read, held to +-30, and carried by the blend and the correction alike.
+    check(parsePitchOffsetDeg(nullptr, &v) == 0.0 && v, "no offset key is 0");
+    check(parsePitchOffsetDeg("", &v) == 0.0 && v, "an empty offset is 0");
+    check(parsePitchOffsetDeg(" 10 ", &v) == 10.0 && v, "offset 10, padding");
+    check(parsePitchOffsetDeg("-7.5", &v) == -7.5 && v, "a negative offset");
+    check(parsePitchOffsetDeg("abc", &v) == 0.0 && !v, "junk offset reads 0 and is reported");
+    check(parsePitchOffsetDeg("10deg", &v) == 0.0 && !v, "a number with text after it reads 0 and is reported");
+    check(parsePitchOffsetDeg("nan", &v) == 0.0 && !v && parsePitchOffsetDeg("inf", &v) == 0.0 && !v, "nan and inf read 0 and are reported");
+    check(parsePitchOffsetDeg("45", &v) == 30.0 && v && parsePitchOffsetDeg("-99", &v) == -30.0 && v, "past the limit is held to +-30");
+    const float off = offsetTarget(target, 10.0);
+    check(near(off, target + float(10 * kDeg)) && offsetTarget(target, 0.0) == target, "the offset is added to the head's tilt, 0 changes nothing");
+    check(near(blendPitch(o1, off, 1.0f), target + float(10 * kDeg)), "level 1: angle 1 out is the head's tilt plus 10 degrees");
+    check(near(pitchCorrection(StickComp::On, o1, off, 1.0f), (target + float(10 * kDeg))) &&
+              near(pitchCorrection(StickComp::On, o1, off, 0.5f), (target + float(10 * kDeg)) * 0.5f),
+          "on: the correction is (tilt + offset) times the level");
+    check(near(pitchCorrection(StickComp::Off, o1, off, 1.0f), blendPitch(o1, off, 1.0f) - o1), "off: the correction carries the offset too");
+    check(blendPitch(o1, off, 0.0f) == o1 && pitchCorrection(StickComp::On, o1, off, 0.0f) == 0.0f && pitchCorrection(StickComp::Off, o1, off, 0.0f) == 0.0f,
+          "level 0: the offset changes nothing");
 }
 }  // namespace
 
