@@ -128,7 +128,7 @@ template<class Check> void runAimEyeCases(Check&& check) {
     for (int i = 0; i < 10; ++i) log.frame(6, 2, 0.0f, 1, 32.0, none, seq++, ms += 11, sink);
     check(lines.empty(), "on foot, LT not held: no line yet");
     log.frame(6, 2, 0.13f, 1, 32.0, none, seq++, ms += 11, sink);
-    check(lines.size() == 1 && lines[0] == "aim_eye_on,eye=right,shift_mm=32.0,snap=none,sequence=11\n",
+    check(lines.size() == 1 && lines[0] == "aim_eye_on,eye=right,shift_mm=32.0,snap=none,follow=0,sequence=11\n",
           "THE BLEND LEAVES 0: one aim_eye_on line, the eye and the full shift");
     for (int i = 0; i < 20; ++i) log.frame(6, 2, 1.0f, 1, 32.0, none, seq++, ms += 11, sink);
     check(lines.size() == 1, "...and nothing while it holds");
@@ -230,7 +230,7 @@ template<class Check> void runAimEyeCases(Check&& check) {
     AimEyeLog log;
     snap.frame(2, 0.13f, headPose(0, 0, 0.0, -0.045, 0.0), true);
     log.frame(6, 2, 0.13f, 1, 32.0, snap, 1, 100, sink);
-    check(lines.size() == 1 && lines[0] == "aim_eye_on,eye=right,shift_mm=32.0,snap=held,snap_mm=45.0,snap_y_mm=-45.0,sequence=1\n",
+    check(lines.size() == 1 && lines[0] == "aim_eye_on,eye=right,shift_mm=32.0,snap=held,snap_mm=45.0,snap_y_mm=-45.0,follow=0,sequence=1\n",
           "SLID DOWN: the aim_eye_on line carries snap=held, the wander and its vertical part with a minus");
     log.frame(6, 2, 1.0f, 1, 32.0, snap, 2, 111, sink);
     snap.frame(2, 0.0f, headPose(0, 0, 0.0, -0.045, 0.0), true);
@@ -240,14 +240,82 @@ template<class Check> void runAimEyeCases(Check&& check) {
     lines.clear();
     snap.frame(2, 0.13f, headPose(0, 0, 0.0, -0.6, 0.0), true);
     log.frame(6, 2, 0.13f, 1, 32.0, snap, 4, 30200, sink);
-    check(lines.size() == 1 && lines[0] == "aim_eye_on,eye=right,shift_mm=32.0,snap=far,snap_mm=600.0,sequence=4\n",
+    check(lines.size() == 1 && lines[0] == "aim_eye_on,eye=right,shift_mm=32.0,snap=far,snap_mm=600.0,follow=0,sequence=4\n",
           "TOO FAR: the aim_eye_on line says snap=far and how far");
     AimSnap late;
     AimEyeLog lateLog;
     lines.clear();
     late.frame(2, 0.13f, headPose(0, 0, 0.0, -0.03, 0.0), false);
     lateLog.frame(6, 2, 0.13f, 1, 32.0, late, 1, 100, sink);
-    check(lines.size() == 1 && lines[0] == "aim_eye_on,eye=right,shift_mm=32.0,snap=none,sequence=1\n", "NO VALID POSE YET: snap=none");
+    check(lines.size() == 1 && lines[0] == "aim_eye_on,eye=right,shift_mm=32.0,snap=none,follow=0,sequence=1\n", "NO VALID POSE YET: snap=none");
+  }
+  // ---- the follow (design 14): with the head aim feature the wander is taken from every frame's pose --------------------------------------------------------
+  {
+    // The head turns about a neck point 10 cm behind and 10 cm below the origin (the head starts on the origin): its position is neck + R_y * (0, 0.1, -0.1).
+    auto turned = [](double yawDeg) {
+      const double k = 3.14159265358979323846 / 180.0, sy = std::sin(yawDeg * k), cy = std::cos(yawDeg * k);
+      return headPose(yawDeg, 0, -0.1 * sy, 0.0, 0.1 - 0.1 * cy);
+    };
+    auto missOf = [&](const AimSnap& snap, const vr::HmdMatrix34_t& real) {
+      auto game = real;
+      double s[3], o[3];
+      snap.offset(1.0f, s);
+      aimEyeHeadOffset(eyes, 2, 1.0f, o);
+      applyTrackingOffset(game, s);
+      applyAimEyeOffset(game, o);
+      double w[3];
+      eyeWorld(game, eyes[1], w);   // the right eye of the game's pose: the origin when the head sits on it
+      return std::sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
+    };
+    AimSnap follow, still;
+    double worstFollow = 0.0, worstStill = 0.0;
+    bool held = true;
+    for (int deg : {0, 10, 30, 15, 0, -10, -30, -20, 0}) {
+      const auto real = turned(deg);
+      follow.frame(2, 1.0f, real, true, true);
+      still.frame(2, 1.0f, real, true, false);
+      held = held && follow.state() == AimSnapState::Held && follow.follow() && !still.follow();
+      worstFollow = std::fmax(worstFollow, missOf(follow, real));
+      worstStill = std::fmax(worstStill, missOf(still, real));
+    }
+    check(held && worstFollow < 1e-5,
+          "FOLLOW, THE HEAD TURNS +-30 DEGREES ABOUT A NECK 10 CM BEHIND AND BELOW THE ORIGIN: every frame's snap puts the game's eye back on the origin");
+    check(worstStill > 0.04, "WITHOUT FOLLOW the same turn carries the eye off the origin by centimetres (the .34 behaviour, unchanged)");
+    // The far limit holds: a press that went far stays far with follow, and a head back near the origin does not bring the snap back; a new press does.
+    AimSnap farSnap;
+    double s[3];
+    farSnap.frame(2, 0.1f, headPose(0, 0, 0.0, -0.6, 0.0), true, true);
+    farSnap.frame(2, 1.0f, headPose(0, 0, 0.0, -0.01, 0.0), true, true);
+    check(farSnap.state() == AimSnapState::Far && !farSnap.offset(1.0f, s), "FOLLOW, FAR: no snap, and far until the end of that press");
+    farSnap.frame(2, 0.0f, headPose(0, 0, 0.0, -0.01, 0.0), true, true);
+    farSnap.frame(2, 0.1f, headPose(0, 0, 0.0, -0.01, 0.0), true, true);
+    check(farSnap.state() == AimSnapState::Held && farSnap.offset(1.0f, s) && offsetIs(s, 0.0, 0.01, 0.0), "...the next press is held again, from the pose of its frame");
+    // A head that wanders out of range while following goes far, as a press does without it.
+    AimSnap wander;
+    wander.frame(2, 1.0f, headPose(0, 0, 0.0, -0.01, 0.0), true, true);
+    wander.frame(2, 1.0f, headPose(0, 0, 0.0, -0.7, 0.0), true, true);
+    check(wander.state() == AimSnapState::Far && !wander.offset(1.0f, s), "FOLLOW: a pose past the limit mid-press is far, no snap");
+    // A frame with no valid pose keeps the last wander; the follow flag drops with the press.
+    AimSnap gap;
+    gap.frame(2, 1.0f, headPose(0, 0, 0.0, -0.03, 0.0), true, true);
+    gap.frame(2, 1.0f, headPose(0, 0, 0.0, -0.9, 0.0), false, true);
+    check(gap.state() == AimSnapState::Held && gap.offset(1.0f, s) && offsetIs(s, 0.0, 0.03, 0.0), "FOLLOW, AN INVALID POSE: the last wander is kept");
+    gap.frame(2, 0.0f, headPose(0, 0, 0.0, 0.0, 0.0), true, true);
+    check(gap.state() == AimSnapState::None && !gap.follow(), "...and blend 0 drops the snap and the flag");
+    // Follow leaves a held press alone when it is switched off: the flag follows the caller, the kept wander stays (as in .34).
+    AimSnap off;
+    off.frame(2, 1.0f, headPose(0, 0, 0.0, -0.03, 0.0), true, true);
+    off.frame(2, 1.0f, headPose(0, 0, 0.0, -0.05, 0.0), true, false);
+    check(!off.follow() && off.offset(1.0f, s) && offsetIs(s, 0.0, 0.03, 0.0), "FOLLOW SWITCHED OFF MID-PRESS: the last wander stays, no new one is taken");
+    // The line.
+    std::vector<std::string> lines;
+    auto sink = [&](const char* l) { lines.emplace_back(l); };
+    AimSnap logged;
+    AimEyeLog log;
+    logged.frame(2, 0.13f, headPose(0, 0, 0.0, -0.045, 0.0), true, true);
+    log.frame(6, 2, 0.13f, 1, 32.0, logged, 1, 100, sink);
+    check(lines.size() == 1 && lines[0] == "aim_eye_on,eye=right,shift_mm=32.0,snap=held,snap_mm=45.0,snap_y_mm=-45.0,follow=1,sequence=1\n",
+          "THE LINE: aim_eye_on says follow=1 when the head aim feature acts");
   }
 }
 

@@ -230,6 +230,12 @@ struct State {
     double headYaw = 0.0, headPitchUp = 0.0;   // the last pose's angles
     double filtYaw = 0.0, filtPitchUp = 0.0;   // after the filter
     double level = 0.0;
+    // The hold (menu and focus): the output's angles as the last frame gave them (before the level), the values frozen when a hold began, and how far the
+    // output has come back from them to the live angles (1 = live).
+    double baseYaw = 0.0, basePitch = 0.0;
+    double frozenYaw = 0.0, frozenPitch = 0.0;
+    double live = 1.0;
+    bool holding = false;
 };
 
 struct Output {
@@ -239,6 +245,7 @@ struct Output {
     float level = 0.0f;
     Reason reason = Reason::Key;   // the first shut gate, None when all are open
     double lagDeg = 0.0;         // the largest |head - filtered| of the two axes, this frame
+    bool held = false;           // a menu or the GUI focus holds the angles at their last values (the level stays)
 };
 
 inline Reason firstShutGate(const Inputs& in, bool poseFresh) {
@@ -274,15 +281,35 @@ inline Output step(State& s, const Inputs& in) {
     const bool poseFresh = s.hasAngles && in.nowMs - s.lastPoseMs <= kPoseStaleMs;
     out.reason = firstShutGate(in, poseFresh);
 
+    // A menu or the GUI focus, with every gate before them open and something to hold, holds the angles where they were (the level stays, the filter goes on).
+    // Any other shut gate lets the level run out, from the held angles when a hold or the way back from one is still on.
+    const bool hold = (out.reason == Reason::Menu || out.reason == Reason::Focus) && s.level > 0.0;
     const double move = dt / kRampSeconds;
-    if (out.reason == Reason::None) s.level = s.level + move >= 1.0 ? 1.0 : s.level + move;
+    if (out.reason == Reason::None || hold) s.level = s.level + move >= 1.0 ? 1.0 : s.level + move;
     else s.level = s.level - move <= 0.0 ? 0.0 : s.level - move;
+    if (hold) {
+        if (!s.holding) { s.frozenYaw = s.baseYaw; s.frozenPitch = s.basePitch; s.live = 0.0; }
+        s.holding = true;
+        out.held = true;
+    } else {
+        s.holding = false;
+        if (out.reason == Reason::None) s.live = s.live + move >= 1.0 ? 1.0 : s.live + move;
+        else if (s.level <= 0.0) s.live = 1.0;
+        else if (s.live < 1.0) { s.frozenYaw = s.baseYaw; s.frozenPitch = s.basePitch; s.live = 0.0; }   // leaving from the held angles
+    }
+    double baseYaw = s.filtYaw, basePitch = -s.filtPitchUp;
+    if (s.live < 1.0) {
+        baseYaw = detail::wrap(s.frozenYaw + detail::wrap(s.filtYaw - s.frozenYaw) * s.live);
+        basePitch = s.frozenPitch + (-s.filtPitchUp - s.frozenPitch) * s.live;
+    }
+    s.baseYaw = baseYaw;
+    s.basePitch = basePitch;
 
-    double yaw = s.level * s.filtYaw;
+    double yaw = s.level * baseYaw;
     if (yaw > kYawLimitRad) { yaw = kYawLimitRad; out.capped = true; }
     if (yaw < -kYawLimitRad) { yaw = -kYawLimitRad; out.capped = true; }
     out.yawAdded = float(yaw);
-    out.pitchTarget = float(-s.filtPitchUp);
+    out.pitchTarget = float(basePitch);
     out.level = float(s.level);
     if (s.level <= 0.0 && in.key == Key::Off) s = State{};
     return out;
@@ -367,10 +394,12 @@ inline int formatUnknownKey(const char* which, const char* raw, const char* read
 inline int formatEdge(bool on, Reason why, char* out, size_t cap) {
     return on ? std::snprintf(out, cap, "head aim: on") : std::snprintf(out, cap, "head aim: off (%s)", reasonName(why));
 }
+// When a hold begins (the way out of it is the "on" line).
+inline int formatHold(Reason why, char* out, size_t cap) { return std::snprintf(out, cap, "head aim: hold (%s)", reasonName(why)); }
 
 // The 30 s window's counts.
 struct Window {
-    uint64_t frames = 0, active = 0, capped = 0;
+    uint64_t frames = 0, active = 0, capped = 0, held = 0;
     double maxYawDeg = 0, maxPitchDeg = 0, maxLagDeg = 0;
     uint32_t channel = 0;   // the last request version: 8 reaches the feature, 7 or less does not, 0 no runtime asked
     double stickDeg = 0;    // the player's last original angle 1, degrees, the game's sign (+ = down); set by the reader of the window
@@ -386,14 +415,15 @@ inline void noteFrame(Window& w, const Output& o, float pitchAddedRad, uint32_t 
         if (pitchDeg > w.maxPitchDeg) w.maxPitchDeg = pitchDeg;
         if (o.capped) ++w.capped;
     }
+    if (o.held) ++w.held;
     if (o.lagDeg > w.maxLagDeg) w.maxLagDeg = o.lagDeg;
 }
-// head_aim_feature,frames=..,active=..,max_yaw_deg=..,max_pitch_deg=..,capped=..,max_lag_deg=..,channel=..,stick_deg=..
+// head_aim_feature,frames=..,active=..,max_yaw_deg=..,max_pitch_deg=..,capped=..,max_lag_deg=..,channel=..,stick_deg=..,held=..
 inline int formatSummary(const Window& w, char* out, size_t cap) {
     return std::snprintf(out, cap,
-                         "head_aim_feature,frames=%llu,active=%llu,max_yaw_deg=%.1f,max_pitch_deg=%.1f,capped=%llu,max_lag_deg=%.1f,channel=%u,stick_deg=%.1f",
+                         "head_aim_feature,frames=%llu,active=%llu,max_yaw_deg=%.1f,max_pitch_deg=%.1f,capped=%llu,max_lag_deg=%.1f,channel=%u,stick_deg=%.1f,held=%llu",
                          (unsigned long long)w.frames, (unsigned long long)w.active, w.maxYawDeg, w.maxPitchDeg, (unsigned long long)w.capped,
-                         w.maxLagDeg, w.channel, w.stickDeg);
+                         w.maxLagDeg, w.channel, w.stickDeg, (unsigned long long)w.held);
 }
 
 }  // namespace ha

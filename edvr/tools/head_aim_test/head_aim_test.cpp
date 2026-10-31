@@ -214,9 +214,7 @@ void partRampAndGates() {
         {"in the ship", Reason::Ship, [](Inputs& in) { in.journalOnFoot = false; }},
         {"no player", Reason::Player, [](Inputs& in) { in.player = false; }},
         {"channel below 8", Reason::Channel, [](Inputs& in) { in.channel8 = false; }},
-        {"a menu", Reason::Menu, [](Inputs& in) { in.menu = true; }},
-        {"gui focus", Reason::Focus, [](Inputs& in) { in.focus = 5; }},
-    };
+    };   // a menu and the GUI focus hold instead of leaving: partHold
     for (const Case& c : cases) {
         State st;
         uint64_t u = 1000;
@@ -374,7 +372,7 @@ void partLines() {
     }
     Window w;
     formatSummary(w, line, sizeof(line));
-    check(std::strcmp(line, "head_aim_feature,frames=0,active=0,max_yaw_deg=0.0,max_pitch_deg=0.0,capped=0,max_lag_deg=0.0,channel=0,stick_deg=0.0") == 0,
+    check(std::strcmp(line, "head_aim_feature,frames=0,active=0,max_yaw_deg=0.0,max_pitch_deg=0.0,capped=0,max_lag_deg=0.0,channel=0,stick_deg=0.0,held=0") == 0,
           "the summary with zeros: a feature that never ran says so");
     Output o;
     o.level = 1.0f;
@@ -389,14 +387,158 @@ void partLines() {
     noteFrame(w, idle, 0.0f, 8);
     w.stickDeg = 8.04;
     formatSummary(w, line, sizeof(line));
-    check(std::strcmp(line, "head_aim_feature,frames=3,active=2,max_yaw_deg=90.0,max_pitch_deg=20.0,capped=1,max_lag_deg=4.3,channel=8,stick_deg=8.0") == 0 ||
-              std::strcmp(line, "head_aim_feature,frames=3,active=2,max_yaw_deg=90.0,max_pitch_deg=20.0,capped=1,max_lag_deg=4.2,channel=8,stick_deg=8.0") == 0,
+    check(std::strcmp(line, "head_aim_feature,frames=3,active=2,max_yaw_deg=90.0,max_pitch_deg=20.0,capped=1,max_lag_deg=4.3,channel=8,stick_deg=8.0,held=0") == 0 ||
+              std::strcmp(line, "head_aim_feature,frames=3,active=2,max_yaw_deg=90.0,max_pitch_deg=20.0,capped=1,max_lag_deg=4.2,channel=8,stick_deg=8.0,held=0") == 0,
           "the summary counts frames, active frames, the largest angles, the capped and the lag");
+    {
+        Window wh;
+        Output held;
+        held.level = 1.0f;
+        held.held = true;
+        noteFrame(wh, held, 0.0f, 8);
+        noteFrame(wh, held, 0.0f, 8);
+        noteFrame(wh, idle, 0.0f, 8);
+        formatSummary(wh, line, sizeof(line));
+        check(wh.held == 2 && std::strstr(line, ",stick_deg=0.0,held=2") != nullptr, "the summary counts the held frames, held= after stick_deg");
+        formatHold(Reason::Menu, line, sizeof(line));
+        check(std::strcmp(line, "head aim: hold (menu)") == 0, "the hold line, menu");
+        formatHold(Reason::Focus, line, sizeof(line));
+        check(std::strcmp(line, "head aim: hold (focus)") == 0, "the hold line, focus");
+    }
     Window w7;
     noteFrame(w7, idle, 0.0f, 7);
     formatSummary(w7, line, sizeof(line));
     check(std::strstr(line, "frames=1,active=0,") != nullptr && std::strstr(line, ",channel=7") != nullptr,
           "channel 7 with no active frames reads differently from the key being off (no line at all)");
+}
+
+// A menu or the GUI focus holds the angles; the head's moves go on in the filter; the way back is 0.5 s long without a jump; another gate still leaves.
+void partHold() {
+    float a[12], b[12];
+    pose(30, 20, 0, a);
+    pose(-40, -10, 0, b);
+    struct Gate { const char* name; Reason want; void (*shut)(Inputs&); };
+    const Gate gates[] = {
+        {"a menu", Reason::Menu, [](Inputs& in) { in.menu = true; }},
+        {"gui focus", Reason::Focus, [](Inputs& in) { in.focus = 5; }},
+    };
+    for (const Gate& g : gates) {
+        char what[120];
+        State st;
+        uint64_t u = 1000;
+        Output o;
+        for (int i = 0; i < 60; ++i) o = step(st, open(a, u += kFrameMs, Key::Raw));
+        const float yaw0 = o.yawAdded, pitch0 = o.pitchTarget;
+        check(o.level == 1.0f && !o.held && near(yaw0, 30 * kDeg) && near(pitch0, -20 * kDeg), "hold setup: level 1 on the first pose");
+        // The head moves to pose b while the gate is shut: the level stays 1, the output stays at the last values, the filter follows the head.
+        bool still = true, stays = true, heldAll = true;
+        for (int i = 0; i < 60; ++i) {
+            Inputs in = open(b, u += kFrameMs, Key::Raw);
+            g.shut(in);
+            o = step(st, in);
+            still = still && o.yawAdded == yaw0 && o.pitchTarget == pitch0;
+            stays = stays && o.level == 1.0f;
+            heldAll = heldAll && o.held && o.reason == g.want;
+        }
+        std::snprintf(what, sizeof(what), "%s: the level stays 1 while held", g.name);
+        check(stays, what);
+        std::snprintf(what, sizeof(what), "%s: yaw and tilt hold the last values while the head moves", g.name);
+        check(still, what);
+        std::snprintf(what, sizeof(what), "%s: held and the reason are reported", g.name);
+        check(heldAll, what);
+        std::snprintf(what, sizeof(what), "%s: the filter goes on while held", g.name);
+        check(near(st.filtYaw, -40 * kDeg, 1e-3) && near(st.filtPitchUp, -10 * kDeg, 1e-3), what);
+        // Out of the hold: from the frozen values to the live ones in 0.5 s, a small step each frame.
+        double lastYaw = o.yawAdded, lastPitch = o.pitchTarget, worst = 0;
+        int framesToLive = -1;
+        for (int i = 1; i <= 40; ++i) {
+            o = step(st, open(b, u += kFrameMs, Key::Raw));
+            const double dy = std::fabs(double(o.yawAdded) - lastYaw), dp = std::fabs(double(o.pitchTarget) - lastPitch);
+            if (dy > worst) worst = dy;
+            if (dp > worst) worst = dp;
+            lastYaw = o.yawAdded;
+            lastPitch = o.pitchTarget;
+            if (i == 1) {
+                std::snprintf(what, sizeof(what), "%s: the way out is no longer a hold", g.name);
+                check(!o.held && o.level == 1.0f, what);
+            }
+            if (framesToLive < 0 && near(o.yawAdded, -40 * kDeg, 1e-4) && near(o.pitchTarget, 10 * kDeg, 1e-4)) framesToLive = i;
+        }
+        // The largest move is 70 degrees of yaw over 0.5 s: a frame is 28/500 of it.
+        std::snprintf(what, sizeof(what), "%s: the way out has no jump", g.name);
+        check(worst <= 70 * kDeg * kFrameMs / 500.0 + 1e-4, what);
+        std::snprintf(what, sizeof(what), "%s: live again in about 0.5 s", g.name);
+        check(framesToLive >= 17 && framesToLive <= 20, what);
+    }
+    // Another gate shutting during a hold sends the level away, from the frozen values (the head's moves stay out of it).
+    {
+        State st;
+        uint64_t u = 1000;
+        Output o;
+        for (int i = 0; i < 60; ++i) o = step(st, open(a, u += kFrameMs, Key::Raw));
+        for (int i = 0; i < 10; ++i) { Inputs in = open(b, u += kFrameMs, Key::Raw); in.menu = true; o = step(st, in); }
+        check(o.held, "ship in a hold: setup is held");
+        Inputs in = open(b, u += kFrameMs, Key::Raw);
+        in.menu = true;
+        in.journalOnFoot = false;
+        o = step(st, in);
+        check(o.reason == Reason::Ship && !o.held && o.level < 1.0f && o.level > 0.9f, "ship in a hold: the level leaves, the reason is ship");
+        bool fromFrozen = near(o.pitchTarget, -20 * kDeg), mono = true;
+        double last = o.level;
+        int framesToZero = -1;
+        for (int i = 1; i <= 40; ++i) {
+            in.nowMs = u += kFrameMs;
+            o = step(st, in);
+            fromFrozen = fromFrozen && (o.level <= 0.0f || near(o.pitchTarget, -20 * kDeg)) && near(o.yawAdded, o.level * 30 * kDeg, 1e-4);
+            mono = mono && o.level <= last;
+            last = o.level;
+            if (framesToZero < 0 && o.level <= 0.0f) framesToZero = i;
+        }
+        check(fromFrozen, "ship in a hold: the angles leave from the frozen values");
+        check(mono && framesToZero >= 16 && framesToZero <= 19, "ship in a hold: down in about 0.5 s");
+        // The same for the key going off during a hold.
+        State sk;
+        u = 1000;
+        for (int i = 0; i < 60; ++i) o = step(sk, open(a, u += kFrameMs, Key::Raw));
+        for (int i = 0; i < 10; ++i) { Inputs k = open(b, u += kFrameMs, Key::Raw); k.menu = true; o = step(sk, k); }
+        Inputs k = open(b, u += kFrameMs, Key::Off);
+        k.menu = true;
+        o = step(sk, k);
+        check(o.reason == Reason::Key && !o.held && o.level < 1.0f && near(o.pitchTarget, -20 * kDeg), "key off in a hold: the key's reason, from the frozen values");
+    }
+    // A hold taken again half way out of the previous one continues from where the output is, with no jump.
+    {
+        State st;
+        uint64_t u = 1000;
+        Output o;
+        for (int i = 0; i < 60; ++i) o = step(st, open(a, u += kFrameMs, Key::Raw));
+        for (int i = 0; i < 10; ++i) { Inputs in = open(b, u += kFrameMs, Key::Raw); in.menu = true; o = step(st, in); }
+        for (int i = 0; i < 8; ++i) o = step(st, open(b, u += kFrameMs, Key::Raw));
+        const float y = o.yawAdded, t = o.pitchTarget;
+        check(!near(y, 30 * kDeg, 1e-3) && !near(y, -40 * kDeg, 1e-3), "re-hold: setup is half way out");
+        Inputs in = open(b, u += kFrameMs, Key::Raw);
+        in.menu = true;
+        o = step(st, in);
+        check(o.held && o.yawAdded == y && o.pitchTarget == t, "re-hold: held at the values the output had");
+    }
+    // Nothing to hold at level 0, and a menu with the key off is the ordinary path.
+    {
+        State st;
+        Output o;
+        for (int i = 0; i < 5; ++i) {
+            Inputs in = open(a, 1000 + 28 * uint64_t(i));
+            in.menu = true;
+            o = step(st, in);
+        }
+        check(!o.held && o.level == 0.0f && o.reason == Reason::Menu, "a menu at level 0: no hold, the level stays 0");
+        State so;
+        uint64_t u = 1000;
+        for (int i = 0; i < 60; ++i) o = step(so, open(a, u += kFrameMs, Key::On));
+        Inputs off = open(a, u += kFrameMs, Key::Off);
+        off.menu = true;
+        o = step(so, off);
+        check(!o.held && o.reason == Reason::Key && o.level < 1.0f, "a menu with the key off: the ordinary path, the level leaves");
+    }
 }
 
 void partSyncAndStick() {
@@ -494,6 +636,7 @@ int main(int argc, char** argv) {
     partRampAndGates();
     partOutputs();
     partLines();
+    partHold();
     partSyncAndStick();
     std::printf("%s: head_aim_test, %d checks, %d failed\n", g_failures ? "FAIL" : "PASS", g_checks, g_failures);
     return g_failures ? 1 : 0;

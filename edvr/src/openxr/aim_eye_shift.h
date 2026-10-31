@@ -9,6 +9,9 @@
 // back by blend times that, in tracking axes and without any rotation; the eye shift is added on top. At blend 1 the game's aiming eye stands at the
 // origin, as right after a recenter. Kept once per press, dropped when the blend is back to 0 or the origin changes; more than kAimSnapMaxM away is a
 // forgotten recenter or a tracking fault, and that press gets no snap.
+// The head aim feature's follow (openspec change on-foot-head-aim, design 14): while the feature acts, the wander is taken from every frame's pose instead of
+// once per press, so the game's eye stays at the seated origin, the point the character turns about; a head that turns about its neck does not carry the
+// sights off the eye. The far limit is the same, and a press that has gone far stays far.
 // The head aim probe (openspec change on-foot-head-aim-probe): the d3d11 half shifts one of the game's angles of the commander and sends the angle the
 // game's head pose is turned by about the seated space's vertical (EdvrNativeFrameOutput::headAimYawRad, version 7), so that the game's camera (head
 // pose x the character's eye) can be held still while the character turns. The whole pose turns, rotation and translation, about the axis through the
@@ -137,15 +140,18 @@ inline const char* aimSnapName(AimSnapState s) { return s == AimSnapState::Held 
 class AimSnap {
  public:
   // Once a runtime frame, with the channel's eye and blend and the frame's real (unshifted) head-to-tracking pose. Keeps the pose's translation when the
-  // blend is above 0 for eye 1/2 and nothing is kept yet; a blend back to 0 (or no eye) drops it.
-  void frame(uint32_t aimEye, float blend, const vr::HmdMatrix34_t& pose, bool poseValid) {
+  // blend is above 0 for eye 1/2 and nothing is kept yet; a blend back to 0 (or no eye) drops it. `follow` (the head aim feature acts): the wander is kept
+  // again from every frame's pose while the press is not far; without it, as in .34, once per press.
+  void frame(uint32_t aimEye, float blend, const vr::HmdMatrix34_t& pose, bool poseValid, bool follow = false) {
     if ((aimEye != 1 && aimEye != 2) || !(blend > 0.0f)) { reset(); return; }
-    if (state_ != AimSnapState::None || !poseValid) return;
+    follow_ = follow;
+    if (state_ == AimSnapState::Far || !poseValid) return;
+    if (state_ == AimSnapState::Held && !follow) return;
     for (int i = 0; i < 3; ++i) p0_[i] = pose.m[i][3];
     const double len = std::sqrt(p0_[0] * p0_[0] + p0_[1] * p0_[1] + p0_[2] * p0_[2]);
     state_ = std::isfinite(len) && len <= kAimSnapMaxM ? AimSnapState::Held : AimSnapState::Far;
   }
-  void reset() { state_ = AimSnapState::None; p0_[0] = p0_[1] = p0_[2] = 0.0; }
+  void reset() { state_ = AimSnapState::None; follow_ = false; p0_[0] = p0_[1] = p0_[2] = 0.0; }
   // This frame's offset in tracking axes and metres: -blend * the kept wander (blend clamped to 1). False, and zero, unless held and the blend is above 0.
   bool offset(float blend, double out[3]) const {
     out[0] = out[1] = out[2] = 0.0;
@@ -155,18 +161,20 @@ class AimSnap {
     return true;
   }
   AimSnapState state() const { return state_; }
+  bool follow() const { return follow_; }
   // The kept wander's length and its vertical part (minus: the head is below the origin), millimetres.
   double mm() const { return 1000.0 * std::sqrt(p0_[0] * p0_[0] + p0_[1] * p0_[1] + p0_[2] * p0_[2]); }
   double yMm() const { return 1000.0 * p0_[1]; }
  private:
   AimSnapState state_ = AimSnapState::None;
+  bool follow_ = false;
   double p0_[3]{};
 };
 
 // The aiming eye's log lines, once a runtime frame:
-//   aim_eye_on,eye=right,shift_mm=31.8,snap=held,snap_mm=48.2,snap_y_mm=-45.0,sequence=N   the blend left 0 (shift_mm is the full eye offset blend 1
+//   aim_eye_on,eye=right,shift_mm=31.8,snap=held,snap_mm=48.2,snap_y_mm=-45.0,follow=0,sequence=N   the blend left 0 (shift_mm is the full eye offset blend 1
 //     moves by; snap_mm the kept wander from the origin, snap_y_mm its vertical part). snap=far,snap_mm=612.0: beyond kAimSnapMaxM, no snap this press;
-//     snap=none: no valid pose this frame, the wander is kept next frame
+//     snap=none: no valid pose this frame, the wander is kept next frame. follow=1: the head aim feature acts, the wander is taken from every frame's pose
 //   aim_eye_off,sequence=N                          ...and came back to 0
 //   aim_eye_summary,frames=F,shifted=S,max_mm=M,max_snap_mm=P,channel=C   every 30 s while the d3d11 half says on foot, or ALWAYS when the channel is
 //     below 6 (an older d3d11.dll cannot say on foot): channel=5 with shifted=0 then reads "the fix never reached the runtime", not "LT was never held".
@@ -187,8 +195,8 @@ class AimEyeLog {
         std::snprintf(snapPart, sizeof(snapPart), "snap=far,snap_mm=%.1f", snap.mm());
       else
         std::snprintf(snapPart, sizeof(snapPart), "snap=none");
-      std::snprintf(line, sizeof(line), "aim_eye_on,eye=%s,shift_mm=%.1f,%s,sequence=%llu\n", aimEyeName(eye), fullMm, snapPart,
-                    (unsigned long long)sequence);
+      std::snprintf(line, sizeof(line), "aim_eye_on,eye=%s,shift_mm=%.1f,%s,follow=%d,sequence=%llu\n", aimEyeName(eye), fullMm, snapPart,
+                    snap.follow() ? 1 : 0, (unsigned long long)sequence);
       sink(line);
     } else if (!shifted && on_) {
       std::snprintf(line, sizeof(line), "aim_eye_off,sequence=%llu\n", (unsigned long long)sequence);

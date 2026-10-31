@@ -1246,13 +1246,14 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // stands where the middle of the head was, before the temporal pass is told the pose the game draws from. Not the layer: frameViews below stay
     // the located views, so the headset takes the image as seen from the real eyes and never turns it back.
     // The position snap rides the same blend: the wander is kept from the real (unshifted) pose, and while the eye shift acts the game's head is
-    // also moved back by blend times it. Neither touches the layer, located.headPose or frameViews.
+    // also moved back by blend times it. Neither touches the layer, located.headPose or frameViews. While the head aim feature acts the wander is taken
+    // from this frame's pose, not the press's (AimSnap::frame, follow), so the game's eye stays at the origin the character turns about.
     aimEyeHead[0]=aimEyeHead[1]=aimEyeHead[2]=0;aimEyeHeadKnown=false;
     aimSnapTracking[0]=aimSnapTracking[1]=aimSnapTracking[2]=0;aimSnapTrackingKnown=false;
     headAimYaw=0;headAimPitch=0;
     if(features.acquired()&&featureFrameKnown) {
       const auto& snapFrom=render.pose.bPoseIsValid?render.pose:game.pose;
-      aimSnap.frame(featureFrame.aimEye,featureFrame.aimEyeBlend,snapFrom.mDeviceToAbsoluteTracking,snapFrom.bPoseIsValid);
+      aimSnap.frame(featureFrame.aimEye,featureFrame.aimEyeBlend,snapFrom.mDeviceToAbsoluteTracking,snapFrom.bPoseIsValid,featureFrame.headAimFeature==1);
       double aimFullMm=0;
       if(locatedValid) {
         aimEyeHeadKnown=aimEyeHeadOffset(temporalGeometry.eyeToHead,featureFrame.aimEye,featureFrame.aimEyeBlend,aimEyeHead);

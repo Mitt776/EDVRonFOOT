@@ -61,6 +61,7 @@ std::atomic<uint64_t> g_latchMs{0};
 std::atomic<bool> g_featLead{false};
 std::atomic<float> g_featYaw{0.0f}, g_featTarget{0.0f}, g_featLevel{0.0f}, g_featPitchAdded{0.0f};
 std::atomic<int> g_featReason{int(ha::Reason::Key)};
+std::atomic<bool> g_featHeld{false};   // a menu or the GUI focus holds the angles (the latch's verdict, for the hold line)
 // The player's angle 1 as the game built it, from the last getter call on the player (the latch needs it for the tilt added).
 std::atomic<float> g_lastOrig1{0.0f};
 // The sync keys (published by the frame thread, read by the latch), and the camera counter: whether this game frame has had its latch, and how many camera
@@ -164,6 +165,7 @@ bool latchFeature(uint64_t nowMs, const float* head, uint32_t version, head_aim:
         g_featLead.store(false, std::memory_order_relaxed);
         g_featLevel.store(0.0f, std::memory_order_relaxed);
         g_featReason.store(int(ha::Reason::Key), std::memory_order_relaxed);
+        g_featHeld.store(false, std::memory_order_relaxed);
         return false;
     }
     const ha::PitchComp comp = ha::PitchComp(g_featComp.load(std::memory_order_acquire));
@@ -217,6 +219,7 @@ bool latchFeature(uint64_t nowMs, const float* head, uint32_t version, head_aim:
         g_featLevel.store(0.0f, std::memory_order_relaxed);
     }
     g_featReason.store(int(o.reason), std::memory_order_relaxed);
+    g_featHeld.store(lead && o.held, std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lock(g_featWindowMutex);
         ha::noteFrame(g_featWindow, o, pitchAdded, version);
@@ -365,7 +368,7 @@ void headAimProbeFrameBoundary() {
     static uintptr_t cameraHmc = 0;
     static ha::Key featKey = ha::Key::Off;
     static ha::PitchComp featComp = ha::PitchComp::Plus;
-    static bool saidFeatKeys = false, featOn = false;
+    static bool saidFeatKeys = false, featOn = false, featHeld = false;
     static ha::Sync featSync = ha::Sync::Latch;
     static ha::StickComp featStick = ha::StickComp::Off;
     static double featOffset = 0.0;
@@ -507,6 +510,17 @@ void headAimProbeFrameBoundary() {
         ha::formatEdge(featNow, featFresh ? ha::Reason(g_featReason.load(std::memory_order_relaxed)) : ha::Reason::Channel, line, sizeof(line));
         say(line);
         featOn = featNow;
+    }
+    // A hold on a menu or the GUI focus keeps the level, so it has its own edges: "hold (reason)" at the start, "on" when the way back to the live angles
+    // begins (only if the gates have opened; a hold cut short by another gate ends with that gate's "off" line).
+    const bool heldNow = g_featHeld.load(std::memory_order_relaxed) && featFresh;
+    if (heldNow != featHeld) {
+        const ha::Reason why = ha::Reason(g_featReason.load(std::memory_order_relaxed));
+        if (heldNow) ha::formatHold(why, line, sizeof(line));
+        else if (featNow && why == ha::Reason::None) ha::formatEdge(true, why, line, sizeof(line));
+        else line[0] = '\0';
+        if (line[0]) say(line);
+        featHeld = heldNow;
     }
 
     // The watch line, twice a second on foot.
