@@ -30,11 +30,11 @@ enum class Key : int { Off = 0, On, Raw };
 // experimental.native_vr_on_foot_head_aim_pitch_comp: plus (the default; also when empty and, with *valid false, for anything unknown), minus, off.
 enum class PitchComp : int { Plus = 0, Minus, Off };
 
-// experimental.native_vr_on_foot_head_aim_sync (temporary): latch (the default; also when empty and, with *valid false, for anything unknown) answers the
-// runtime with the latch's own new angles, camera answers with the angles in force at the game's last camera build, when there was one since the last latch.
+// experimental.native_vr_on_foot_head_aim_sync (temporary): camera (the default; also when empty and, with *valid false, for anything unknown) answers the
+// runtime with the angles in force at the game's last camera build, when there was one since the last latch; latch answers with the latch's own new angles.
 enum class Sync : int { Latch = 0, Camera };
-// experimental.native_vr_on_foot_head_aim_stick_comp (temporary): off (the default; also when empty and, with *valid false, for anything unknown) turns the
-// pose back by what angle 1 got on top of the original, on by the head's whole tilt times the level (the stick's tilt comes off the picture too).
+// experimental.native_vr_on_foot_head_aim_stick_comp (temporary): on (the default; also when empty and, with *valid false, for anything unknown) turns the
+// pose back by the head's whole tilt times the level (the stick's tilt comes off the picture too), off by what angle 1 got on top of the original.
 enum class StickComp : int { Off = 0, On };
 
 inline const char* keyName(Key k) { return k == Key::On ? "on" : k == Key::Raw ? "raw" : "off"; }
@@ -94,36 +94,37 @@ inline Sync parseSync(const char* raw, bool* valid = nullptr) {
     if (valid) *valid = true;
     size_t n = 0;
     const char* t = detail::trim(raw, &n);
-    if (!n || detail::is(t, n, "latch")) return Sync::Latch;
-    if (detail::is(t, n, "camera")) return Sync::Camera;
+    if (!n || detail::is(t, n, "camera")) return Sync::Camera;
+    if (detail::is(t, n, "latch")) return Sync::Latch;
     if (valid) *valid = false;
-    return Sync::Latch;
+    return Sync::Camera;
 }
 inline StickComp parseStickComp(const char* raw, bool* valid = nullptr) {
     if (valid) *valid = true;
     size_t n = 0;
     const char* t = detail::trim(raw, &n);
-    if (!n || detail::is(t, n, "off")) return StickComp::Off;
-    if (detail::is(t, n, "on")) return StickComp::On;
+    if (!n || detail::is(t, n, "on")) return StickComp::On;
+    if (detail::is(t, n, "off")) return StickComp::Off;
     if (valid) *valid = false;
-    return StickComp::Off;
+    return StickComp::On;
 }
 
-// experimental.native_vr_on_foot_head_aim_pitch_offset (temporary), degrees, + = the barrel lower: empty reads 0, a number is held to +-kPitchOffsetMaxDeg,
-// anything else (text after the number, nan, inf) reads 0 and is reported with *valid false.
+// experimental.native_vr_on_foot_head_aim_pitch_offset (temporary), degrees, + = the barrel lower: empty reads 10, a number is held to +-kPitchOffsetMaxDeg,
+// anything else (text after the number, nan, inf) reads 10 and is reported with *valid false.
 constexpr double kPitchOffsetMaxDeg = 30.0;
+constexpr double kPitchOffsetDefaultDeg = 10.0;
 inline double parsePitchOffsetDeg(const char* raw, bool* valid = nullptr) {
     if (valid) *valid = true;
     size_t n = 0;
     const char* t = detail::trim(raw, &n);
-    if (!n) return 0.0;
+    if (!n) return kPitchOffsetDefaultDeg;
     char buf[48];
-    if (n >= sizeof(buf)) { if (valid) *valid = false; return 0.0; }
+    if (n >= sizeof(buf)) { if (valid) *valid = false; return kPitchOffsetDefaultDeg; }
     std::memcpy(buf, t, n);
     buf[n] = '\0';
     char* end = nullptr;
     const double v = std::strtod(buf, &end);
-    if (end == buf || *end != '\0' || !std::isfinite(v)) { if (valid) *valid = false; return 0.0; }
+    if (end == buf || *end != '\0' || !std::isfinite(v)) { if (valid) *valid = false; return kPitchOffsetDefaultDeg; }
     return v > kPitchOffsetMaxDeg ? kPitchOffsetMaxDeg : v < -kPitchOffsetMaxDeg ? -kPitchOffsetMaxDeg : v;
 }
 // The tilt the head asks for with the offset on it (the game's sign, + = down). The offset goes in before the blend and before the pose correction, so the

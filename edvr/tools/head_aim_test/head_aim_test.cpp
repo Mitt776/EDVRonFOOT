@@ -543,16 +543,16 @@ void partHold() {
 
 void partSyncAndStick() {
     bool v = false;
-    check(parseSync(nullptr, &v) == Sync::Latch && v, "no sync key is latch");
-    check(parseSync("", &v) == Sync::Latch && v, "an empty sync key is latch");
+    check(parseSync(nullptr, &v) == Sync::Camera && v, "no sync key is camera");
+    check(parseSync("", &v) == Sync::Camera && v, "an empty sync key is camera");
     check(parseSync("latch", &v) == Sync::Latch && v, "latch");
     check(parseSync(" Camera \r\n", &v) == Sync::Camera && v, "camera, case and padding");
-    check(parseSync("both", &v) == Sync::Latch && !v, "junk sync reads latch and is reported");
-    check(parseStickComp(nullptr, &v) == StickComp::Off && v, "no stick key is off");
-    check(parseStickComp("", &v) == StickComp::Off && v, "an empty stick key is off");
+    check(parseSync("both", &v) == Sync::Camera && !v, "junk sync reads camera and is reported");
+    check(parseStickComp(nullptr, &v) == StickComp::On && v, "no stick key is on");
+    check(parseStickComp("", &v) == StickComp::On && v, "an empty stick key is on");
     check(parseStickComp("off", &v) == StickComp::Off && v, "stick off");
     check(parseStickComp(" ON ", &v) == StickComp::On && v, "stick on, case and padding");
-    check(parseStickComp("yes", &v) == StickComp::Off && !v, "junk stick reads off and is reported");
+    check(parseStickComp("yes", &v) == StickComp::On && !v, "junk stick reads on and is reported");
 
     // The camera counter: every class, and a frame without a latch (its camera moments count before).
     check(classifyCamera(0, 0, true) == CamClass::None, "no camera moment: none");
@@ -605,13 +605,19 @@ void partSyncAndStick() {
           "off: as before, what angle 1 got on top of the original");
 
     // The pitch offset: read, held to +-30, and carried by the blend and the correction alike.
-    check(parsePitchOffsetDeg(nullptr, &v) == 0.0 && v, "no offset key is 0");
-    check(parsePitchOffsetDeg("", &v) == 0.0 && v, "an empty offset is 0");
+    check(parsePitchOffsetDeg(nullptr, &v) == 10.0 && v, "no offset key is 10");
+    check(parsePitchOffsetDeg("", &v) == 10.0 && v, "an empty offset is 10");
     check(parsePitchOffsetDeg(" 10 ", &v) == 10.0 && v, "offset 10, padding");
     check(parsePitchOffsetDeg("-7.5", &v) == -7.5 && v, "a negative offset");
-    check(parsePitchOffsetDeg("abc", &v) == 0.0 && !v, "junk offset reads 0 and is reported");
-    check(parsePitchOffsetDeg("10deg", &v) == 0.0 && !v, "a number with text after it reads 0 and is reported");
-    check(parsePitchOffsetDeg("nan", &v) == 0.0 && !v && parsePitchOffsetDeg("inf", &v) == 0.0 && !v, "nan and inf read 0 and are reported");
+    check(parsePitchOffsetDeg("abc", &v) == 10.0 && !v, "junk offset reads 10 and is reported");
+    check(parsePitchOffsetDeg("10deg", &v) == 10.0 && !v, "a number with text after it reads 10 and is reported");
+    check(parsePitchOffsetDeg("nan", &v) == 10.0 && !v && parsePitchOffsetDeg("inf", &v) == 10.0 && !v, "nan and inf read 10 and are reported");
+    check(parsePitchOffsetDeg("0", &v) == 0.0 && v, "an explicit 0 stays 0");
+    check(parseSync("   ", &v) == Sync::Camera && v && parseStickComp("  ", &v) == StickComp::On && v && parsePitchOffsetDeg("  ", &v) == 10.0 && v, "blank values read the defaults, valid");
+    formatUnknownKey("native_vr_on_foot_head_aim_pitch_offset", "abc", "10", line, sizeof(line));
+    check(std::strcmp(line, "head aim: native_vr_on_foot_head_aim_pitch_offset value 'abc' not understood, reads 10") == 0, "the unknown offset line");
+    formatUnknownKey("native_vr_on_foot_head_aim_sync", "both", "camera", line, sizeof(line));
+    check(std::strstr(line, "not understood, reads camera") != nullptr, "the unknown sync line");
     check(parsePitchOffsetDeg("45", &v) == 30.0 && v && parsePitchOffsetDeg("-99", &v) == -30.0 && v, "past the limit is held to +-30");
     const float off = offsetTarget(target, 10.0);
     check(near(off, target + float(10 * kDeg)) && offsetTarget(target, 0.0) == target, "the offset is added to the head's tilt, 0 changes nothing");

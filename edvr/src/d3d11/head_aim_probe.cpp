@@ -66,8 +66,8 @@ std::atomic<bool> g_featHeld{false};   // a menu or the GUI focus holds the angl
 std::atomic<float> g_lastOrig1{0.0f};
 // The sync keys (published by the frame thread, read by the latch), and the camera counter: whether this game frame has had its latch, and how many camera
 // builds came before it and after it (the latch sets the flag, the frame boundary takes all three).
-std::atomic<int> g_featSync{int(ha::Sync::Latch)}, g_featStick{int(ha::StickComp::Off)};
-std::atomic<float> g_featOffsetDeg{0.0f};   // experimental.native_vr_on_foot_head_aim_pitch_offset, degrees (+ = lower)
+std::atomic<int> g_featSync{int(ha::Sync::Camera)}, g_featStick{int(ha::StickComp::On)};
+std::atomic<float> g_featOffsetDeg{float(ha::kPitchOffsetDefaultDeg)};   // experimental.native_vr_on_foot_head_aim_pitch_offset, degrees (+ = lower)
 std::atomic<bool> g_latchedThisFrame{false};
 std::atomic<uint32_t> g_camBefore{0}, g_camAfter{0};
 // The angles in force (what the latch last published: the yaw added and the tilt for the runtime, with the latch's number) and the copy a camera build
@@ -369,9 +369,9 @@ void headAimProbeFrameBoundary() {
     static ha::Key featKey = ha::Key::Off;
     static ha::PitchComp featComp = ha::PitchComp::Plus;
     static bool saidFeatKeys = false, featOn = false, featHeld = false;
-    static ha::Sync featSync = ha::Sync::Latch;
-    static ha::StickComp featStick = ha::StickComp::Off;
-    static double featOffset = 0.0;
+    static ha::Sync featSync = ha::Sync::Camera;
+    static ha::StickComp featStick = ha::StickComp::On;
+    static double featOffset = ha::kPitchOffsetDefaultDeg;
     static std::string badKey, badComp, badSync, badStick, badOffset;   // the unknown values already said
     static uint64_t featWindowBeganMs = 0;
     static ha::SyncWindow syncWindow;
@@ -400,9 +400,9 @@ void headAimProbeFrameBoundary() {
         // The feature's keys, live like the probe's. Unknown values read off / plus, said once per value.
         const std::string rawFeat = cfg.getString("experimental.native_vr_on_foot_head_aim", "off");
         const std::string rawPitch = cfg.getString("experimental.native_vr_on_foot_head_aim_pitch_comp", "plus");
-        const std::string rawSync = cfg.getString("experimental.native_vr_on_foot_head_aim_sync", "latch");
-        const std::string rawStick = cfg.getString("experimental.native_vr_on_foot_head_aim_stick_comp", "off");
-        const std::string rawOffset = cfg.getString("experimental.native_vr_on_foot_head_aim_pitch_offset", "0");
+        const std::string rawSync = cfg.getString("experimental.native_vr_on_foot_head_aim_sync", "camera");
+        const std::string rawStick = cfg.getString("experimental.native_vr_on_foot_head_aim_stick_comp", "on");
+        const std::string rawOffset = cfg.getString("experimental.native_vr_on_foot_head_aim_pitch_offset", "10");
         bool validFeat = true, validPitch = true, validSync = true, validStick = true, validOffset = true;
         const double fo = ha::parsePitchOffsetDeg(rawOffset.c_str(), &validOffset);
         const ha::Key fk = ha::parseKey(rawFeat.c_str(), &validFeat);
@@ -411,9 +411,9 @@ void headAimProbeFrameBoundary() {
         const ha::StickComp fst = ha::parseStickComp(rawStick.c_str(), &validStick);
         if (!validFeat && rawFeat != badKey) { ha::formatUnknownKey("native_vr_on_foot_head_aim", rawFeat.c_str(), "off", line, sizeof(line)); say(line); }
         if (!validPitch && rawPitch != badComp) { ha::formatUnknownKey("native_vr_on_foot_head_aim_pitch_comp", rawPitch.c_str(), "plus", line, sizeof(line)); say(line); }
-        if (!validSync && rawSync != badSync) { ha::formatUnknownKey("native_vr_on_foot_head_aim_sync", rawSync.c_str(), "latch", line, sizeof(line)); say(line); }
-        if (!validStick && rawStick != badStick) { ha::formatUnknownKey("native_vr_on_foot_head_aim_stick_comp", rawStick.c_str(), "off", line, sizeof(line)); say(line); }
-        if (!validOffset && rawOffset != badOffset) { ha::formatUnknownKey("native_vr_on_foot_head_aim_pitch_offset", rawOffset.c_str(), "0", line, sizeof(line)); say(line); }
+        if (!validSync && rawSync != badSync) { ha::formatUnknownKey("native_vr_on_foot_head_aim_sync", rawSync.c_str(), "camera", line, sizeof(line)); say(line); }
+        if (!validStick && rawStick != badStick) { ha::formatUnknownKey("native_vr_on_foot_head_aim_stick_comp", rawStick.c_str(), "on", line, sizeof(line)); say(line); }
+        if (!validOffset && rawOffset != badOffset) { ha::formatUnknownKey("native_vr_on_foot_head_aim_pitch_offset", rawOffset.c_str(), "10", line, sizeof(line)); say(line); }
         badOffset = validOffset ? std::string() : rawOffset;
         badKey = validFeat ? std::string() : rawFeat;
         badComp = validPitch ? std::string() : rawPitch;
