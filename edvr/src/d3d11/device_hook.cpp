@@ -45,6 +45,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "native_vr_on_foot.h" // EDVRonFOOT: nativeVrOnFootFrameBoundary (the frame tick: the key, the two switches)
 #include "on_foot_aim_eye.h"   // EDVRonFOOT: onFootAimEyeFrameBoundary
 #include "on_foot_hud.h"       // EDVRonFOOT: onFootHudFrameBoundary
+#include "aim_dot_probe.h"     // EDVRonFOOT: aimDotMark (the aim dot probe's snapshot on the log mark)
 #include "on_foot_markers.h"   // EDVRonFOOT: onFootMarkersFrameBoundary
 #include "ui_surfaces.h"   // the glyph atlas and sizing chain instruments
 #include "ui_panel_scale.h" // uiPanelScaleShutdown: the panel operands put back
@@ -1256,6 +1257,7 @@ void tickHotkeys() {
     // reaction-time capture, the second is the one you read.
     if (g_state->dumpKey.pressed()) {
         dumpCameraRing("the history key");
+        aimDotMark();  // EDVRonFOOT: census snapshots the aim dot's atlas on this mark (aim_dot_probe.h)
         temporalPassDumpHistory("the history key");
         g_state->dumpDueMs = nowMs() + kDumpDelayMs;
     }

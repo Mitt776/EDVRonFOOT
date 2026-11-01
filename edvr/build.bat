@@ -534,6 +534,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\explorer_cam.cpp" ^
     "src\d3d11\native_vr_on_foot.cpp" ^
     "src\d3d11\on_foot_hud.cpp" ^
+    "src\d3d11\aim_dot_probe.cpp" ^
     "src\d3d11\on_foot_aim_eye.cpp" ^
     "src\d3d11\head_aim_probe.cpp" ^
     "src\d3d11\on_foot_markers.cpp" ^
@@ -3057,6 +3058,20 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     "tools\on_foot_hud_test\on_foot_hud_test.cpp" /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: on-foot hud test build failed & exit /b 1 )
 "%BUILD%\on_foot_hud_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_aim_dot_probe_test
+echo [edvr] === aim_dot_probe_test.exe ===
+REM EDVRonFOOT: build gate for the on-foot aim dot probe (src\d3d11\aim_dot_probe_core.h, experimental.native_vr_on_foot_dot;
+REM temporary, .42). Drives the pure half: the key's values, rubbish and empty; the atlas by its 1.161 proportions (2768x2383, 4089x3521,
+REM HMD quality 0.75 yes; 2412x1449, 2162x1922, 1521x1402 no); the dot's cell in pixels (2768x2383 -> x 1228..1540, y 462..770), outward,
+REM inside a tiny atlas and never empty; the cell's zoom; the snapshot files' names and their limit of 12; every line's text.
+if not exist "%OBJ%\aimdotprobe" mkdir "%OBJ%\aimdotprobe"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\aimdotprobe"\ /Fe"%BUILD%\aim_dot_probe_test.exe" ^
+    "tools\aim_dot_probe_test\aim_dot_probe_test.cpp" /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: aim dot probe test build failed & exit /b 1 )
+"%BUILD%\aim_dot_probe_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_on_foot_aim_eye_test

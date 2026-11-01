@@ -1,5 +1,6 @@
 #include "on_foot_hud.h"
 #include "on_foot_hud_core.h"
+#include "aim_dot_probe.h"
 #include "binding_shadow.h"
 #include "draw_gate.h"
 #include "journal_watch.h"
@@ -136,7 +137,9 @@ void say(const char* line) { Log::get().note("%s", line); }
 // Which layers' panels (this frame's, or last frame's while this one's are not drawn yet) does this draw of the game's composite
 // shaders read as a texture in slots 0-2? Bit k: layer k. The game's own crosshair, markers and captions in stereo come through the
 // same shaders from their own atlases and must not stop a sheet. The references the calls take are all given back before the return.
-uint32_t compositeReads(ID3D11DeviceContext* ctx) {
+// `probe` (the aim dot probe wants this draw, aim_dot_probe.h): the slots are read even with no layer's panel known, and `readOut` gets
+// the resources behind them (identity only) -- one read of the slots for both.
+uint32_t compositeReads(ID3D11DeviceContext* ctx, bool probe, const void* readOut[3]) {
     if (!ctx) return 0;
     const void* now[ofh::kLayers] = {};
     const void* last[ofh::kLayers] = {};
@@ -152,7 +155,7 @@ uint32_t compositeReads(ID3D11DeviceContext* ctx) {
             any = any || now[k] || last[k];
         }
     }
-    if (!any) return 0;  // no layer's panel known: nothing to compare with, no COM call
+    if (!any && !probe) return 0;  // no layer's panel known and no probe: nothing to compare with, no COM call
     ID3D11ShaderResourceView* srv[3] = {};
     const void* read[3] = {};
     ctx->PSGetShaderResources(0, 3, srv);
@@ -166,6 +169,7 @@ uint32_t compositeReads(ID3D11DeviceContext* ctx) {
         }
     }
     const uint32_t reads = ofh::readsPanels(read, 3, now, last);
+    for (int i = 0; i < 3; ++i) readOut[i] = read[i];
     for (auto*& v : srv)
         if (v) {
             v->Release();
@@ -220,12 +224,16 @@ bool onFootHudNoteDraw(ID3D11DeviceContext* ctx, bool eye, uint32_t count) {
     const uint64_t vs = bindingGet(BindSlot::Vs) ? bindingShaderHash(BindSlot::Vs) : 0;
     if (!vs) return false;
     if (ofh::isGameCompositeVs(vs)) {
+        const bool probe = eye && aimDotWants();
+        const void* read[3] = {};
         guardedBudget(g_budget, [&] {
-            const uint32_t reads = compositeReads(ctx);
+            const uint32_t reads = compositeReads(ctx, probe, read);
             if (!reads) return;
             std::lock_guard<std::mutex> lock(g_mutex);
             g_cur.tally.composites |= reads;
         });
+        // The aim dot probe: a quad out of its atlas into an eye erases the dot's cell (or is snapshot) before it draws.
+        if (probe) aimDotBeforeEyeComposite(ctx, read);
         return false;
     }
     if (vs == ofh::kEyePanelVs) {
@@ -241,6 +249,7 @@ bool onFootHudNoteDraw(ID3D11DeviceContext* ctx, bool eye, uint32_t count) {
             resolveTarget();
         }
         if (!g_rtvPanel) return;
+        if (aimDotWants()) aimDotNoteGuiDraw(ctx, vs, count, g_rtvId, g_rtvW, g_rtvH, g_rtvFmt);  // the atlas is one of the panels
         int slot = -1;
         {
             std::lock_guard<std::mutex> lock(g_mutex);
@@ -291,6 +300,9 @@ void onFootHudFrameBoundary() {
     if (wants && !detail::g_onFootHudWants.load(std::memory_order_relaxed)) drawGateArm();
     detail::g_onFootHudWants.store(wants, std::memory_order_relaxed);
     if (!wants) detail::g_onFootMenuHeld.store(false, std::memory_order_relaxed);   // the door does not run its decision then: no stale menu
+    // The aim dot probe (aim_dot_probe.h; temporary) rides this census: its key, its frame, its summary.
+    aimDotFrameBoundary(ofh::Mode(g_mode.load(std::memory_order_relaxed)) != ofh::Mode::Off && g_nativeOnFoot.load(std::memory_order_relaxed),
+                        wants);
 
     const uint64_t now = GetTickCount64();
     if (!windowStart) windowStart = now;
