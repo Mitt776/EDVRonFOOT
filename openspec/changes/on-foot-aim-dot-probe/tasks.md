@@ -54,9 +54,9 @@
 
 - [x] 4.1 Полный `D:\Project VSC\EDVRonFOOT\edvr\build.bat --jobs 8` по абсолютному пути. Проверка: в хвосте
   `Native OpenXR build and all gates passed` (`weapon_motion` — известный терпимый сбой).
-- [ ] 4.2 Коммит по `edvr\AGENTS.md` (`git commit -F`), тег `v0.19.1-edvronfoot.42`, затем `build.bat --dll-only`.
+- [x] 4.2 Коммит по `edvr\AGENTS.md` (`git commit -F`), тег `v0.19.1-edvronfoot.42`, затем `build.bat --dll-only`.
   Проверка: `--dll-only` прошёл проверку квитанции.
-- [ ] 4.3 `python tools\install_edvr.py --target steam`, потом `--verify-only`. В живом `edvr.ini` игры поставить
+- [x] 4.3 `python tools\install_edvr.py --target steam`, потом `--verify-only`. В живом `edvr.ini` игры поставить
   `native_vr_on_foot_dot = census`. Проверка: `vr payload and profile verified`, стоит `.42`; после запуска игры
   `python tools\edvr_log.py --target steam --expect-build HEAD --grep "aim dot"` даёт строку `key` с `census`.
 
@@ -66,7 +66,7 @@
 дверь с меткой. Ключ меняется в F8, строка `On-foot aim dot probe`. Метка — клавиша `PAUSE`, окно игры должно быть
 активным.
 
-- [ ] 5.1 `census`. По очереди, с `PAUSE` в каждом положении:
+- [x] 5.1 `census`. По очереди, с `PAUSE` в каждом положении:
   - (а) без оружия, смотрю в пустое место — видна точка;
   - (б) достал оружие, прицел от бедра;
   - (в) с оружием и зажатым LT;
@@ -74,12 +74,12 @@
   - (д) другое оружие, если есть, от бедра.
   Проверка (по логу и снимкам, сделаю я): 5 строк `snapshot` и файлы в `edvr_logs\aim_dot\…`; что лежит в ячейке в
   (а), (б), (д); на месте ли ячейка в (г).
-- [ ] 5.2 `erase`. Без оружия: точки нет? Метки над дверями и подсказки на месте? Достать оружие: прицел от бедра
+- [x] 5.2 `erase`. Без оружия: точки нет? Метки над дверями и подсказки на месте? Достать оружие: прицел от бедра
   виден? С LT? Подойти к двери или NPC: подсказки целы? Поставить `PAUSE` до и после. Проверка в шлеме: записать
   ответы (на словах, мне).
-- [ ] 5.3 `erase` → `off`: точка вернулась. Сесть в корабль с `erase`: в кресле всё как раньше. Проверка: в сводке в
+- [x] 5.3 `erase` → `off`: точка вернулась. Сесть в корабль с `erase`: в кресле всё как раньше. Проверка: в сводке в
   корабле `erased=0`.
-- [ ] 5.4 Лог: `python tools\edvr_log.py --target steam --expect-build HEAD --grep "aim dot"`, снимки посмотреть
+- [x] 5.4 Лог: `python tools\edvr_log.py --target steam --expect-build HEAD --grep "aim dot"`, снимки посмотреть
   глазами. Итоги и `ruled out` — в доклад: общая ли ячейка у точки и прицела, стоит ли разметка на месте, отказы,
   `rewrites_after_erase`, что видно в списке рисований (есть ли своя рамка отсечения у элементов).
 
