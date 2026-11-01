@@ -76,7 +76,7 @@ constexpr float kMenuCurve = 0.4f;
 // or a height within one pixel of the width over the proportions -- .29: below HMD quality 1.0 the game draws every panel that much
 // smaller, rounded to the pixel, and the answers at 0.75 come 1057x183, 5.776, a rounding the narrow panel's 0.01 does not cover),
 // and its place in the cinema's 3408x1917 frame as fractions, x right, y down (.22's census; the menus lie the HUD's side up). The HUD
-// is the measure: its width is the key's, the frame is as many degrees as the HUD's width over its 0.956. Of several panels of one
+// is the measure: its width is kWidthDefault, the frame is as many degrees as the HUD's width over its 0.956. Of several panels of one
 // shape, the largest. The order is the compositing order: the HUD first, the menus over it, the trader's menu -- the whole frame --
 // over all, the shops after it (the two never come together). The mission description stands right above the answers: as wide
 // (x 0.17..0.83), its bottom at the answers' top as the sheets' own proportions give it (the answers 0.66 / 5.755 / (1917/3408) =
@@ -325,13 +325,8 @@ inline Mode parseMode(const char* text, bool* valid) {
     return Mode::Body;
 }
 
-// experimental.native_vr_on_foot_hud_size: the sheet's width in degrees, 30..110; anything else (NaN included) is 85, *valid false.
-constexpr float kWidthDefault = 85.0f, kWidthMin = 30.0f, kWidthMax = 110.0f;
-inline float parseWidth(float raw, bool* valid) {
-    const bool ok = raw >= kWidthMin && raw <= kWidthMax;
-    if (valid) *valid = ok;
-    return ok ? raw : kWidthDefault;
-}
+// The HUD sheet's width in degrees: fixed (the menus are shares of it). It was a key until .45 (30..110, default 85).
+constexpr float kWidthDefault = 85.0f;
 
 // The sheet's place: a cylinder round the head, 1.4 m out. curve 1.0 is a radius equal to the distance, so the cylinder's axis is the
 // anchor's own point -- the head -- and every point of the sheet is 1.4 m from the eyes. The half-width is the ARC, as menuPanelHit
@@ -355,7 +350,7 @@ inline void bodyAnchor(const float head[12], float out[12]) {
 
 // A layer's place from the HUD's width: the cinema's frame is hudWidthDeg / 0.956 degrees of arc across, and 1917/3408 of that high at
 // the sheet's distance; a layer stands at its centre's fraction of it, its width the frame's times its own. The HUD is the measure:
-// exactly the key's width, straight ahead, not moved. A positive yaw is to the right, a positive down below the anchor.
+// exactly kWidthDefault wide, straight ahead, not moved. A positive yaw is to the right, a positive down below the anchor.
 constexpr float kRadPerDeg = 0.0174532925f;
 constexpr float kCinemaHeightOverWidth = 1917.0f / 3408.0f;
 struct Place {
@@ -486,20 +481,15 @@ struct Summary {
 
 // ---- the lines ----
 
-inline int formatKey(Mode mode, bool modeValid, const char* modeText, float width, bool widthValid, float widthRaw, char* out,
-                     size_t cap) {
+inline int formatKey(Mode mode, bool modeValid, const char* modeText, char* out, size_t cap) {
     char bad[160] = "";
-    int n = 0;
     if (!modeValid)
-        n += std::snprintf(bad + n, sizeof(bad) - size_t(n), "; \"%s\" is not visor, body or off, read as body", modeText ? modeText : "");
-    if (!widthValid && n >= 0 && size_t(n) < sizeof(bad))
-        std::snprintf(bad + n, sizeof(bad) - size_t(n), "; size %.1f is outside 30..110, read as 85", double(widthRaw));
+        std::snprintf(bad, sizeof(bad), "; \"%s\" is not visor, body or off, read as body", modeText ? modeText : "");
     const char* what = mode == Mode::Off ? "off: on foot nothing is shown"
                        : mode == Mode::Body ? "body: on foot the game's interface stands in front of the body (the crosshair is true)"
                                             : "visor: on foot the game's interface stays in front of the eyes (the crosshair follows "
                                               "the head, the weapon the body)";
-    return std::snprintf(out, cap, "on-foot hud: %s (experimental.native_vr_on_foot_hud = %s, size %.0f deg)%s", what, modeName(mode),
-                         double(width), bad);
+    return std::snprintf(out, cap, "on-foot hud: %s (experimental.native_vr_on_foot_hud = %s)%s", what, modeName(mode), bad);
 }
 
 // The HUD panel's start, as on .24.

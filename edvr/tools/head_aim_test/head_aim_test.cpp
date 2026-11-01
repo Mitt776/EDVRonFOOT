@@ -1,11 +1,12 @@
-// Build gate for the EDVRonFOOT on-foot head aim (src\d3d11\head_aim_core.h, experimental.native_vr_on_foot_head_aim and _pitch_comp; temporary,
-// openspec change on-foot-head-aim).
+// Build gate for the EDVRonFOOT on-foot head aim (src\d3d11\head_aim_core.h, experimental.native_vr_on_foot_head_aim; openspec changes on-foot-head-aim
+// and on-foot-aiming-cleanup).
 //
-// Drives the pure half: both keys' reading (every value, empty, junk, case and padding), the head's turn and tilt out of a pose (straight, 30 right,
-// 20 up, 45 right and 30 up, with roll), the one-euro filter (rest noise damped, a fast 40 degree turn arriving, no dead zone, no jump across 180
-// degrees, raw = input, a held dt), the ramp (0.5 s up and down, no jump) and the reason of each gate, the 90 degree limit, the angle 1 blend and the
-// tilt's sign, a frame without a pose, and the text of every line. Nothing here touches the clock, the game, the journal or a file, so --dry-run is the
-// same run as --self-test.
+// Drives the pure half: the key's reading (missing, empty, on, off, the old raw, junk, case and padding), the head's turn and tilt out of a pose
+// (straight, 30 right, 20 up, 45 right and 30 up, with roll), the one-euro filter (rest noise damped, a fast 40 degree turn arriving, no dead zone, no
+// jump across 180 degrees, a held dt), the ramp (0.5 s up and down, no jump) and the reason of each gate, the 90 degree limit, the angle 1 blend and
+// the pose correction, a frame without a pose, the hold on a menu, the camera counter and the answer to the runtime, the on-foot gate, who the player
+// is among the HMCs the getters see, and the text of every line (the hooks' included). Nothing here touches the clock, the game, the journal or a
+// file, so --dry-run is the same run as --self-test.
 #include "../../src/d3d11/head_aim_core.h"
 #include <cmath>
 #include <cstdio>
@@ -53,20 +54,18 @@ Inputs open(const float* head, uint64_t nowMs, Key key = Key::On) {
 
 void partKeys() {
     bool v = false;
-    check(parseKey(nullptr, &v) == Key::Off && v, "no key is off");
-    check(parseKey("", &v) == Key::Off && v, "an empty key is off");
-    check(parseKey("off", &v) == Key::Off && v, "off");
+    check(parseKey(nullptr, &v) == Key::On && v, "no key reads on, silently");
+    check(parseKey("", &v) == Key::On && v, "an empty key reads on, silently");
+    check(parseKey("   ", &v) == Key::On && v, "a blank key reads on, silently");
     check(parseKey("on", &v) == Key::On && v, "on");
-    check(parseKey("raw", &v) == Key::Raw && v, "raw");
-    check(parseKey("  RAW \r\n", &v) == Key::Raw && v, "case and padding");
-    check(parseKey("yes", &v) == Key::Off && !v, "junk reads off and is reported");
-    check(parseKey("1", &v) == Key::Off && !v, "1 reads off and is reported");
-    check(parsePitchComp(nullptr, &v) == PitchComp::Plus && v, "no sign key is plus");
-    check(parsePitchComp("", &v) == PitchComp::Plus && v, "an empty sign key is plus");
-    check(parsePitchComp("plus", &v) == PitchComp::Plus && v, "plus");
-    check(parsePitchComp(" Minus ", &v) == PitchComp::Minus && v, "minus, case and padding");
-    check(parsePitchComp("off", &v) == PitchComp::Off && v, "sign off");
-    check(parsePitchComp("both", &v) == PitchComp::Plus && !v, "junk sign reads plus and is reported");
+    check(parseKey("off", &v) == Key::Off && v, "off");
+    check(parseKey("  OFF \r\n", &v) == Key::Off && v, "off, case and padding");
+    check(parseKey(" On ", &v) == Key::On && v, "on, case and padding");
+    check(parseKey("raw", &v) == Key::On && !v, "the old raw reads on and is reported");
+    check(parseKey("garbage", &v) == Key::On && !v, "garbage reads on and is reported");
+    check(parseKey("1", &v) == Key::On && !v, "1 reads on and is reported");
+    check(parseKey("onn", &v) == Key::On && !v, "a longer word is not on: reads on and is reported");
+    check(parseKey(nullptr) == Key::On && parseKey("raw") == Key::On && parseKey("off") == Key::Off, "the answer does not need the validity flag");
 }
 
 void partAngles() {
@@ -99,12 +98,12 @@ void partAngles() {
 }
 
 // Noise at +-amp degrees alternating each frame around `centre` for `frames`; the largest filtered |deviation| over the last half, in degrees.
-double settledNoise(double ampDeg, bool raw, int frames = 400) {
+double settledNoise(double ampDeg, int frames = 400) {
     Axis ax;
     double worst = 0;
     for (int i = 0; i < frames; ++i) {
         const double v = ((i & 1) ? ampDeg : -ampDeg) * kDeg;
-        const double y = filterStep(ax, v, kFrameMs / 1000.0, false, raw);
+        const double y = filterStep(ax, v, kFrameMs / 1000.0, false);
         if (i > frames / 2 && std::fabs(y) > worst) worst = std::fabs(y);
     }
     return worst / kDeg;
@@ -112,9 +111,8 @@ double settledNoise(double ampDeg, bool raw, int frames = 400) {
 
 void partFilter() {
     // Rest: noise of +-0.3 degrees falls to under half; here far under.
-    const double damped = settledNoise(0.3, false);
+    const double damped = settledNoise(0.3);
     check(damped < 0.15, "rest: +-0.3 degree noise is damped to less than half");
-    check(near(settledNoise(0.3, true), 0.3, 1e-4), "raw lets the noise through whole");
 
     // A fast 40 degree turn in 0.15 s, then the head holds: the error after 0.5 s is under half a degree (measured 0.34 with the start values 1 Hz, 0.5,\n    // 1 Hz; even a pure step leaves 0.35: the tasks' 0.2 was not reachable with them, flight tunes the constants), after 1 s under 0.05.
     {
@@ -124,7 +122,7 @@ void partFilter() {
         for (int i = 0; i < 100; ++i) {
             const double t = i * dt;
             const double v = (t < 0.15 ? 40.0 * (t / 0.15) : 40.0) * kDeg;
-            y = filterStep(ax, v, dt, true, false);
+            y = filterStep(ax, v, dt, true);
             if (t < 0.15 && std::fabs(v - y) > lagMax) lagMax = std::fabs(v - y);
             if (std::fabs(t - 0.15 - 0.5) < dt / 2) errAtHalf = std::fabs(40.0 * kDeg - y) / kDeg;
             if (std::fabs(t - 0.15 - 1.0) < dt / 2) errAtOne = std::fabs(40.0 * kDeg - y) / kDeg;
@@ -137,18 +135,18 @@ void partFilter() {
     // A 0.4 degree offset held: the output reaches it (no dead zone for small moves).
     {
         Axis ax;
-        filterStep(ax, 0.0, 0.028, false, false);
+        filterStep(ax, 0.0, 0.028, false);
         double y = 0;
-        for (int i = 0; i < 600; ++i) y = filterStep(ax, 0.4 * kDeg, 0.028, false, false);
+        for (int i = 0; i < 600; ++i) y = filterStep(ax, 0.4 * kDeg, 0.028, false);
         check(near(y / kDeg, 0.4, 1e-3), "no dead zone: a 0.4 degree move is reached");
     }
     // Across 180 degrees: from +179 to -179 (a 2 degree move the short way) never jumps.
     {
         Axis ax;
-        double prev = filterStep(ax, 179 * kDeg, 0.028, true, false), worst = 0;
+        double prev = filterStep(ax, 179 * kDeg, 0.028, true), worst = 0;
         for (int i = 0; i < 60; ++i) {
             const double v = (i < 30 ? 179.0 + i * 0.1 : -178.0 - (i - 30) * 0.0) * kDeg;
-            const double y = filterStep(ax, detail::wrap(v), 0.028, true, false);
+            const double y = filterStep(ax, detail::wrap(v), 0.028, true);
             const double step = std::fabs(detail::wrap(y - prev));
             if (step > worst) worst = step;
             prev = y;
@@ -157,30 +155,26 @@ void partFilter() {
     }
     {
         Axis ax;
-        filterStep(ax, 170 * kDeg, 0.028, true, false);
+        filterStep(ax, 170 * kDeg, 0.028, true);
         double y = 0;
-        for (int i = 0; i < 400; ++i) y = filterStep(ax, -170 * kDeg, 0.028, true, false);
+        for (int i = 0; i < 400; ++i) y = filterStep(ax, -170 * kDeg, 0.028, true);
         check(near(std::fabs(detail::wrap(y + 170 * kDeg)) / kDeg, 0, 0.01) && y <= kPi && y > -kPi, "170 to -170 ends at -170, in (-180, 180]");
     }
-    // raw is the input, with and without history.
-    {
-        Axis ax;
-        check(filterStep(ax, 0.3, 0.028, true, true) == 0.3 && filterStep(ax, -1.1, 0.028, true, true) == -1.1, "raw = input");
-    }
+
     // dt <= 0 holds; a huge dt moves one small step; a first sample is taken as it is.
     {
         Axis ax;
-        check(filterStep(ax, 0.5, 0.0, false, false) == 0.5, "the first sample starts the filter at the input");
-        const double held = filterStep(ax, 1.0, 0.0, false, false);
+        check(filterStep(ax, 0.5, 0.0, false) == 0.5, "the first sample starts the filter at the input");
+        const double held = filterStep(ax, 1.0, 0.0, false);
         check(held == 0.5, "dt 0: the output holds");
-        const double held2 = filterStep(ax, 1.0, -0.02, false, false);
+        const double held2 = filterStep(ax, 1.0, -0.02, false);
         check(held2 == 0.5, "dt below 0: the output holds");
-        const double big = filterStep(ax, 1.0, 30.0, false, false);
+        const double big = filterStep(ax, 1.0, 30.0, false);
         Axis ay;
-        filterStep(ay, 0.5, 0, false, false);
-        const double capped = filterStep(ay, 1.0, kMaxDtSeconds, false, false);
+        filterStep(ay, 0.5, 0, false);
+        const double capped = filterStep(ay, 1.0, kMaxDtSeconds, false);
         check(big == capped, "a pause's huge dt moves like kMaxDtSeconds");
-        check(filterStep(ax, NAN, 0.028, false, false) == big, "a sample that is not a number holds");
+        check(filterStep(ax, NAN, 0.028, false) == big, "a sample that is not a number holds");
     }
 }
 
@@ -278,88 +272,102 @@ void partRampAndGates() {
 
 void partOutputs() {
     float p[12];
-    // 30 right, 20 up, key raw, level 1: yaw 30, pitch target -20 (the game's sign: + = down).
+    // 30 right, 20 up, level 1: yaw 30, pitch target -20 (the game's sign: + = down).
     pose(30, 20, 0, p);
     State st;
     uint64_t t = 1000;
     Output o;
-    for (int i = 0; i < 40; ++i) o = step(st, open(p, t += kFrameMs, Key::Raw));
-    check(o.level == 1.0f && near(o.yawAdded / kDeg, 30, 1e-3), "raw: the yaw added is the head's 30 degrees");
+    for (int i = 0; i < 40; ++i) o = step(st, open(p, t += kFrameMs, Key::On));
+    check(o.level == 1.0f && near(o.yawAdded / kDeg, 30, 1e-3), "the yaw added is the head's 30 degrees");
     check(near(o.pitchTarget / kDeg, -20, 1e-3), "the tilt target is minus the head's pitch (the game's + is down)");
-    check(!o.capped && o.lagDeg < 1e-3, "raw: not capped, no lag");
+    check(!o.capped && o.lagDeg < 1e-3, "a head at rest: not capped, no lag");
     // The limit.
     pose(120, 0, 0, p);
     State st2;
     t = 1000;
-    for (int i = 0; i < 40; ++i) o = step(st2, open(p, t += kFrameMs, Key::Raw));
+    for (int i = 0; i < 40; ++i) o = step(st2, open(p, t += kFrameMs, Key::On));
     check(near(o.yawAdded / kDeg, 90, 1e-3) && o.capped, "120 right: 90 and capped");
     pose(-120, 0, 0, p);
     State st3;
     t = 1000;
-    for (int i = 0; i < 40; ++i) o = step(st3, open(p, t += kFrameMs, Key::Raw));
+    for (int i = 0; i < 40; ++i) o = step(st3, open(p, t += kFrameMs, Key::On));
     check(near(o.yawAdded / kDeg, -90, 1e-3) && o.capped, "120 left: -90 and capped");
     // The cap is after the level: half the way up the ramp a 120 degree head gives half of it, not capped until it reaches 90.
     pose(120, 0, 0, p);
     State st4;
     t = 1000;
-    step(st4, open(p, t, Key::Raw));
-    for (int i = 0; i < 9; ++i) o = step(st4, open(p, t += kFrameMs, Key::Raw));
+    step(st4, open(p, t, Key::On));
+    for (int i = 0; i < 9; ++i) o = step(st4, open(p, t += kFrameMs, Key::On));
     check(o.level > 0.4f && o.level < 0.6f && near(o.yawAdded, double(o.level) * 120 * kDeg, 1e-3) && !o.capped, "the ramp scales the yaw below the limit");
 
     // The blend of angle 1.
     check(blendPitch(0.3f, -0.2f, 1.0f) == -0.2f, "level 1: angle 1 is exactly the head's");
     check(blendPitch(0.3f, -0.2f, 0.0f) == 0.3f, "level 0: angle 1 is the game's own");
     check(near(blendPitch(0.3f, -0.2f, 0.5f), 0.05), "level 0.5: halfway");
-    check(near(pitchAdded(0.3f, -0.2f, 1.0f), -0.5) && near(pitchAdded(0.3f, -0.2f, 0.0f), 0), "the pitch added is what the blend adds to the original");
-    check(near(blendPitch(0.3f, -0.2f, 0.7f), 0.3f + pitchAdded(0.3f, -0.2f, 0.7f)), "blend = original + added");
     // A head 20 up (target -20 degrees, + = down) with the stick holding 5 degrees down: the game gets -20.
     check(blendPitch(float(5 * kDeg), float(-20 * kDeg), 1.0f) == float(-20 * kDeg), "the stick's tilt stops counting at level 1");
-    check(runtimePitch(PitchComp::Plus, -0.5f) == -0.5f && runtimePitch(PitchComp::Minus, -0.5f) == 0.5f && runtimePitch(PitchComp::Off, -0.5f) == 0.0f,
-          "the runtime's tilt by the sign key");
+    check(near(blendPitch(0.3f, -0.2f, 0.7f) - 0.3f, -0.35), "the blend adds (target - original) times the level: blend = original + added");
 
     // No pose in a frame: the angles hold; the filter stands; after 250 ms the target is 0 (reason channel).
     pose(30, 0, 0, p);
     State sp;
     t = 1000;
-    for (int i = 0; i < 40; ++i) o = step(sp, open(p, t += kFrameMs, Key::Raw));
+    for (int i = 0; i < 40; ++i) o = step(sp, open(p, t += kFrameMs, Key::On));
     const float held = o.yawAdded;
-    o = step(sp, open(nullptr, t += kFrameMs, Key::Raw));
+    o = step(sp, open(nullptr, t += kFrameMs, Key::On));
     check(o.yawAdded == held && o.level == 1.0f && o.reason == Reason::None, "no pose for a frame: the last angles hold, the level stays");
-    for (int i = 0; i < 8; ++i) o = step(sp, open(nullptr, t += kFrameMs, Key::Raw));
+    for (int i = 0; i < 8; ++i) o = step(sp, open(nullptr, t += kFrameMs, Key::On));
     check(o.reason == Reason::Channel && o.level < 1.0f, "no pose for 250 ms: the target is 0, with the reason channel");
     // The first frames without ever a pose: nothing.
     State sn;
     o = step(sn, open(nullptr, 1000, Key::On));
     o = step(sn, open(nullptr, 1028, Key::On));
     check(o.level == 0.0f && o.yawAdded == 0.0f && o.reason == Reason::Channel, "never a pose: level 0");
-    // `on` lags a quick turn and `raw` does not; both agree once the head rests.
+    // A sudden turn lags (the filter), and at rest the output reaches the head: no dead zone.
     {
-        State a, b;
+        State a;
         uint64_t u = 1000;
         float q[12];
         pose(0, 0, 0, q);
-        for (int i = 0; i < 40; ++i) { u += kFrameMs; step(a, open(q, u, Key::On)); step(b, open(q, u, Key::Raw)); }
+        for (int i = 0; i < 40; ++i) { u += kFrameMs; step(a, open(q, u)); }
         pose(20, 0, 0, q);
         u += kFrameMs;
-        Output oa = step(a, open(q, u, Key::On)), ob = step(b, open(q, u, Key::Raw));
-        check(oa.lagDeg > 5.0 && ob.lagDeg < 1e-3 && oa.yawAdded < ob.yawAdded, "a sudden turn: on lags, raw does not");
-        for (int i = 0; i < 400; ++i) { u += kFrameMs; oa = step(a, open(q, u, Key::On)); ob = step(b, open(q, u, Key::Raw)); }
-        check(near(oa.yawAdded, ob.yawAdded, 1e-4) && oa.lagDeg < 0.01, "at rest on and raw agree: no dead zone");
+        Output oa = step(a, open(q, u));
+        check(oa.lagDeg > 5.0 && oa.yawAdded < float(20 * kDeg), "a sudden turn: the output lags the head");
+        for (int i = 0; i < 400; ++i) { u += kFrameMs; oa = step(a, open(q, u)); }
+        check(near(oa.yawAdded, 20 * kDeg, 1e-4) && oa.lagDeg < 0.01, "at rest the output reaches the head: no dead zone");
     }
 }
 
 void partLines() {
     char line[300];
-    formatKeys(Key::On, PitchComp::Plus, Sync::Latch, StickComp::Off, 0.0, line, sizeof(line));
-    check(std::strcmp(line, "head aim: key=on pitch_comp=plus sync=latch stick_comp=off pitch_offset=0.0") == 0, "the keys line");
-    formatKeys(Key::Off, PitchComp::Off, Sync::Camera, StickComp::On, 10.0, line, sizeof(line));
-    check(std::strcmp(line, "head aim: key=off pitch_comp=off sync=camera stick_comp=on pitch_offset=10.0") == 0, "the keys line, off");
-    formatKeys(Key::On, PitchComp::Plus, Sync::Camera, StickComp::On, -7.5, line, sizeof(line));
-    check(std::strcmp(line, "head aim: key=on pitch_comp=plus sync=camera stick_comp=on pitch_offset=-7.5") == 0, "the keys line, negative offset");
-    formatUnknownKey("native_vr_on_foot_head_aim", "yes", "off", line, sizeof(line));
-    check(std::strcmp(line, "head aim: native_vr_on_foot_head_aim value 'yes' not understood, reads off") == 0, "the unknown key line");
-    formatUnknownKey("native_vr_on_foot_head_aim_pitch_comp", "up", "plus", line, sizeof(line));
-    check(std::strcmp(line, "head aim: native_vr_on_foot_head_aim_pitch_comp value 'up' not understood, reads plus") == 0, "the unknown sign line");
+    formatKeys(Key::On, line, sizeof(line));
+    check(std::strcmp(line, "head aim: key=on") == 0, "the keys line");
+    formatKeys(Key::Off, line, sizeof(line));
+    check(std::strcmp(line, "head aim: key=off") == 0, "the keys line, off");
+    formatUnknownKey("native_vr_on_foot_head_aim", "raw", "on", line, sizeof(line));
+    check(std::strcmp(line, "head aim: native_vr_on_foot_head_aim value 'raw' not understood, reads on") == 0, "the unknown key line");
+    formatInert("the angle getters or their table entries are not 334925's", line, sizeof(line));
+    check(std::strcmp(line, "head aim: inert: the angle getters or their table entries are not 334925's") == 0, "the inert line");
+    formatInert("flat profile", line, sizeof(line));
+    check(std::strcmp(line, "head aim: inert: flat profile") == 0, "the inert line, flat profile");
+    formatHooked(true, line, sizeof(line));
+    check(std::strstr(line, "head aim: hooked angle1 +0x1A45930 angle2 +0x1A49040, eye matrix") == line, "the hooked line, with the camera");
+    formatHooked(false, line, sizeof(line));
+    check(std::strstr(line, "head aim: hooked angle1") == line && std::strstr(line, "camera not hooked") != nullptr, "the hooked line, without the camera");
+    Identity id;
+    id.source = Source::Camera;
+    id.player = 1;
+    formatIdentity(id, 3, false, line, sizeof(line));
+    check(std::strcmp(line, "head aim: player identified by camera, hmcs=3") == 0, "the identified line");
+    id.source = Source::Single;
+    formatIdentity(id, 1, true, line, sizeof(line));
+    check(std::strcmp(line, "head aim: player identified by single, hmcs=1+") == 0, "the identified line, single and many");
+    Census two;
+    note(two, 1);
+    note(two, 2);
+    formatIdentity(identify(0, false, two), 2, false, line, sizeof(line));
+    check(std::strcmp(line, "head aim: player not identified (several HMCs and no camera), hmcs=2") == 0, "the not identified line");
     formatEdge(true, Reason::None, line, sizeof(line));
     check(std::strcmp(line, "head aim: on") == 0, "the on line");
     const Reason all[] = {Reason::Key, Reason::Ship, Reason::Player, Reason::Channel, Reason::Menu, Reason::Focus};
@@ -427,13 +435,13 @@ void partHold() {
         State st;
         uint64_t u = 1000;
         Output o;
-        for (int i = 0; i < 60; ++i) o = step(st, open(a, u += kFrameMs, Key::Raw));
+        for (int i = 0; i < 60; ++i) o = step(st, open(a, u += kFrameMs, Key::On));
         const float yaw0 = o.yawAdded, pitch0 = o.pitchTarget;
         check(o.level == 1.0f && !o.held && near(yaw0, 30 * kDeg) && near(pitch0, -20 * kDeg), "hold setup: level 1 on the first pose");
         // The head moves to pose b while the gate is shut: the level stays 1, the output stays at the last values, the filter follows the head.
         bool still = true, stays = true, heldAll = true;
         for (int i = 0; i < 60; ++i) {
-            Inputs in = open(b, u += kFrameMs, Key::Raw);
+            Inputs in = open(b, u += kFrameMs, Key::On);
             g.shut(in);
             o = step(st, in);
             still = still && o.yawAdded == yaw0 && o.pitchTarget == pitch0;
@@ -452,7 +460,7 @@ void partHold() {
         double lastYaw = o.yawAdded, lastPitch = o.pitchTarget, worst = 0;
         int framesToLive = -1;
         for (int i = 1; i <= 40; ++i) {
-            o = step(st, open(b, u += kFrameMs, Key::Raw));
+            o = step(st, open(b, u += kFrameMs, Key::On));
             const double dy = std::fabs(double(o.yawAdded) - lastYaw), dp = std::fabs(double(o.pitchTarget) - lastPitch);
             if (dy > worst) worst = dy;
             if (dp > worst) worst = dp;
@@ -475,10 +483,10 @@ void partHold() {
         State st;
         uint64_t u = 1000;
         Output o;
-        for (int i = 0; i < 60; ++i) o = step(st, open(a, u += kFrameMs, Key::Raw));
-        for (int i = 0; i < 10; ++i) { Inputs in = open(b, u += kFrameMs, Key::Raw); in.menu = true; o = step(st, in); }
+        for (int i = 0; i < 60; ++i) o = step(st, open(a, u += kFrameMs, Key::On));
+        for (int i = 0; i < 10; ++i) { Inputs in = open(b, u += kFrameMs, Key::On); in.menu = true; o = step(st, in); }
         check(o.held, "ship in a hold: setup is held");
-        Inputs in = open(b, u += kFrameMs, Key::Raw);
+        Inputs in = open(b, u += kFrameMs, Key::On);
         in.menu = true;
         in.journalOnFoot = false;
         o = step(st, in);
@@ -499,8 +507,8 @@ void partHold() {
         // The same for the key going off during a hold.
         State sk;
         u = 1000;
-        for (int i = 0; i < 60; ++i) o = step(sk, open(a, u += kFrameMs, Key::Raw));
-        for (int i = 0; i < 10; ++i) { Inputs k = open(b, u += kFrameMs, Key::Raw); k.menu = true; o = step(sk, k); }
+        for (int i = 0; i < 60; ++i) o = step(sk, open(a, u += kFrameMs, Key::On));
+        for (int i = 0; i < 10; ++i) { Inputs k = open(b, u += kFrameMs, Key::On); k.menu = true; o = step(sk, k); }
         Inputs k = open(b, u += kFrameMs, Key::Off);
         k.menu = true;
         o = step(sk, k);
@@ -511,12 +519,12 @@ void partHold() {
         State st;
         uint64_t u = 1000;
         Output o;
-        for (int i = 0; i < 60; ++i) o = step(st, open(a, u += kFrameMs, Key::Raw));
-        for (int i = 0; i < 10; ++i) { Inputs in = open(b, u += kFrameMs, Key::Raw); in.menu = true; o = step(st, in); }
-        for (int i = 0; i < 8; ++i) o = step(st, open(b, u += kFrameMs, Key::Raw));
+        for (int i = 0; i < 60; ++i) o = step(st, open(a, u += kFrameMs, Key::On));
+        for (int i = 0; i < 10; ++i) { Inputs in = open(b, u += kFrameMs, Key::On); in.menu = true; o = step(st, in); }
+        for (int i = 0; i < 8; ++i) o = step(st, open(b, u += kFrameMs, Key::On));
         const float y = o.yawAdded, t = o.pitchTarget;
         check(!near(y, 30 * kDeg, 1e-3) && !near(y, -40 * kDeg, 1e-3), "re-hold: setup is half way out");
-        Inputs in = open(b, u += kFrameMs, Key::Raw);
+        Inputs in = open(b, u += kFrameMs, Key::On);
         in.menu = true;
         o = step(st, in);
         check(o.held && o.yawAdded == y && o.pitchTarget == t, "re-hold: held at the values the output had");
@@ -541,19 +549,8 @@ void partHold() {
     }
 }
 
-void partSyncAndStick() {
-    bool v = false;
-    check(parseSync(nullptr, &v) == Sync::Camera && v, "no sync key is camera");
-    check(parseSync("", &v) == Sync::Camera && v, "an empty sync key is camera");
-    check(parseSync("latch", &v) == Sync::Latch && v, "latch");
-    check(parseSync(" Camera \r\n", &v) == Sync::Camera && v, "camera, case and padding");
-    check(parseSync("both", &v) == Sync::Camera && !v, "junk sync reads camera and is reported");
-    check(parseStickComp(nullptr, &v) == StickComp::On && v, "no stick key is on");
-    check(parseStickComp("", &v) == StickComp::On && v, "an empty stick key is on");
-    check(parseStickComp("off", &v) == StickComp::Off && v, "stick off");
-    check(parseStickComp(" ON ", &v) == StickComp::On && v, "stick on, case and padding");
-    check(parseStickComp("yes", &v) == StickComp::On && !v, "junk stick reads on and is reported");
-
+void partSyncAndCorrection() {
+    char line[300];
     // The camera counter: every class, and a frame without a latch (its camera moments count before).
     check(classifyCamera(0, 0, true) == CamClass::None, "no camera moment: none");
     check(classifyCamera(1, 0, true) == CamClass::Before, "one moment before the latch: before");
@@ -570,66 +567,89 @@ void partSyncAndStick() {
     noteSyncFrame(sw, 1, 0, false);
     noteSyncFrame(sw, 0, 0, false);
     check(sw.frames == 7 && sw.before == 2 && sw.after == 2 && sw.none == 2 && sw.multi == 1 && sw.noLatch == 2, "the window counts each class and the no-latch frames");
-    char line[300];
-    formatSync(sw, Sync::Camera, line, sizeof(line));
-    check(std::strcmp(line, "head_aim_sync,frames=7,cam_before=2,cam_after=2,cam_none=2,cam_multi=1,no_latch=2,mode=camera") == 0, "the sync line");
-    formatSync(SyncWindow{}, Sync::Latch, line, sizeof(line));
-    check(std::strcmp(line, "head_aim_sync,frames=0,cam_before=0,cam_after=0,cam_none=0,cam_multi=0,no_latch=0,mode=latch") == 0, "the sync line with zeros");
+    formatSync(sw, line, sizeof(line));
+    check(std::strcmp(line, "head_aim_sync,frames=7,cam_before=2,cam_after=2,cam_none=2,cam_multi=1,no_latch=2") == 0, "the sync line, without a mode field");
+    formatSync(SyncWindow{}, line, sizeof(line));
+    check(std::strcmp(line, "head_aim_sync,frames=0,cam_before=0,cam_after=0,cam_none=0,cam_multi=0,no_latch=0") == 0, "the sync line with zeros");
 
-    // The answer to the runtime.
+    // The answer to the runtime: always the camera's way.
     Snapshot fresh;   // taken since the previous latch (number 5)
     fresh.valid = true; fresh.latchNo = 5; fresh.yaw = 0.2f; fresh.pitch = -0.1f;
     Snapshot stale = fresh;   // from an older latch
     stale.latchNo = 4;
     Snapshot none;
-    Answer a = chooseAnswer(Sync::Latch, fresh, 5, 0.3f, -0.2f);
-    check(a.yaw == 0.3f && a.pitch == -0.2f, "latch: the new angles, snapshot or not");
-    a = chooseAnswer(Sync::Camera, fresh, 5, 0.3f, -0.2f);
-    check(a.yaw == 0.2f && a.pitch == -0.1f, "camera: a fresh snapshot answers");
-    a = chooseAnswer(Sync::Camera, stale, 5, 0.3f, -0.2f);
-    check(a.yaw == 0.3f && a.pitch == -0.2f, "camera: a stale snapshot is not used");
-    a = chooseAnswer(Sync::Camera, none, 0, 0.3f, -0.2f);
-    check(a.yaw == 0.3f && a.pitch == -0.2f, "camera: no snapshot, the new angles");
+    Answer a = chooseAnswer(fresh, 5, 0.3f, -0.2f);
+    check(a.yaw == 0.2f && a.pitch == -0.1f, "a fresh snapshot answers");
+    a = chooseAnswer(stale, 5, 0.3f, -0.2f);
+    check(a.yaw == 0.3f && a.pitch == -0.2f, "a stale snapshot is not used");
+    a = chooseAnswer(none, 0, 0.3f, -0.2f);
+    check(a.yaw == 0.3f && a.pitch == -0.2f, "no snapshot, the new angles");
 
-    // The stick's part of the correction.
+    // The pose correction: the head's tilt times the level, whatever the stick's tilt was.
     const float target = float(-20 * kDeg);
-    const float o1 = float(8 * kDeg), o2 = float(-30 * kDeg);
-    check(pitchCorrection(StickComp::On, o1, target, 1.0f) == pitchCorrection(StickComp::On, o2, target, 1.0f) &&
-              near(pitchCorrection(StickComp::On, o1, target, 1.0f), target),
-          "on: the correction does not depend on the original and is the head's tilt");
-    check(near(pitchCorrection(StickComp::On, o1, target, 0.5f), target * 0.5f), "on: the tilt times the level");
-    check(pitchCorrection(StickComp::On, o1, target, 0.0f) == 0.0f && pitchCorrection(StickComp::Off, o1, target, 0.0f) == 0.0f, "level 0: both are 0");
-    check(near(pitchCorrection(StickComp::Off, o1, target, 1.0f), pitchAdded(o1, target, 1.0f)) &&
-              near(pitchCorrection(StickComp::Off, o1, target, 0.4f), pitchAdded(o1, target, 0.4f)) &&
-              !near(pitchCorrection(StickComp::Off, o1, target, 1.0f), pitchCorrection(StickComp::Off, o2, target, 1.0f)),
-          "off: as before, what angle 1 got on top of the original");
+    check(near(pitchCorrection(target, 1.0f), target), "level 1: the head's tilt");
+    check(near(pitchCorrection(target, 0.5f), target * 0.5f), "level 0.5: the tilt times the level");
+    check(pitchCorrection(target, 0.0f) == 0.0f && pitchCorrection(target, -1.0f) == 0.0f, "level 0: nothing");
+    check(near(pitchCorrection(target, 1.5f), target), "a level past 1 counts as 1");
 
-    // The pitch offset: read, held to +-30, and carried by the blend and the correction alike.
-    check(parsePitchOffsetDeg(nullptr, &v) == 10.0 && v, "no offset key is 10");
-    check(parsePitchOffsetDeg("", &v) == 10.0 && v, "an empty offset is 10");
-    check(parsePitchOffsetDeg(" 10 ", &v) == 10.0 && v, "offset 10, padding");
-    check(parsePitchOffsetDeg("-7.5", &v) == -7.5 && v, "a negative offset");
-    check(parsePitchOffsetDeg("abc", &v) == 10.0 && !v, "junk offset reads 10 and is reported");
-    check(parsePitchOffsetDeg("10deg", &v) == 10.0 && !v, "a number with text after it reads 10 and is reported");
-    check(parsePitchOffsetDeg("nan", &v) == 10.0 && !v && parsePitchOffsetDeg("inf", &v) == 10.0 && !v, "nan and inf read 10 and are reported");
-    check(parsePitchOffsetDeg("0", &v) == 0.0 && v, "an explicit 0 stays 0");
-    check(parseSync("   ", &v) == Sync::Camera && v && parseStickComp("  ", &v) == StickComp::On && v && parsePitchOffsetDeg("  ", &v) == 10.0 && v, "blank values read the defaults, valid");
-    formatUnknownKey("native_vr_on_foot_head_aim_pitch_offset", "abc", "10", line, sizeof(line));
-    check(std::strcmp(line, "head aim: native_vr_on_foot_head_aim_pitch_offset value 'abc' not understood, reads 10") == 0, "the unknown offset line");
-    formatUnknownKey("native_vr_on_foot_head_aim_sync", "both", "camera", line, sizeof(line));
-    check(std::strstr(line, "not understood, reads camera") != nullptr, "the unknown sync line");
-    check(parsePitchOffsetDeg("45", &v) == 30.0 && v && parsePitchOffsetDeg("-99", &v) == -30.0 && v, "past the limit is held to +-30");
-    const float off = offsetTarget(target, 10.0);
-    check(near(off, target + float(10 * kDeg)) && offsetTarget(target, 0.0) == target, "the offset is added to the head's tilt, 0 changes nothing");
+    // The pitch offset is the constant 10 degrees, carried by the blend and the correction alike.
+    const float o1 = float(8 * kDeg);
+    check(kPitchOffsetDeg == 10.0, "the pitch offset is 10 degrees");
+    const float off = offsetTarget(target);
+    check(near(off, target + float(10 * kDeg)), "the offset is added to the head's tilt");
     check(near(blendPitch(o1, off, 1.0f), target + float(10 * kDeg)), "level 1: angle 1 out is the head's tilt plus 10 degrees");
-    check(near(pitchCorrection(StickComp::On, o1, off, 1.0f), (target + float(10 * kDeg))) &&
-              near(pitchCorrection(StickComp::On, o1, off, 0.5f), (target + float(10 * kDeg)) * 0.5f),
-          "on: the correction is (tilt + offset) times the level");
-    check(near(pitchCorrection(StickComp::Off, o1, off, 1.0f), blendPitch(o1, off, 1.0f) - o1), "off: the correction carries the offset too");
-    check(blendPitch(o1, off, 0.0f) == o1 && pitchCorrection(StickComp::On, o1, off, 0.0f) == 0.0f && pitchCorrection(StickComp::Off, o1, off, 0.0f) == 0.0f,
-          "level 0: the offset changes nothing");
+    check(near(pitchCorrection(off, 1.0f), target + float(10 * kDeg)) && near(pitchCorrection(off, 0.5f), (target + float(10 * kDeg)) * 0.5f),
+          "the correction is (tilt + offset) times the level");
+    check(blendPitch(o1, off, 0.0f) == o1 && pitchCorrection(off, 0.0f) == 0.0f, "level 0: the offset changes nothing");
 }
-}  // namespace
+
+// Where the hooks act: the on-foot flag.
+void partGate() {
+    Gate g;
+    g.nativeOnFoot = g.journalKnown = g.onFoot = true;
+    check(onFootFlag(g), "everything holds: on foot");
+    g.onFoot = false;
+    check(!onFootFlag(g), "in the ship: not on foot");
+    g.onFoot = true; g.nativeOnFoot = false;
+    check(!onFootFlag(g), "native_vr_on_foot off: not on foot");
+    g.nativeOnFoot = true; g.journalKnown = false;
+    check(!onFootFlag(g), "the journal not knowing: not on foot");
+    check(!onFootFlag(Gate{}), "nothing set: not on foot");
+}
+
+// Who the player is, from the getters' census and the camera's HMC.
+void partIdentity() {
+    Census c;
+    check(identify(0, false, c).source == Source::None && std::strcmp(identify(0, false, c).why, "no getter calls") == 0, "no calls: no player");
+    note(c, 0x1000);
+    note(c, 0x1000);
+    check(countOf(c) == 1 && !c.many, "the same HMC twice counts once");
+    Identity id = identify(0, false, c);
+    check(id.source == Source::Single && id.player == 0x1000, "one HMC: it is the player");
+    id = identify(0x1000, false, c);
+    check(id.source == Source::Camera && id.player == 0x1000, "the camera's HMC seen by the getters: the player, by the camera");
+    note(c, 0x2000);
+    check(identify(0, false, c).source == Source::None, "two HMCs and no camera: no player");
+    check(identify(0x2000, false, c).source == Source::Camera && identify(0x2000, false, c).player == 0x2000, "two HMCs, the camera names one: that one");
+    check(identify(0x3000, false, c).source == Source::None, "the camera's HMC not among the getters': no player");
+    Census full;
+    for (uintptr_t i = 1; i <= uintptr_t(kSlots) + 1; ++i) note(full, i * 0x100);
+    check(countOf(full) == kSlots && full.many, "more than the slots: many");
+    const uintptr_t beyond = (uintptr_t(kSlots) + 1) * 0x100;
+    check(identify(beyond, false, full).source == Source::None, "the camera's HMC beyond the slots, not flagged by the getters: not confirmed");
+    check(identify(beyond, true, full).source == Source::Camera && identify(beyond, true, full).player == beyond,
+          "...but flagged by the getters themselves it is the player, however big the crowd (flight of .35: 8+ HMCs)");
+    check(identify(0x3000, true, c).source == Source::Camera, "the getters' own flag is enough without the census");
+    Census zero;
+    note(zero, 0);
+    check(countOf(zero) == 0, "a null HMC is not counted");
+    check(contains(c, 0x1000) && !contains(c, 0x9000) && !contains(c, 0), "the census says what it holds");
+    CameraCheck cam;
+    check(!cam.eye && !cam.eyeTable && !cam.hmc && !cam.hmcTable && !cam.seen, "the camera check starts empty");
+    check(std::strcmp(sourceName(Source::Camera), "camera") == 0 && std::strcmp(sourceName(Source::Single), "single") == 0 &&
+              std::strcmp(sourceName(Source::None), "none") == 0,
+          "the source names");
+}}  // namespace
 
 int main(int argc, char** argv) {
     if (argc < 2 || (std::strcmp(argv[1], "--self-test") != 0 && std::strcmp(argv[1], "--dry-run") != 0)) {
@@ -643,7 +663,9 @@ int main(int argc, char** argv) {
     partOutputs();
     partLines();
     partHold();
-    partSyncAndStick();
+    partSyncAndCorrection();
+    partGate();
+    partIdentity();
     std::printf("%s: head_aim_test, %d checks, %d failed\n", g_failures ? "FAIL" : "PASS", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

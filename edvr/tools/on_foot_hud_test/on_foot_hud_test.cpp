@@ -328,7 +328,7 @@ void partLayers() {
 }
 
 void partPlaces() {
-    // The HUD is the measure: the key's width, straight ahead, not moved, curve 1.
+    // The HUD is the measure: kWidthDefault wide, straight ahead, not moved, curve 1.
     const Place hud = placeOf(Layer::Hud, 85);
     check(near(hud.widthDeg, 85) && hud.yawDeg == 0.0f && hud.downM == 0.0f && near(hud.curve, kCurve), "the HUD: 85 deg, 0, 0, curve 1");
     // At 85 degrees the cinema's frame is 85 / 0.956 = 88.9 degrees across, 1.22 m high at 1.4 m.
@@ -687,13 +687,7 @@ void partKeys() {
     check(parseMode("head", &ok) == Mode::Body && !ok, "a wrong word: body, said");
     check(parseMode("1", &ok) == Mode::Body && !ok, "a number: body, said");
     check(parseMode("visors", &ok) == Mode::Body && !ok, "a longer word is not visor");
-    check(near(kWidthDefault, 85) && near(kWidthMin, 30) && near(kWidthMax, 110), "the width default 85, range 30..110");
-    check(near(parseWidth(85, &ok), 85) && ok, "width 85");
-    check(near(parseWidth(70, &ok), 70) && ok, "width 70 is still in range");
-    check(near(parseWidth(30, &ok), 30) && ok && near(parseWidth(110, &ok), 110) && ok, "width 30 and 110 are in range");
-    check(near(parseWidth(29.9f, &ok), 85) && !ok, "width below 30: 85, said");
-    check(near(parseWidth(111, &ok), 85) && !ok, "width above 110: 85, said");
-    check(near(parseWidth(std::nanf(""), &ok), 85) && !ok, "width NaN: 85, said");
+    check(near(kWidthDefault, 85), "the HUD width is 85, no key");
     check(near(aspectOf(2412, 1449), 1449.0f / 2412.0f) && aspectOf(0, 5) == 0.0f, "the panel's proportions");
     check(std::fabs(ratioOf(2083, 362) - 5.754f) < 1e-3f && ratioOf(5, 0) == 0.0f, "the lines' aspect is width over height");
 }
@@ -720,20 +714,19 @@ void partLatch() {
 
 void partLines() {
     char line[1200];
-    formatKey(Mode::Visor, true, "visor", 70, true, 70, line, sizeof(line));
-    check(has(line, "on-foot hud: visor:") && has(line, "experimental.native_vr_on_foot_hud = visor, size 70 deg") &&
+    formatKey(Mode::Visor, true, "visor", line, sizeof(line));
+    check(has(line, "on-foot hud: visor:") && has(line, "experimental.native_vr_on_foot_hud = visor)") && !has(line, "size") &&
               has(line, "crosshair follows the head"),
           "the key line, visor");
-    formatKey(Mode::Body, false, "head", 85, false, 200, line, sizeof(line));
-    check(has(line, "\"head\" is not visor, body or off, read as body") && has(line, "size 200.0 is outside 30..110, read as 85") &&
-              has(line, "on-foot hud: body:") && has(line, "size 85 deg"),
+    formatKey(Mode::Body, false, "head", line, sizeof(line));
+    check(has(line, "\"head\" is not visor, body or off, read as body") && has(line, "on-foot hud: body:"),
           "the key line says what was wrong, and what it was read as");
-    formatKey(Mode::Body, true, "", 85, true, 85, line, sizeof(line));
-    check(has(line, "= body, size 85 deg") && !has(line, "read as"), "a missing key: the line names body and 85, nothing wrong");
-    formatKey(Mode::Off, true, "off", 85, true, 85, line, sizeof(line));
+    formatKey(Mode::Body, true, "", line, sizeof(line));
+    check(has(line, "= body)") && !has(line, "read as"), "a missing key: the line names body, nothing wrong");
+    formatKey(Mode::Off, true, "off", line, sizeof(line));
     check(has(line, "on-foot hud: off: on foot nothing is shown"), "the key line, off");
-    formatKey(Mode::Body, true, "body", 50, true, 50, line, sizeof(line));
-    check(has(line, "body:") && has(line, "crosshair is true") && has(line, "size 50 deg"), "the key line, body");
+    formatKey(Mode::Body, true, "body", line, sizeof(line));
+    check(has(line, "body:") && has(line, "crosshair is true"), "the key line, body");
 
     FrameTally t = census9();
     rankPanels(t.panels, t.count);

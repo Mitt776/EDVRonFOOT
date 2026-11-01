@@ -84,7 +84,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "stall_watch.h"     // stallWatchBeat: the stall sampler's heartbeat, once per owned Present
 #include "vram_tick.h"       // vramWatchTick: the graphics memory watch, once per owned Present
 #include "vertex_resync_hook.h"   // vertexResyncInstall at startup, vertexResyncPoll once a second: the f3d vertex-buffer cache repair (both profiles)
-#include "head_aim_probe.h"   // EDVRonFOOT: headAimProbeInstall at startup, headAimProbeFrameBoundary each frame (temporary, on-foot-head-aim-probe)
+#include "head_aim.h"   // EDVRonFOOT: headAimInstall at startup, headAimFrameBoundary each frame (on-foot head aim)
 #include "terrain_cull_cover_hook.h"   // terrainCullCoverInstall at startup, terrainCullCoverPoll once a second: the terrain cull frustum cover (VR)
 #include "frame_ticks.h"     // g_frameTicks: what the Present hook's own work cost, by name
 #include "boundary_tick.h"   // one fault budget per frame-boundary tick
@@ -1219,7 +1219,7 @@ EDVR_BOUNDARY_TICK(tkExplorerCam, "explorer_cam");
 // EDVRonFOOT: native VR on foot (native_vr_on_foot.h). Like Explorer Cam it must run on every owned Present.
 EDVR_BOUNDARY_TICK(tkNativeVrOnFoot, "native_vr_on_foot");
 EDVR_BOUNDARY_TICK(tkOnFootAimEye, "on_foot_aim_eye");
-EDVR_BOUNDARY_TICK(tkHeadAimProbe, "head_aim_probe");
+EDVR_BOUNDARY_TICK(tkHeadAim, "head_aim");
 EDVR_BOUNDARY_TICK(tkOnFootHud, "on_foot_hud");
 EDVR_BOUNDARY_TICK(tkOnFootMarkers, "on_foot_markers");
 EDVR_BOUNDARY_TICK(tkFssModeLatch, "fss_mode_latch");
@@ -1571,8 +1571,8 @@ void presentFrameBoundary() {
     // EDVRonFOOT: the aiming eye (on_foot_aim_eye.h): LT on foot ramps a blend and publishes it for the runtime's head-pose shift. After the
     // journal's tick it reads; published every frame, because a signal 200 ms old reads as no shift.
     tkOnFootAimEye.run([] { onFootAimEyeFrameBoundary(); });
-    // EDVRonFOOT: the head aim probe (head_aim_probe.h; temporary): its keys, the journal, who the player is, what the latch may shift, the lines.
-    tkHeadAimProbe.run([] { headAimProbeFrameBoundary(); });
+    // EDVRonFOOT: the on-foot head aim (head_aim.h): its key, the journal, who the player is, what the latch may do, the lines.
+    tkHeadAim.run([] { headAimFrameBoundary(); });
     // EDVRonFOOT: the on-foot markers (on_foot_markers.h): native_vr_on_foot, the journal, the search for the points, whether the
     // writer hooks correct, the install, the on and off lines, the end-of-frame check and the summary.
     tkOnFootMarkers.run([] { onFootMarkersFrameBoundary(); });
@@ -2872,9 +2872,9 @@ void hookDevice(ID3D11Device* device) {
             // The terrain cull cover (terrain_cull_cover_hook.cpp; docs/terrain-culling.md): a CodeHook on the game's cull-plane builder, always on, VR only (a flat session says
             // it is inert). A build that is not 332841 is scanned for the call site; anything short of one match is one log line and nothing patched.
             terrainCullCoverInstall(runtimeFlatProfile());
-            // EDVRonFOOT: the head aim probe (head_aim_probe.h; temporary): three entries of the game's tables, 334925 only, checked by their bytes;
+            // EDVRonFOOT: the on-foot head aim (head_aim.h): three entries of the game's tables, 334925 only, checked by their bytes;
             // anything else is one log line and nothing touched. VR only.
-            headAimProbeInstall(runtimeFlatProfile());
+            headAimInstall(runtimeFlatProfile());
 
             // AFTER BOTH INSTALLERS, and the order is the whole point. EDVR's
             // own commit writes two dozen entries of this table in the shared

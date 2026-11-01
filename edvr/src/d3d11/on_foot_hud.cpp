@@ -54,7 +54,6 @@ uint32_t g_rtvW = 0, g_rtvH = 0, g_rtvFmt = 0;
 
 // The keys and the journal, from the frame thread to the door.
 std::atomic<int> g_mode{int(ofh::Mode::Body)};
-std::atomic<float> g_width{ofh::kWidthDefault};
 std::atomic<bool> g_nativeOnFoot{true};
 std::atomic<int> g_onFoot{-1};
 std::atomic<uint64_t> g_frameSeq{1};
@@ -271,26 +270,21 @@ void onFootHudFrameBoundary() {
     static uint32_t generation = ~0u;
     static bool saidKey = false;
     static ofh::Mode lastMode = ofh::Mode::Body;
-    static float lastWidth = -1.0f;
     static uint64_t windowStart = 0;
     const Config& cfg = Config::get();
     if (cfg.generation() != generation) {
         generation = cfg.generation();
         const std::string modeText = cfg.getString("experimental.native_vr_on_foot_hud", "body");
-        bool modeValid = true, widthValid = true;
+        bool modeValid = true;
         const ofh::Mode mode = ofh::parseMode(modeText.c_str(), &modeValid);
-        const float rawWidth = cfg.getFloat("experimental.native_vr_on_foot_hud_size", ofh::kWidthDefault);
-        const float width = ofh::parseWidth(rawWidth, &widthValid);
-        if (!saidKey || mode != lastMode || width != lastWidth) {
+        if (!saidKey || mode != lastMode) {
             char line[600];
-            ofh::formatKey(mode, modeValid, modeText.c_str(), width, widthValid, rawWidth, line, sizeof(line));
+            ofh::formatKey(mode, modeValid, modeText.c_str(), line, sizeof(line));
             say(line);
             saidKey = true;
         }
         lastMode = mode;
-        lastWidth = width;
         g_mode.store(int(mode), std::memory_order_relaxed);
-        g_width.store(width, std::memory_order_relaxed);
         g_nativeOnFoot.store(cfg.getBool("experimental.native_vr_on_foot", true), std::memory_order_relaxed);
     }
     const int onFoot = journalOnFootKnown() ? (journalOnFoot() ? 1 : 0) : -1;
@@ -497,7 +491,7 @@ int onFootHudSheetsForEye(ID3D11Device* device, uint32_t eye, OnFootHudSheet out
     if (!device || !out || eye > 1) return 0;
     const uint64_t seq = g_frameSeq.load(std::memory_order_relaxed);
     const ofh::Mode mode = ofh::Mode(g_mode.load(std::memory_order_relaxed));
-    const float width = g_width.load(std::memory_order_relaxed);
+    const float width = ofh::kWidthDefault;
     std::lock_guard<std::mutex> lock(g_mutex);
     if (eye == 0 || g_doorSeq != seq) {
         g_doorSeq = seq;

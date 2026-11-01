@@ -408,24 +408,22 @@ template<class Check> void runHeadAimCases(Check&& check) {
             "the core reads 45 right and 30 up out of that pose");
       edvr::ha::State st;
       edvr::ha::Inputs in;
-      in.key = edvr::ha::Key::Raw; in.nativeOnFoot = in.journalKnown = in.journalOnFoot = in.player = in.channel8 = true; in.focusKnown = true; in.head = p;
+      in.key = edvr::ha::Key::On; in.nativeOnFoot = in.journalKnown = in.journalOnFoot = in.player = in.channel8 = true; in.focusKnown = true; in.head = p;
       edvr::ha::Output o;
       for (int i = 0; i < 40; ++i) { in.nowMs = 1000 + 28 * i; o = edvr::ha::step(st, in); }
-      const float orig = 0.0f;   // the stick holds the tilt at 0
-      const float added = edvr::ha::pitchAdded(orig, o.pitchTarget, o.level);
+      const float added = edvr::ha::pitchCorrection(o.pitchTarget, o.level);   // what the runtime turns the pose back by (the stick's tilt `orig` plays no part)
       check(std::fabs(double(o.yawAdded) - 45 * k) < 1e-5 && std::fabs(double(added) + 30 * k) < 1e-5, "the core's yaw added is +45 and its pitch added -30");
       vr::HmdMatrix34_t e = both;
       turnAboutVertical(e, double(o.yawAdded));
-      turnAboutHorizontal(e, double(edvr::ha::runtimePitch(edvr::ha::PitchComp::Plus, added)));
-      check(identityRotation(e, 1e-4), "END TO END, sign plus: the core's numbers through both turns give the identity rotation");
+      turnAboutHorizontal(e, double(added));
+      check(identityRotation(e, 1e-4), "END TO END: the core's numbers through both turns give the identity rotation");
       vr::HmdMatrix34_t m = both;
       turnAboutVertical(m, double(o.yawAdded));
-      turnAboutHorizontal(m, double(edvr::ha::runtimePitch(edvr::ha::PitchComp::Minus, added)));
-      check(!identityRotation(m, 1e-2), "sign minus does not (the flight picks the sign)");
+      turnAboutHorizontal(m, double(-added));
+      check(!identityRotation(m, 1e-2), "the opposite tilt does not");
       vr::HmdMatrix34_t n = both;
       turnAboutVertical(n, double(o.yawAdded));
-      turnAboutHorizontal(n, double(edvr::ha::runtimePitch(edvr::ha::PitchComp::Off, added)));
-      check(!identityRotation(n, 1e-2), "sign off leaves the tilt in the pose");
+      check(!identityRotation(n, 1e-2), "without the tilt turn the tilt stays in the pose");
     }
     vr::HmdMatrix34_t t0 = tiltPose(20, 0.3, 1.2, -0.5);
     const vr::HmdMatrix34_t keep = t0;
