@@ -1,16 +1,15 @@
 #pragma once
-// The on-foot aim dot probe (EDVRonFOOT; experimental.native_vr_on_foot_dot, temporary, .42; the project's
+// The on-foot aim dot probe (EDVRonFOOT; experimental.native_vr_on_foot_dot, temporary, .42, census only since .43; the project's
 // docs\research\native-vr-on-foot.md, "Зонд точки прицела (.42)"; aim_dot_probe_core.h for the pure half).
 //
 // The probe rides the on-foot HUD's census (on_foot_hud.cpp): it is called only while that census is (on foot, native VR on foot, the
 // HUD key not off) and only while its own key is not off -- with off, not one call more to the graphics card.
 //
 //   aimDotNoteGuiDraw         an interface draw into a hidden panel: the atlas is the panel of 1.161 proportions; its first draw of a
-//                             frame counts the frame, a draw after this frame's erase asks for another before the next read; in a
-//                             census frame the draw's viewport and scissor go into the snapshot's list.
+//                             frame counts the frame; in a census frame the draw's viewport and scissor go into the snapshot's list.
 //   aimDotBeforeEyeComposite  the game's composite into an eye, with what it reads in pixel slots 0-2: one that reads the atlas is an
-//                             eye quad; the first of a frame (and the first after a rewrite) erases the dot's cell (erase), or takes
-//                             the snapshot (census) -- before the draw itself, which goes on as ever.
+//                             eye quad; the first of a frame with a mark waiting takes the snapshot (census) -- before the draw
+//                             itself, which goes on as ever.
 //   aimDotFrameBoundary       the frame thread: the key, the frame's number, the 2-second wait, the 30-second summary.
 //   aimDotMark                the log mark (PAUSE, hotkey.dump_camera): census takes a snapshot of the next frame with the atlas.
 #include <atomic>

@@ -534,6 +534,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\explorer_cam.cpp" ^
     "src\d3d11\native_vr_on_foot.cpp" ^
     "src\d3d11\on_foot_hud.cpp" ^
+    "src\d3d11\aim_dot.cpp" ^
     "src\d3d11\aim_dot_probe.cpp" ^
     "src\d3d11\on_foot_aim_eye.cpp" ^
     "src\d3d11\head_aim_probe.cpp" ^
@@ -3072,6 +3073,20 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     "tools\aim_dot_probe_test\aim_dot_probe_test.cpp" /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: aim dot probe test build failed & exit /b 1 )
 "%BUILD%\aim_dot_probe_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_aim_dot_test
+echo [edvr] === aim_dot_test.exe ===
+REM EDVRonFOOT: build gate for the on-foot aim dot (src\d3d11\aim_dot_core.h, experimental.native_vr_on_foot_aim_dot, .43). Drives the
+REM pure half: the key's values, rubbish and empty (hide); the atlas by its 1.161 proportions; the centre in pixels (2076x1787 -> x
+REM 1032..1044, y 456..467, .42's dot inside; 2768x2383 -> x 1377..1391, y 608..623), outward, inside a tiny atlas and never empty; the
+REM weapon cue (vector 336 or 642, each alone; .42's other vector counts and text or icons no); every line's text.
+if not exist "%OBJ%\aimdot" mkdir "%OBJ%\aimdot"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\aimdot"\ /Fe"%BUILD%\aim_dot_test.exe" ^
+    "tools\aim_dot_test\aim_dot_test.cpp" /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: aim dot test build failed & exit /b 1 )
+"%BUILD%\aim_dot_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_on_foot_aim_eye_test

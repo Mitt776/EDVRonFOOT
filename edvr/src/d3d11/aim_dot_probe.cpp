@@ -40,7 +40,7 @@ std::atomic<uint64_t> g_seq{1};          // the frame's number, from the boundar
 std::atomic<uint64_t> g_armedAt{0};      // the mark's tick (census), 0 for none
 std::atomic<uint32_t> g_atlasW{0}, g_atlasH{0};
 // The draw thread counts, the boundary takes them every 30 s.
-std::atomic<uint64_t> g_cAtlasFrames{0}, g_cEyeQuads{0}, g_cErased{0}, g_cRewrites{0}, g_cSnapshots{0}, g_cFailures{0};
+std::atomic<uint64_t> g_cAtlasFrames{0}, g_cEyeQuads{0}, g_cSnapshots{0}, g_cFailures{0};
 
 void say(const char* line) { Log::get().note("%s", line); }
 
@@ -62,13 +62,11 @@ struct State {
     uint32_t w = 0, h = 0, fmt = 0;
     adp::Cell cell;
     uint32_t saidW = 0, saidH = 0;
-    ID3D11Texture2D* zero = nullptr;  // the cell's size of zeros, the atlas's format
-    uint32_t zw = 0, zh = 0, zfmt = 0;
     ID3D11Texture2D* staging = nullptr;
     uint32_t sw = 0, sh = 0, sfmt = 0;
     // This frame's.
     uint64_t frame = 0;
-    bool atlasDrawn = false, erased = false, rewrote = false, recording = false;
+    bool atlasDrawn = false, recording = false;
     const void* eyeTargets[2] = {};
     uint32_t quads[2] = {}, targets = 0;
     std::vector<adp::GuiDraw> list;
@@ -79,14 +77,13 @@ struct State {
     bool limitSaid = false;
 
     void releaseAll() {
-        for (ID3D11Texture2D** t : {&atlas, &zero, &staging})
+        for (ID3D11Texture2D** t : {&atlas, &staging})
             if (*t) {
                 (*t)->Release();
                 *t = nullptr;
             }
         atlasId = nullptr;
         w = h = fmt = 0;
-        zw = zh = zfmt = 0;
         sw = sh = sfmt = 0;
         snap = Snapshot{};
         g_holding.store(false, std::memory_order_relaxed);
@@ -194,7 +191,7 @@ void stepFrame() {
         g_s.snap.finalized = true;
     }
     g_s.frame = seq;
-    g_s.atlasDrawn = g_s.erased = g_s.rewrote = false;
+    g_s.atlasDrawn = false;
     g_s.eyeTargets[0] = g_s.eyeTargets[1] = nullptr;
     g_s.quads[0] = g_s.quads[1] = 0;
     g_s.targets = 0;
@@ -276,8 +273,8 @@ void adopt(ID3D11DeviceContext* ctx, const void* id) {
     g_s.saidH = d.Height;
 }
 
-// A texture of EDVR's like the atlas: the cell's size of zeros (erase), or the atlas's size to read (census). Remade on a new size.
-ID3D11Texture2D* ownTexture(ID3D11Texture2D** slot, uint32_t* sw, uint32_t* sh, uint32_t* sf, uint32_t w, uint32_t h, bool staging) {
+// A staging texture of the atlas's size and format, to read it (census). Remade on a new size.
+ID3D11Texture2D* ownTexture(ID3D11Texture2D** slot, uint32_t* sw, uint32_t* sh, uint32_t* sf, uint32_t w, uint32_t h) {
     if (*slot && *sw == w && *sh == h && *sf == g_s.fmt) return *slot;
     if (*slot) (*slot)->Release();
     *slot = nullptr;
@@ -291,17 +288,9 @@ ID3D11Texture2D* ownTexture(ID3D11Texture2D** slot, uint32_t* sw, uint32_t* sh, 
     d.ArraySize = 1;
     d.Format = DXGI_FORMAT(g_s.fmt);
     d.SampleDesc.Count = 1;
-    d.Usage = staging ? D3D11_USAGE_STAGING : D3D11_USAGE_DEFAULT;
-    d.BindFlags = staging ? 0 : D3D11_BIND_SHADER_RESOURCE;
-    d.CPUAccessFlags = staging ? D3D11_CPU_ACCESS_READ : 0;
-    std::vector<uint8_t> zeros;
-    D3D11_SUBRESOURCE_DATA init{};
-    if (!staging) {
-        zeros.assign(size_t(w) * h * 4, 0);
-        init.pSysMem = zeros.data();
-        init.SysMemPitch = w * 4;
-    }
-    const HRESULT hr = device->CreateTexture2D(&d, staging ? nullptr : &init, slot);
+    d.Usage = D3D11_USAGE_STAGING;
+    d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    const HRESULT hr = device->CreateTexture2D(&d, nullptr, slot);
     device->Release();
     if (FAILED(hr) || !*slot) {
         *slot = nullptr;
@@ -332,7 +321,6 @@ void aimDotNoteGuiDraw(ID3D11DeviceContext* ctx, uint64_t vs, uint32_t count, co
             g_s.atlasDrawn = true;
             g_cAtlasFrames.fetch_add(1, std::memory_order_relaxed);
         }
-        if (g_s.erased) g_s.rewrote = true;  // drawn into after this frame's erase: erased again before the next read
         if (!g_s.recording) return;
         ++g_s.listTotal;
         if (int(g_s.list.size()) >= adp::kMaxGuiDraws) return;
@@ -404,7 +392,7 @@ void aimDotBeforeEyeComposite(ID3D11DeviceContext* ctx, const void* const read[3
             s.h = g_s.h;
             s.cell = g_s.cell;
             if (adp::snapshotFilesAllowed(s.n - 1)) {
-                if (!ownTexture(&g_s.staging, &g_s.sw, &g_s.sh, &g_s.sfmt, g_s.w, g_s.h, true)) {
+                if (!ownTexture(&g_s.staging, &g_s.sw, &g_s.sh, &g_s.sfmt, g_s.w, g_s.h)) {
                     standDown("a texture to read the atlas could not be made");
                     return;
                 }
@@ -418,17 +406,6 @@ void aimDotBeforeEyeComposite(ID3D11DeviceContext* ctx, const void* const read[3
             }
             g_armedAt.store(0, std::memory_order_relaxed);
             g_cSnapshots.fetch_add(1, std::memory_order_relaxed);
-        }
-        if (mode == adp::Mode::Erase && (!g_s.erased || g_s.rewrote)) {
-            const adp::Cell& c = g_s.cell;
-            if (!ownTexture(&g_s.zero, &g_s.zw, &g_s.zh, &g_s.zfmt, c.w(), c.h(), false)) {
-                standDown("a transparent texture for the dot's cell could not be made");
-                return;
-            }
-            ctx->CopySubresourceRegion(g_s.atlas, 0, c.x0, c.y0, 0, g_s.zero, 0, nullptr);
-            (g_s.erased ? g_cRewrites : g_cErased).fetch_add(1, std::memory_order_relaxed);
-            g_s.erased = true;
-            g_s.rewrote = false;
         }
     });
 }
@@ -490,8 +467,6 @@ void aimDotFrameBoundary(bool hudCensus, bool onFoot) {
     if (now - windowStart >= adp::kSummaryMs) {
         summary.atlasFrames = g_cAtlasFrames.exchange(0, std::memory_order_relaxed);
         summary.eyeQuads = g_cEyeQuads.exchange(0, std::memory_order_relaxed);
-        summary.erased = g_cErased.exchange(0, std::memory_order_relaxed);
-        summary.rewrites = g_cRewrites.exchange(0, std::memory_order_relaxed);
         summary.snapshots = g_cSnapshots.exchange(0, std::memory_order_relaxed);
         summary.failures = g_cFailures.exchange(0, std::memory_order_relaxed);
         if (mode != adp::Mode::Off && summary.frames) {

@@ -1,4 +1,5 @@
-// Build gate for the EDVRonFOOT on-foot aim dot probe (src\d3d11\aim_dot_probe_core.h, experimental.native_vr_on_foot_dot; temporary).
+// Build gate for the EDVRonFOOT on-foot aim dot probe (src\d3d11\aim_dot_probe_core.h, experimental.native_vr_on_foot_dot; temporary,
+// census only since .43).
 //
 // Drives the pure half: the key's every value, rubbish and empty; the atlas by its 1.161 proportions (2768x2383 and the cinema's
 // 4089x3521 yes, at HMD quality 0.75 too; the HUD's 2412x1449, the ship name's 2162x1922 and the lift's 1521x1402 no); the dot's cell
@@ -27,15 +28,13 @@ void partKeys() {
     bool valid = false;
     check(parseMode("off", &valid) == Mode::Off && valid, "off");
     check(parseMode("census", &valid) == Mode::Census && valid, "census");
-    check(parseMode("erase", &valid) == Mode::Erase && valid, "erase");
-    check(parseMode(" Erase \r\n", &valid) == Mode::Erase && valid, "case and spaces");
+    check(parseMode("erase", &valid) == Mode::Off && !valid, "erase went in .43: rubbish, off, said");
+    check(parseMode(" Census \r\n", &valid) == Mode::Census && valid, "case and spaces");
     check(parseMode("", &valid) == Mode::Off && valid, "empty is off");
     check(parseMode(nullptr, &valid) == Mode::Off && valid, "missing is off");
     check(parseMode("hide", &valid) == Mode::Off && !valid, "rubbish is off, said");
-    check(parseMode("erase2", &valid) == Mode::Off && !valid, "a longer word is rubbish");
-    check(std::strcmp(modeName(Mode::Census), "census") == 0 && std::strcmp(modeName(Mode::Erase), "erase") == 0 &&
-              std::strcmp(modeName(Mode::Off), "off") == 0,
-          "names");
+    check(parseMode("census2", &valid) == Mode::Off && !valid, "a longer word is rubbish");
+    check(std::strcmp(modeName(Mode::Census), "census") == 0 && std::strcmp(modeName(Mode::Off), "off") == 0, "names");
 }
 
 void partAtlas() {
@@ -119,20 +118,20 @@ void partFiles() {
 void partLines() {
     char line[1200];
     formatKey(Mode::Census, true, "census", line, sizeof(line));
-    check(has(line, "aim dot: key census"), "key line");
+    check(has(line, "aim dot probe: key census"), "key line");
     formatKey(Mode::Off, false, "hide", line, sizeof(line));
-    check(has(line, "aim dot: key off") && has(line, "'hide' is not understood"), "rubbish key line");
+    check(has(line, "aim dot probe: key off") && has(line, "'hide' is not understood"), "rubbish key line");
     formatWaitingForHud(line, sizeof(line));
-    check(has(line, "aim dot: waiting for the on-foot HUD"), "waiting line");
+    check(has(line, "aim dot probe: waiting for the on-foot HUD"), "waiting line");
     const Cell c = cellOf(2768, 2383);
     formatAtlasFound(2768, 2383, 27, c, line, sizeof(line));
-    check(has(line, "aim dot: atlas found 2768x2383") && has(line, "x 1228..1540 y 462..770"), "atlas found");
+    check(has(line, "aim dot probe: atlas found 2768x2383") && has(line, "x 1228..1540 y 462..770"), "atlas found");
     formatAtlasSize(2768, 2383, 2076, 1787, cellOf(2076, 1787), line, sizeof(line));
-    check(has(line, "aim dot: atlas size 2768x2383 -> 2076x1787"), "atlas size");
+    check(has(line, "aim dot probe: atlas size 2768x2383 -> 2076x1787"), "atlas size");
     formatInert("the atlas's format is 87, not R8G8B8A8", line, sizeof(line));
-    check(has(line, "aim dot: inert: the atlas's format is 87"), "inert");
+    check(has(line, "aim dot probe: inert: the atlas's format is 87"), "inert");
     formatSnapshot(3, 2768, 2383, 5, 5, 2, 40, "03_atlas_2768x2383.bmp, 03_cell.bmp", line, sizeof(line));
-    check(has(line, "aim dot: snapshot 3: atlas 2768x2383, eye quads 5/5") && has(line, "gui draws 40,") && has(line, "files 03_"),
+    check(has(line, "aim dot probe: snapshot 3: atlas 2768x2383, eye quads 5/5") && has(line, "gui draws 40,") && has(line, "files 03_"),
           "snapshot line");
     formatSnapshot(13, 2768, 2383, 1, 1, 2, 300, "none (the limit)", line, sizeof(line));
     check(has(line, "(the first 256 listed)") && has(line, "files none"), "snapshot over the limits");
@@ -151,20 +150,19 @@ void partLines() {
         d[i].scB = 770;
     }
     formatDraws(3, d, 0, kDrawsPerLine, line, sizeof(line));
-    check(has(line, "aim dot: snapshot 3 draws 0..19: [icons n=6 vp=0,0,2768,2383 sc=1228,462,1540,770, icons n=6"), "draws line");
+    check(has(line, "aim dot probe: snapshot 3 draws 0..19: [icons n=6 vp=0,0,2768,2383 sc=1228,462,1540,770, icons n=6"), "draws line");
     check(has(line, "sc=none") && line[std::strlen(line) - 1] == ']', "draws line closed");
     check(std::strlen(line) < 1100, "a draws line fits the log's line");
     formatSkipped(line, sizeof(line));
-    check(has(line, "aim dot: snapshot skipped: no atlas within 2 s"), "skipped");
+    check(has(line, "aim dot probe: snapshot skipped: no atlas within 2 s"), "skipped");
     formatLimit(line, sizeof(line));
-    check(has(line, "aim dot: snapshot limit"), "limit");
+    check(has(line, "aim dot probe: snapshot limit"), "limit");
     Summary s;
     s.frames = 2700;
     s.atlasFrames = 2690;
-    s.erased = 2690;
-    formatSummary(Mode::Erase, 2768, 2383, s, line, sizeof(line));
-    check(has(line, "aim dot: summary (erase") && has(line, "frames=2700, atlas_frames=2690") && has(line, "erased=2690") &&
-              has(line, "rewrites_after_erase=0") && has(line, "failures=0"),
+    formatSummary(Mode::Census, 2768, 2383, s, line, sizeof(line));
+    check(has(line, "aim dot probe: summary (census") && has(line, "frames=2700, atlas_frames=2690") && !has(line, "erased") &&
+              has(line, "snapshots=0, failures=0"),
           "summary");
     s.clear();
     formatSummary(Mode::Census, 0, 0, s, line, sizeof(line));
