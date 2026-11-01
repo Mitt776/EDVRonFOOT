@@ -92,6 +92,41 @@ inline int weaponCue(bool vectorShader, uint32_t count) {
     return -1;
 }
 
+// The plain dot (.44, after .43: the pistol and the tools have no cue of their own, and .43 erased their dots): the centre is erased
+// only when it holds the plain dot without a weapon -- one fixed picture, read back off the atlas before the erase. The picture is
+// .42's snapshot 01 (2076x1787), R, G, B of the centre's 12x11, rows top down; .42's 04 is the same to the byte, the weapon's dot is
+// 202 away, the tools' red dot and an empty centre 255. A centre within kPatternTolerance on every channel is the plain dot; any other
+// atlas size has no picture, so nothing is erased there (the dot shows).
+constexpr uint32_t kPatternW = 12, kPatternH = 11, kPatternAtlasW = 2076, kPatternAtlasH = 1787;
+constexpr int kPatternTolerance = 48;
+constexpr uint8_t kPlainDot[kPatternW * kPatternH * 3] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 72, 106, 104, 139, 205, 201, 145, 214, 210, 78, 115, 113, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 5, 5, 172, 254, 249, 173, 255, 250, 173, 255, 250, 167, 246, 241, 14, 21, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 33, 49, 48, 173, 255, 250, 173, 255, 250, 173, 255, 250, 173, 255, 250, 35, 52, 51, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 117, 173, 170, 173, 255, 250, 173, 255, 250, 129, 190, 186, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 41, 60, 59, 46, 68, 67, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+};
+inline bool patternFor(uint32_t w, uint32_t h) { return w == kPatternAtlasW && h == kPatternAtlasH; }
+// `rgba`: the centre's pixels, 4 bytes each (R, G, B, A as the atlas stores them), `pitch` bytes a row; `w`, `h`: the atlas's size.
+inline bool matchesPlainDot(const uint8_t* rgba, uint32_t pitch, uint32_t w, uint32_t h) {
+    if (!rgba || !patternFor(w, h)) return false;
+    for (uint32_t y = 0; y < kPatternH; ++y)
+        for (uint32_t x = 0; x < kPatternW; ++x)
+            for (uint32_t c = 0; c < 3; ++c) {
+                const int got = rgba[size_t(y) * pitch + x * 4 + c], want = kPlainDot[(y * kPatternW + x) * 3 + c];
+                if (got - want > kPatternTolerance || want - got > kPatternTolerance) return false;
+            }
+    return true;
+}
+// The decision's lines, on each change: at most kCentreLinesPerWindow a summary window, the rest counted.
+constexpr int kCentreLinesPerWindow = 20;
+
 constexpr uint64_t kSummaryMs = 30000;
 
 // -- the lines --
@@ -128,20 +163,29 @@ inline void formatWeaponOn(uint32_t seen, char* out, size_t cap) {
     if (len > 0 && size_t(len) + 2 <= cap) std::snprintf(out + len, cap - size_t(len), ")");
 }
 inline void formatWeaponOff(char* out, size_t cap) { std::snprintf(out, cap, "aim dot: weapon off"); }
+inline void formatCentre(bool plain, char* out, size_t cap) {
+    std::snprintf(out, cap, plain ? "aim dot: centre plain (the plain dot without a weapon: erased)"
+                                  : "aim dot: centre other (a weapon's or a tool's dot, or nothing: kept)");
+}
+inline void formatNoPattern(uint32_t w, uint32_t h, char* out, size_t cap) {
+    std::snprintf(out, cap, "aim dot: the plain dot's pattern is for a %ux%u atlas, this one is %ux%u: nothing is erased (the dot shows)",
+                  kPatternAtlasW, kPatternAtlasH, w, h);
+}
 inline void formatInert(const char* why, char* out, size_t cap) {
     std::snprintf(out, cap, "aim dot: inert: %s; the picture is as with show until the key changes", why);
 }
 
 struct Summary {
-    uint64_t atlasFrames = 0, weaponFrames = 0, hidden = 0, rewrites = 0, failures = 0;
+    uint64_t atlasFrames = 0, weaponFrames = 0, hidden = 0, rewrites = 0, plain = 0, other = 0, unread = 0, quietLines = 0, failures = 0;
     void clear() { *this = Summary{}; }
 };
 inline void formatSummary(Mode m, uint32_t w, uint32_t h, const Summary& s, char* out, size_t cap) {
     std::snprintf(out, cap,
                   "aim dot: summary (%s, 30 s on foot): atlas %ux%u, atlas_frames=%llu, weapon_frames=%llu, hidden=%llu, rewrites=%llu, "
-                  "failures=%llu",
+                  "plain=%llu, other=%llu, unread=%llu, quiet_lines=%llu, failures=%llu",
                   modeName(m), w, h, (unsigned long long)s.atlasFrames, (unsigned long long)s.weaponFrames, (unsigned long long)s.hidden,
-                  (unsigned long long)s.rewrites, (unsigned long long)s.failures);
+                  (unsigned long long)s.rewrites, (unsigned long long)s.plain, (unsigned long long)s.other, (unsigned long long)s.unread,
+                  (unsigned long long)s.quietLines, (unsigned long long)s.failures);
 }
 
 }  // namespace adh

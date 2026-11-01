@@ -91,6 +91,9 @@ constexpr uint64_t kSnapshotWaitMs = 2000;
 constexpr int kMaxGuiDraws = 256;
 constexpr int kDrawsPerLine = 20;
 constexpr uint64_t kSummaryMs = 30000;
+// The centre's steps (.44): in a snapshot's frame the aim dot's centre (aim_dot_core.h) is copied before each of the first
+// kCentreSteps - 1 draws into the atlas and once more before the eye reads it; the line names each draw after which it changed.
+constexpr int kCentreSteps = 64;
 inline bool snapshotFilesAllowed(int taken) { return taken < kMaxSnapshots; }
 inline void atlasFileName(int n, uint32_t w, uint32_t h, char* out, size_t cap) { std::snprintf(out, cap, "%02d_atlas_%ux%u.bmp", n, w, h); }
 inline void cellFileName(int n, char* out, size_t cap) { std::snprintf(out, cap, "%02d_cell.bmp", n); }
@@ -201,6 +204,44 @@ inline void formatSkipped(char* out, size_t cap) {
 }
 inline void formatLimit(char* out, size_t cap) {
     std::snprintf(out, cap, "aim dot probe: snapshot limit: 12 snapshots (24 files) written this launch; the lines go on, without files");
+}
+
+// One step of the centre: how many pixels are lit (a channel above 60) and the brightest pixel's R, G, B.
+struct CentreStep {
+    uint32_t lit = 0;
+    uint8_t r = 0, g = 0, b = 0;
+};
+inline CentreStep centreStep(const uint8_t* rgba, uint32_t pitch, uint32_t w, uint32_t h) {
+    CentreStep s;
+    int best = -1;
+    for (uint32_t y = 0; y < h; ++y)
+        for (uint32_t x = 0; x < w; ++x) {
+            const uint8_t* p = rgba + size_t(y) * pitch + x * 4;
+            if (p[0] > 60 || p[1] > 60 || p[2] > 60) ++s.lit;
+            if (p[0] + p[1] + p[2] > best) {
+                best = p[0] + p[1] + p[2];
+                s.r = p[0];
+                s.g = p[1];
+                s.b = p[2];
+            }
+        }
+    return s;
+}
+// The steps' line: the centre before the first draw, then each draw after which the centre changed (`changed[i]`: the pixels after
+// draw i differ from before it), with its kind, count and the centre after it.
+inline void formatCentreSteps(int n, const CentreStep* step, const bool* changed, const GuiDraw* d, int draws, char* out, size_t cap) {
+    int len = std::snprintf(out, cap, "aim dot probe: snapshot %d centre: before lit=%u rgb=%u,%u,%u", n, step[0].lit, step[0].r, step[0].g,
+                            step[0].b);
+    int shown = 0;
+    for (int i = 0; i < draws && len > 0 && size_t(len) < cap; ++i) {
+        if (!changed[i]) continue;
+        const int k = std::snprintf(out + len, cap - size_t(len), "; after %d (%s n=%u) lit=%u rgb=%u,%u,%u", i, guiName(d[i].kind),
+                                    d[i].count, step[i + 1].lit, step[i + 1].r, step[i + 1].g, step[i + 1].b);
+        if (k < 0) break;
+        len += k;
+        ++shown;
+    }
+    if (!shown && len > 0 && size_t(len) < cap) std::snprintf(out + len, cap - size_t(len), "; no draw changed it");
 }
 
 struct Summary {

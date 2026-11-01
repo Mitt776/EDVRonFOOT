@@ -1,5 +1,6 @@
 #include "aim_dot_probe.h"
 #include "aim_dot_probe_core.h"
+#include "aim_dot_core.h"
 #include "on_foot_hud_core.h"
 #include "binding_shadow.h"
 #include "../common/config.h"
@@ -54,6 +55,8 @@ struct Snapshot {
     uint32_t quads[2] = {}, targets = 0;
     int draws = 0;
     std::vector<adp::GuiDraw> list;
+    int steps = 0;              // the centre's copies in `centre`, before each draw and before the eye
+    std::string centreLine;     // made at the read
 };
 
 struct State {
@@ -64,6 +67,9 @@ struct State {
     uint32_t saidW = 0, saidH = 0;
     ID3D11Texture2D* staging = nullptr;
     uint32_t sw = 0, sh = 0, sfmt = 0;
+    ID3D11Texture2D* centre = nullptr;  // kCentreSteps slices of the aim dot's centre (staging)
+    uint32_t cw = 0, ch = 0, cfmt = 0;
+    int steps = 0;                      // this frame's copies into `centre`
     // This frame's.
     uint64_t frame = 0;
     bool atlasDrawn = false, recording = false;
@@ -77,7 +83,7 @@ struct State {
     bool limitSaid = false;
 
     void releaseAll() {
-        for (ID3D11Texture2D** t : {&atlas, &staging})
+        for (ID3D11Texture2D** t : {&atlas, &staging, &centre})
             if (*t) {
                 (*t)->Release();
                 *t = nullptr;
@@ -85,6 +91,7 @@ struct State {
         atlasId = nullptr;
         w = h = fmt = 0;
         sw = sh = sfmt = 0;
+        cw = ch = cfmt = 0;
         snap = Snapshot{};
         g_holding.store(false, std::memory_order_relaxed);
     }
@@ -113,6 +120,7 @@ void saySnapshot(const Snapshot& s, const char* files) {
         adp::formatDraws(s.n, s.list.data(), from, to, line, sizeof(line));
         say(line);
     }
+    if (!s.centreLine.empty()) say(s.centreLine.c_str());
 }
 
 // <logDir>\aim_dot\<the launch's local time>, made on the first file.
@@ -197,8 +205,79 @@ void stepFrame() {
     g_s.targets = 0;
     g_s.list.clear();
     g_s.listTotal = 0;
+    g_s.steps = 0;
     g_s.recording = adp::Mode(g_mode.load(std::memory_order_relaxed)) == adp::Mode::Census &&
                     g_armedAt.load(std::memory_order_relaxed) != 0 && !g_s.snap.active;
+}
+
+// A texture of the centre's size and the atlas's format, kCentreSteps slices to read (census). Remade on a new size.
+bool centreTexture(uint32_t w, uint32_t h) {
+    if (g_s.centre && g_s.cw == w && g_s.ch == h && g_s.cfmt == g_s.fmt) return true;
+    if (g_s.centre) g_s.centre->Release();
+    g_s.centre = nullptr;
+    ID3D11Device* device = nullptr;
+    g_s.atlas->GetDevice(&device);
+    if (!device) return false;
+    D3D11_TEXTURE2D_DESC d{};
+    d.Width = w;
+    d.Height = h;
+    d.MipLevels = 1;
+    d.ArraySize = adp::kCentreSteps;
+    d.Format = DXGI_FORMAT(g_s.fmt);
+    d.SampleDesc.Count = 1;
+    d.Usage = D3D11_USAGE_STAGING;
+    d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    const HRESULT hr = device->CreateTexture2D(&d, nullptr, &g_s.centre);
+    device->Release();
+    if (FAILED(hr) || !g_s.centre) {
+        g_s.centre = nullptr;
+        return false;
+    }
+    g_s.cw = w;
+    g_s.ch = h;
+    g_s.cfmt = g_s.fmt;
+    return true;
+}
+
+// The centre as it stands now, into the next slice (census, a snapshot's frame).
+void copyCentreStep(ID3D11DeviceContext* ctx) {
+    if (g_s.steps >= adp::kCentreSteps || ctx->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE) return;
+    const adh::Rect r = adh::centreOf(g_s.w, g_s.h);
+    if (!centreTexture(r.w(), r.h())) return;  // the steps are extra: without them the snapshot goes on
+    D3D11_BOX box{r.x0, r.y0, 0, r.x1, r.y1, 1};
+    ctx->CopySubresourceRegion(g_s.centre, UINT(g_s.steps), 0, 0, 0, g_s.atlas, 0, &box);
+    ++g_s.steps;
+}
+
+// The snapshot's centre steps read (they were copied before the atlas, so they are ready when it is): its line. False: not yet.
+bool readCentreSteps(ID3D11DeviceContext* ctx, Snapshot& s) {
+    std::vector<std::vector<uint8_t>> px(size_t(s.steps));
+    for (int i = 0; i < s.steps; ++i) {
+        D3D11_MAPPED_SUBRESOURCE m{};
+        const HRESULT hr = ctx->Map(g_s.centre, UINT(i), D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
+        if (hr == DXGI_ERROR_WAS_STILL_DRAWING) return false;
+        if (FAILED(hr)) {
+            s.centreLine = "aim dot probe: snapshot centre steps could not be read";
+            return true;
+        }
+        px[i].resize(size_t(g_s.cw) * g_s.ch * 4);
+        for (uint32_t y = 0; y < g_s.ch; ++y)
+            std::memcpy(px[i].data() + size_t(y) * g_s.cw * 4, static_cast<const uint8_t*>(m.pData) + size_t(y) * m.RowPitch,
+                        size_t(g_s.cw) * 4);
+        ctx->Unmap(g_s.centre, UINT(i));
+    }
+    std::vector<adp::CentreStep> step(size_t(s.steps));
+    for (int i = 0; i < s.steps; ++i) step[i] = adp::centreStep(px[i].data(), g_s.cw * 4, g_s.cw, g_s.ch);
+    // Step i is the centre before draw i (the last: before the eye); a draw changed it when its after differs from its before.
+    const int draws = s.steps - 1 < int(s.list.size()) ? s.steps - 1 : int(s.list.size());
+    std::vector<char> changed(size_t(draws > 0 ? draws : 1), 0);
+    for (int i = 0; i < draws; ++i) changed[i] = px[i] != px[i + 1];
+    bool flagArr[adp::kCentreSteps] = {};
+    for (int i = 0; i < draws; ++i) flagArr[i] = changed[i] != 0;
+    char line[1500];
+    adp::formatCentreSteps(s.n, step.data(), flagArr, s.list.data(), draws, line, sizeof(line));
+    s.centreLine = line;
+    return true;
 }
 
 // A finalized snapshot: its lines without files, or its staging copy read without waiting (a busy copy is tried at the next draw).
@@ -211,6 +290,7 @@ void pollSnapshot(ID3D11DeviceContext* ctx) {
         return;
     }
     if (ctx->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE) return;  // read on the context the copy was made on
+    if (s.steps > 1 && g_s.centre && s.centreLine.empty() && !readCentreSteps(ctx, s)) return;
     D3D11_MAPPED_SUBRESOURCE m{};
     const HRESULT hr = ctx->Map(g_s.staging, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
     if (hr == DXGI_ERROR_WAS_STILL_DRAWING) return;
@@ -322,6 +402,7 @@ void aimDotNoteGuiDraw(ID3D11DeviceContext* ctx, uint64_t vs, uint32_t count, co
             g_cAtlasFrames.fetch_add(1, std::memory_order_relaxed);
         }
         if (!g_s.recording) return;
+        copyCentreStep(ctx);  // the centre before this draw
         ++g_s.listTotal;
         if (int(g_s.list.size()) >= adp::kMaxGuiDraws) return;
         adp::GuiDraw g;
@@ -391,6 +472,8 @@ void aimDotBeforeEyeComposite(ID3D11DeviceContext* ctx, const void* const read[3
             s.w = g_s.w;
             s.h = g_s.h;
             s.cell = g_s.cell;
+            copyCentreStep(ctx);  // the centre before the eye reads it
+            s.steps = g_s.steps;
             if (adp::snapshotFilesAllowed(s.n - 1)) {
                 if (!ownTexture(&g_s.staging, &g_s.sw, &g_s.sh, &g_s.sfmt, g_s.w, g_s.h)) {
                     standDown("a texture to read the atlas could not be made");

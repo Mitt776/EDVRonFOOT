@@ -168,6 +168,31 @@ void partLines() {
     formatSummary(Mode::Census, 0, 0, s, line, sizeof(line));
     check(has(line, "atlas 0x0, frames=0"), "a summary of zeros");
 }
+void partCentreSteps() {
+    uint8_t px[4 * 4 * 4] = {};
+    CentreStep e = centreStep(px, 16, 4, 4);
+    check(e.lit == 0 && e.r == 0 && e.g == 0 && e.b == 0, "an empty centre");
+    px[5 * 4 + 0] = 173;
+    px[5 * 4 + 1] = 255;
+    px[5 * 4 + 2] = 250;
+    px[6 * 4 + 0] = 61;
+    CentreStep d = centreStep(px, 16, 4, 4);
+    check(d.lit == 2 && d.r == 173 && d.g == 255 && d.b == 250, "lit pixels and the brightest");
+    CentreStep steps[3] = {e, e, d};
+    bool changed[2] = {false, true};
+    GuiDraw draws[2];
+    draws[0].kind = Gui::Icons;
+    draws[0].count = 30;
+    draws[1].kind = Gui::Vector;
+    draws[1].count = 21;
+    char line[600];
+    formatCentreSteps(4, steps, changed, draws, 2, line, sizeof(line));
+    check(std::strcmp(line, "aim dot probe: snapshot 4 centre: before lit=0 rgb=0,0,0; after 1 (vector n=21) lit=2 rgb=173,255,250") == 0,
+          "the steps' line");
+    changed[1] = false;
+    formatCentreSteps(4, steps, changed, draws, 2, line, sizeof(line));
+    check(has(line, "; no draw changed it"), "no change");
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -181,6 +206,7 @@ int main(int argc, char** argv) {
     partZoom();
     partFiles();
     partLines();
+    partCentreSteps();
     std::printf("%s: aim_dot_probe_test, %d checks, %d failed\n", g_failures ? "FAIL" : "PASS", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

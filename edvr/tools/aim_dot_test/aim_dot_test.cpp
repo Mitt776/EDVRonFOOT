@@ -5,6 +5,7 @@
 // rounded outward, inside a tiny atlas and never empty; the weapon cue (vector 336 or 642 yes, each alone; .42's other vector counts
 // and text or icons of 336 no); and the text of every line.
 #include "../../src/d3d11/aim_dot_core.h"
+#include "aim_dot_samples.h"
 #include <cstdio>
 #include <cstring>
 
@@ -68,6 +69,39 @@ void partCue() {
     check(weaponCue(false, 336) < 0 && weaponCue(false, 642) < 0, "text or icons of 336 or 642 are not");
 }
 
+// A centre as the glue reads it: RGB samples widened to the atlas's 4 bytes a pixel, padded rows (pitch 64), alpha 255.
+void widen(const uint8_t* rgb, uint8_t* out, uint32_t pitch) {
+    std::memset(out, 0xEE, size_t(pitch) * kPatternH);
+    for (uint32_t y = 0; y < kPatternH; ++y)
+        for (uint32_t x = 0; x < kPatternW; ++x) {
+            for (uint32_t c = 0; c < 3; ++c) out[size_t(y) * pitch + x * 4 + c] = rgb[(y * kPatternW + x) * 3 + c];
+            out[size_t(y) * pitch + x * 4 + 3] = 255;
+        }
+}
+
+void partPattern() {
+    const uint32_t pitch = 64;
+    uint8_t c[64 * 11];
+    check(centreOf(2076, 1787).w() == kPatternW && centreOf(2076, 1787).h() == kPatternH, "the pattern is the centre's size");
+    widen(kPlainDot, c, pitch);
+    check(matchesPlainDot(c, pitch, 2076, 1787), "the pattern itself");
+    widen(kPlain42b, c, pitch);
+    check(matchesPlainDot(c, pitch, 2076, 1787), ".42's 04: the plain dot at a door");
+    widen(kWeapon42, c, pitch);
+    check(!matchesPlainDot(c, pitch, 2076, 1787), ".42's 02: the weapon's dot is not");
+    widen(kTool43, c, pitch);
+    check(!matchesPlainDot(c, pitch, 2076, 1787), ".43's 01: the tool's red dot is not");
+    std::memset(c, 0, sizeof(c));
+    check(!matchesPlainDot(c, pitch, 2076, 1787), "an empty centre is not");
+    widen(kPlainDot, c, pitch);
+    check(!matchesPlainDot(c, pitch, 2768, 2383) && !patternFor(2768, 2383), "another atlas size has no pattern");
+    check(!matchesPlainDot(nullptr, pitch, 2076, 1787), "no pixels");
+    c[5 * pitch + 5 * 4 + 1] = uint8_t(c[5 * pitch + 5 * 4 + 1] - 40);
+    check(matchesPlainDot(c, pitch, 2076, 1787), "within the tolerance");
+    c[5 * pitch + 5 * 4 + 1] = uint8_t(c[5 * pitch + 5 * 4 + 1] - 20);
+    check(!matchesPlainDot(c, pitch, 2076, 1787), "past the tolerance");
+}
+
 void partLines() {
     char line[600];
     formatKey(Mode::Hide, true, "hide", line, sizeof(line));
@@ -87,6 +121,12 @@ void partLines() {
     check(std::strcmp(line, "aim dot: weapon on (vector n=642)") == 0, "weapon on, one");
     formatWeaponOff(line, sizeof(line));
     check(std::strcmp(line, "aim dot: weapon off") == 0, "weapon off");
+    formatCentre(true, line, sizeof(line));
+    check(has(line, "aim dot: centre plain"), "centre plain");
+    formatCentre(false, line, sizeof(line));
+    check(has(line, "aim dot: centre other"), "centre other");
+    formatNoPattern(2768, 2383, line, sizeof(line));
+    check(has(line, "pattern is for a 2076x1787 atlas, this one is 2768x2383"), "no pattern");
     formatInert("why", line, sizeof(line));
     check(has(line, "aim dot: inert: why; the picture is as with show"), "inert");
     Summary s;
@@ -95,7 +135,7 @@ void partLines() {
     s.hidden = 2690;
     formatSummary(Mode::Hide, 2076, 1787, s, line, sizeof(line));
     check(has(line, "aim dot: summary (hide, 30 s on foot): atlas 2076x1787, atlas_frames=2700, weapon_frames=10, hidden=2690") &&
-              has(line, "rewrites=0, failures=0"),
+              has(line, "rewrites=0, plain=0, other=0, unread=0, quiet_lines=0, failures=0"),
           "summary");
     s.clear();
     formatSummary(Mode::Show, 0, 0, s, line, sizeof(line));
@@ -112,6 +152,7 @@ int main(int argc, char** argv) {
     partAtlas();
     partCentre();
     partCue();
+    partPattern();
     partLines();
     std::printf("%s: aim_dot_test, %d checks, %d failed\n", g_failures ? "FAIL" : "PASS", g_checks, g_failures);
     return g_failures ? 1 : 0;
