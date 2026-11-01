@@ -1,6 +1,6 @@
 #pragma once
 // Real centres (12x11, R, G, B, rows top down) of the atlas 2076x1787 for aim_dot_test: .42's snapshot 04 (the plain dot, without a
-// weapon, at a door), .42's 02 (the weapon's dot) and .43's 01 (a tool's red dot), from edvr_logsim_dot61101_210511 and
+// weapon, at a door), .42's 02 (the weapon's dot) and .43's 01 (a tool's red dot), from edvr_logs\aim_dot\20261101_210511 and
 // 20261101_222518.
 #include "../../src/d3d11/aim_dot_core.h"
 

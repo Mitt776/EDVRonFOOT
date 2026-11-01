@@ -2,16 +2,18 @@
 // The on-foot aim dot (EDVRonFOOT; experimental.native_vr_on_foot_aim_dot, .43; the project's docs\research\native-vr-on-foot.md,
 // "Точка без оружия (.43)"; aim_dot_core.h for the pure half).
 //
-// With hide (the default) the dot in the middle of the view is made transparent in the interface's atlas, only in a frame without a
-// weapon: the weapon's crosshair, the markers, the hints and the jetpack's arc stay. It rides the on-foot HUD's census (on_foot_hud.cpp)
-// as the probe does: called only while that census is (on foot, native VR on foot, the HUD key not off). With show it only follows the
+// With hide (the default) the plain dot in the middle of the view is made transparent in the interface's atlas: only in a frame
+// without a weapon cue, and only when the centre read back is the plain dot's picture (.44) -- the weapons' and the pistol's crosshairs,
+// the tools' dots, the markers, the hints and the jetpack's arc stay. It rides the on-foot HUD's census (on_foot_hud.cpp)
+// as .42's probe did: called only while that census is (on foot, native VR on foot, the HUD key not off). With show it only follows the
 // weapon cue for its lines -- not one call more to the graphics card.
 //
 //   aimDotHideNoteGuiDraw         an interface draw into a hidden panel: the atlas is the panel of 1.161 proportions; its first draw of
 //                                 a frame counts the frame, a vector draw of a cue count marks the frame as one with a weapon, a draw
 //                                 after this frame's erase asks for another before the next read.
 //   aimDotHideBeforeEyeComposite  the game's composite into an eye, with what it reads in pixel slots 0-2: before the first that reads
-//                                 the atlas (and the first after a rewrite) the centre is erased, in a frame without the cue (hide).
+//                                 the atlas the ready read-backs decide and the centre is copied; then (and after a rewrite) it is
+//                                 erased, in a frame without the cue whose newest read was the plain dot (hide).
 //   aimDotHideFrameBoundary       the frame thread: the key, the frame's number, the weapon on/off lines, the 30-second summary.
 #include <atomic>
 #include <cstdint>

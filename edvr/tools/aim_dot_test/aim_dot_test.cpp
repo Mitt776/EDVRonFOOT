@@ -2,8 +2,9 @@
 //
 // Drives the pure half: the key's every value, rubbish and empty (both hide); the atlas by its 1.161 proportions; the centre in pixels
 // (2076x1787 -> x 1032..1044, y 456..467 with .42's dot x 1035..1041, y 459..464 inside; 2768x2383 -> x 1377..1391, y 608..623),
-// rounded outward, inside a tiny atlas and never empty; the weapon cue (vector 336 or 642 yes, each alone; .42's other vector counts
-// and text or icons of 336 no); and the text of every line.
+// rounded outward, inside a tiny atlas and never empty; the weapon cue (vector 336 or 642 yes, each alone, the pistol's 168 and 546
+// too; .42's other vector counts and text or icons of 336 no); the plain dot's pattern on real centres (.42's plain dot yes; the
+// weapon's dot, a tool's red dot, an empty centre and another atlas size no); and the text of every line.
 #include "../../src/d3d11/aim_dot_core.h"
 #include "aim_dot_samples.h"
 #include <cstdio>
@@ -62,6 +63,7 @@ void partCentre() {
 void partCue() {
     check(weaponCue(true, 336) == 0, "vector 336");
     check(weaponCue(true, 642) == 1, "vector 642");
+    check(weaponCue(true, 168) == 2 && weaponCue(true, 546) == 3, "the pistol's vector 168 and 546 (.44)");
     const uint32_t others[] = {3, 21, 66, 120, 138, 141, 186, 231, 0, 6};
     bool none = true;
     for (uint32_t n : others) none = none && weaponCue(true, n) < 0;
@@ -119,6 +121,8 @@ void partLines() {
     check(std::strcmp(line, "aim dot: weapon on (vector n=336,642)") == 0, "weapon on, both");
     formatWeaponOn(2u, line, sizeof(line));
     check(std::strcmp(line, "aim dot: weapon on (vector n=642)") == 0, "weapon on, one");
+    formatWeaponOn(12u, line, sizeof(line));
+    check(std::strcmp(line, "aim dot: weapon on (vector n=168,546)") == 0, "weapon on, the pistol");
     formatWeaponOff(line, sizeof(line));
     check(std::strcmp(line, "aim dot: weapon off") == 0, "weapon off");
     formatCentre(true, line, sizeof(line));

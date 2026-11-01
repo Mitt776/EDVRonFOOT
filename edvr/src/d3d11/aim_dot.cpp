@@ -19,7 +19,7 @@ namespace {
 FaultBudget g_budget("aimDotHide", 8);
 
 // The draw thread's state is one thread's at a time: the draw calls and the boundary's release take this try-flag (a second thread in
-// the window skips its turn, as the probe does). The boundary's own state and the counters are atomics.
+// the window skips its turn, as .42's probe did). The boundary's own state and the counters are atomics.
 std::atomic_flag g_busy = ATOMIC_FLAG_INIT;
 struct Busy {
     bool held = !g_busy.test_and_set(std::memory_order_acquire);

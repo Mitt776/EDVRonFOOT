@@ -80,9 +80,10 @@ inline Rect centreOf(uint32_t w, uint32_t h) {
     return r;
 }
 
-// The weapon cue: a vector draw into the atlas with one of these index counts (.42, both weapons flown). One is enough. A weapon whose
-// crosshair is drawn otherwise goes here, from a census snapshot's list.
-constexpr uint32_t kWeaponCueCounts[] = {336, 642};
+// The weapon cue: a vector draw into the atlas with one of these index counts. One is enough. 336 and 642: both rifles flown (.42);
+// 168 and 546: the pistol (.44, the probe's census: 546 lays its dot, which in teal is the plain dot's picture to the byte). A weapon
+// whose teal dot is erased goes here: the probe (aim_dot_probe.cpp, removed in .45, in git before it) names the draw that lays it.
+constexpr uint32_t kWeaponCueCounts[] = {336, 642, 168, 546};
 constexpr int kWeaponCueN = int(sizeof(kWeaponCueCounts) / sizeof(kWeaponCueCounts[0]));
 // The cue's index in kWeaponCueCounts, or -1.
 inline int weaponCue(bool vectorShader, uint32_t count) {
