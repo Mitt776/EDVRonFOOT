@@ -53,7 +53,7 @@
 
 - [x] 4.1 Полный `D:\Project VSC\EDVRonFOOT\edvr\build.bat --jobs 8` по абсолютному пути. Проверка: в хвосте
   `Native OpenXR build and all gates passed` (`weapon_motion` — известный терпимый сбой).
-- [ ] 4.2 Коммит по `edvr\AGENTS.md` (`git commit -F`), тег `v0.19.1-edvronfoot.43`, затем `build.bat --dll-only`.
+- [x] 4.2 Коммит по `edvr\AGENTS.md` (`git commit -F`), тег `v0.19.1-edvronfoot.43`, затем `build.bat --dll-only`.
   Проверка: `--dll-only` прошёл проверку квитанции.
 - [ ] 4.3 `python tools\install_edvr.py --target steam`, потом `--verify-only`. Живой `edvr.ini` игры через Edit:
   `native_vr_on_foot_dot = census`; `log.max_mb` поднять, чтобы PAUSE (~3 МБ истории камеры каждая) не упёрлись в
