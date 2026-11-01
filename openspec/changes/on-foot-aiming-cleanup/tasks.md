@@ -50,10 +50,10 @@
   02.11), `hud_size` удалён (решение 02.11 вместо 26.10); в конце раздел «Уборка ключей прицела (`.46`)» с тем,
   что проверить в полёте. `ROADMAP.md` пункт 4 — ГОТОВО. Проверка: `python tools\check_status_blocks.py` (из `edvr\`)
   — все блоки ≤ 60 строк.
-- [ ] 4.3 Коммит (сообщение в файл, `git commit -F`), тег `v0.19.1-edvronfoot.46`, `build.bat --dll-only`,
+- [x] 4.3 Коммит (сообщение в файл, `git commit -F`), тег `v0.19.1-edvronfoot.46`, `build.bat --dll-only`,
   `python tools\install_edvr.py --target steam --dry-run`, затем без `--dry-run`, затем `--verify-only` — «vr
   payload and profile verified».
-- [ ] 4.4 Живой `edvr.ini` игры: прочитать, Edit-ом убрать строки семи удалённых ключей; `native_vr_on_foot_head_aim`
+- [x] 4.4 Живой `edvr.ini` игры: прочитать, Edit-ом убрать строки семи удалённых ключей; `native_vr_on_foot_head_aim`
   — `on` (если было `raw`, заменить). Проверка: diff до/после, `Grep` по живому ini — только `head_aim = on` и
   `aim_eye`.
 - [ ] 4.5 После запуска игры (Дима): `python tools\edvr_log.py --target steam --expect-build HEAD --grep "head aim"`
