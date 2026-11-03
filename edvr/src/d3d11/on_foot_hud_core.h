@@ -45,8 +45,13 @@ inline bool isGameCompositeVs(uint64_t vs) { return vs == kGameCompositeA || vs 
 // The game laying a panel straight into the eyes (the census of 26.10): one draw per eye with this vertex shader, the panel in pixel
 // slot 1. The trader's menu comes on a curved mesh of 360 indices; the same shader lays small panels (288x171, a 1410x245) as quads of
 // 6, with or without the trader, and those are left alone.
+// .48 (the flight of .47, 04.11): the TAB wheel's Summary (1730x973 at HMD quality 0.75) comes a second on the 360 mesh, then only on
+// the wide mesh of 5760 indices -- the game's own way of laying a full-screen menu into the eyes (loader_panel.h). The same mesh on the
+// same 16:9 panel carries the loading dialog when the game starts with the commander on foot (31.10, 01.11), and then the game draws no
+// HUD panel at all: the wide mesh is withheld only while a HUD panel was drawn in the last kHoldFrames frames.
 constexpr uint64_t kEyePanelVs = 0xA888D51024D9798Eull;
 constexpr uint32_t kHeadLockedMenuIndices = 360;
+constexpr uint32_t kWideMenuIndices = 5760;
 constexpr int kEyePanelSlot = 1;
 
 // R8G8B8A8_TYPELESS (27) or its UNORM view (28), one sample: the shape of every panel the census found. Anything else is not taken.
@@ -160,15 +165,20 @@ inline int findPanelById(const Panel* p, int n, const void* id) {
 // The draw that lays the trader's menu at the head: the eye-panel shader into an eye, its panel 16:9 in the panels' format. Withhold:
 // all of it, the curved mesh of 360 indices included -- the one draw the hook skips. OtherMesh: everything but the index count, the
 // sign of a game build whose mesh changed (one line a session says so, with the count); the draw is left alone and the menu stays at
-// the head, as before .27.
-enum class EyePanelDraw : int { No = 0, Withhold = 1, OtherMesh = 2 };
-inline EyePanelDraw classifyEyePanelDraw(uint64_t vs, uint32_t indices, bool eye, uint32_t format, uint32_t w, uint32_t h) {
+// the head, as before .27. .48, the wide mesh of 5760: WithholdWide while a HUD panel was drawn in the last 30 frames (`hudRecent`),
+// withheld the trader's way; LoaderWide without one -- the loading dialog -- left alone, counted, no line.
+enum class EyePanelDraw : int { No = 0, Withhold = 1, OtherMesh = 2, WithholdWide = 3, LoaderWide = 4 };
+inline EyePanelDraw classifyEyePanelDraw(uint64_t vs, uint32_t indices, bool eye, uint32_t format, uint32_t w, uint32_t h,
+                                         bool hudRecent) {
     if (vs != kEyePanelVs || !eye || !(format == kFormatTypeless || format == kFormatUnorm)) return EyePanelDraw::No;
     if (!isLayerShape(Layer::Trader, w, h)) return EyePanelDraw::No;
-    return indices == kHeadLockedMenuIndices ? EyePanelDraw::Withhold : EyePanelDraw::OtherMesh;
+    if (indices == kHeadLockedMenuIndices) return EyePanelDraw::Withhold;
+    if (indices == kWideMenuIndices) return hudRecent ? EyePanelDraw::WithholdWide : EyePanelDraw::LoaderWide;
+    return EyePanelDraw::OtherMesh;
 }
-inline bool isHeadLockedMenuDraw(uint64_t vs, uint32_t indices, bool eye, uint32_t format, uint32_t w, uint32_t h) {
-    return classifyEyePanelDraw(vs, indices, eye, format, w, h) == EyePanelDraw::Withhold;
+inline bool isWithheldKind(EyePanelDraw k) { return k == EyePanelDraw::Withhold || k == EyePanelDraw::WithholdWide; }
+inline bool isHeadLockedMenuDraw(uint64_t vs, uint32_t indices, bool eye, uint32_t format, uint32_t w, uint32_t h, bool hudRecent) {
+    return isWithheldKind(classifyEyePanelDraw(vs, indices, eye, format, w, h, hudRecent));
 }
 
 // The HUD panel is the one with the HUD's proportions, 1.665 (cinema 3564x2140, stereo 2412x1449, 1809x1086 at HMD quality 0.75: one
@@ -221,6 +231,9 @@ struct FrameTally {
     uint32_t composites = 0;  // readsPanels' bits: the layers the game laid into the picture itself this frame
     const void* withheld = nullptr;  // the panel the withheld head-locked draw read (identity only): the trader layer's
     uint32_t withheldDraws = 0;
+    uint32_t withheldWideDraws = 0;  // of them, on the wide mesh (.48)
+    uint32_t withheldMesh = 0;       // the index count of the frame's first withheld draw, for the trader's showing line
+    uint32_t wideLeftDraws = 0;      // wide-mesh draws left to the game: no HUD panel in the last 30 frames (the loading dialog)
     int note(const void* id, uint32_t w, uint32_t h, uint32_t format) {
         for (int i = 0; i < count; ++i)
             if (panels[i].id == id) {
@@ -479,6 +492,8 @@ struct LayerCount {
 struct Summary {
     uint64_t frames = 0, shown = 0, held = 0, gameComposites = 0, copyFail = 0, noPanels = 0;
     uint64_t withheld = 0;  // the game's head-locked draws of the trader's menu the hook skipped
+    uint64_t withheldWide = 0;  // of them, on the wide mesh of 5760 (.48)
+    uint64_t wideLeft = 0;      // wide-mesh draws left to the game without a HUD panel (the loading dialog)
     LayerCount menus[kLayers];
     void clear() { *this = Summary{}; }
 };
@@ -504,23 +519,31 @@ inline int formatShowing(const Panel& p, Mode mode, float width, char* out, size
                          p.w, p.h, double(ratioOf(p.w, p.h)), p.draws, modeName(mode), double(width));
 }
 
-// A menu's start, with the place it was given; the trader's says its head-locked copy is withheld.
-inline int formatMenuShowing(Layer l, const Panel& p, const Place& at, Mode mode, char* out, size_t cap) {
+// A menu's start, with the place it was given; the trader's says its head-locked copy is withheld, and on which mesh (.48: `mesh`, the
+// index count of the show's first withheld draw, 0 for not known -- then no mesh is said).
+inline int formatMenuShowing(Layer l, const Panel& p, const Place& at, Mode mode, char* out, size_t cap, uint32_t mesh = 0) {
+    char tail[96] = "";
+    if (l == Layer::Trader) {
+        if (mesh)
+            std::snprintf(tail, sizeof(tail), "; the game's own head-locked copy withheld (mesh %u)", mesh);
+        else
+            std::snprintf(tail, sizeof(tail), "; the game's own head-locked copy withheld");
+    }
     return std::snprintf(out, cap,
                          "on-foot hud: showing %s (%ux%u, aspect %.3f, %u interface draws) at its place: %.0f deg wide, %.0f deg %s, "
                          "%.2f m %s, curve %.1f, anchor %s%s",
                          specOf(l).name, p.w, p.h, double(ratioOf(p.w, p.h)), p.draws, double(at.widthDeg),
                          double(std::fabs(at.yawDeg)), at.yawDeg < -0.05f ? "left" : "right", double(std::fabs(at.downM)),
-                         at.downM > 0.005f ? "down" : "up", double(at.curve), modeName(mode),
-                         l == Layer::Trader ? "; the game's own head-locked copy withheld" : "");
+                         at.downM > 0.005f ? "down" : "up", double(at.curve), modeName(mode), tail);
 }
 
-// Once a session: the game laid a 16:9 panel into an eye with the eye-panel shader on a mesh that is not the trader's 360 indices.
+// Once a session: the game laid a 16:9 panel into an eye with the eye-panel shader on a mesh that is neither the trader's 360 indices
+// nor the wide menus' 5760 (those are never this line, .48).
 inline int formatOtherMesh(uint32_t w, uint32_t h, uint32_t indices, char* out, size_t cap) {
     return std::snprintf(out, cap,
                          "on-foot hud: the game lays a %ux%u panel into the eye with vs A888D51024D9798E on a mesh of %u indices, not the "
-                         "trader menu's %u; left alone (the menu stays where the game puts it). Said once.",
-                         w, h, indices, kHeadLockedMenuIndices);
+                         "trader menu's %u or the wide menus' %u; left alone (the menu stays where the game puts it). Said once.",
+                         w, h, indices, kHeadLockedMenuIndices, kWideMenuIndices);
 }
 
 // A menu's end: closed when the game stopped drawing it, else the reason.
@@ -570,8 +593,14 @@ inline int formatSummary(const Summary& s, const Panel* p, int count, uint32_t d
         menus[m] = ']';
         menus[m + 1] = '\0';
     }
-    char withheld[40] = "";
-    if (s.withheld) std::snprintf(withheld, sizeof(withheld), " withheld=%llu", static_cast<unsigned long long>(s.withheld));
+    // .48: the wide mesh's share of the withheld, and the wide draws left to the game, each only when not zero (else .47's line).
+    char withheld[120] = "";
+    int w = 0;
+    if (s.withheld) w += std::snprintf(withheld, sizeof(withheld), " withheld=%llu", static_cast<unsigned long long>(s.withheld));
+    if (s.withheld && s.withheldWide && w >= 0 && size_t(w) < sizeof(withheld))
+        w += std::snprintf(withheld + w, sizeof(withheld) - size_t(w), " (wide %llu)", static_cast<unsigned long long>(s.withheldWide));
+    if (s.wideLeft && w >= 0 && size_t(w) < sizeof(withheld))
+        std::snprintf(withheld + w, sizeof(withheld) - size_t(w), " wide-left=%llu", static_cast<unsigned long long>(s.wideLeft));
     return std::snprintf(out, cap,
                          "on-foot hud 30s: frames=%llu shown=%llu held=%llu panels=[%s]%s game-composites=%llu no-panels=%llu "
                          "copy-fail=%llu%s%s new-panels=[%s]%s",

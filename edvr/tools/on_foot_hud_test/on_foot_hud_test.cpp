@@ -221,7 +221,7 @@ void partLayers() {
         for (int k = 0; k < kLayers; ++k) layers += isLayerShape(Layer(k), q75Mission[0], q75Mission[1]) ? 1 : 0;
         check(layers == 1 && isLayerShape(Layer::Mission, q75Mission[0], q75Mission[1]), "HMD quality 0.75: 1057x571 is the mission description only");
     }
-    check(classifyEyePanelDraw(kEyePanelVs, kHeadLockedMenuIndices, true, kFormatUnorm, 1730, 973) == EyePanelDraw::Withhold,
+    check(classifyEyePanelDraw(kEyePanelVs, kHeadLockedMenuIndices, true, kFormatUnorm, 1730, 973, true) == EyePanelDraw::Withhold,
           "HMD quality 0.75: the trader's 1730x973 is withheld");
     // Every layer's stereo and cinema size at HMD quality 0.50..1.00, rounded down and to the nearest: its own layer, and no other.
     const struct {
@@ -518,22 +518,48 @@ void partMissionTrader() {
     check(findPanelById(t.panels, t.count, nullptr) == -1, "no id: none");
 
     // The head-locked draw, recognised whole and nothing less.
-    check(isHeadLockedMenuDraw(kEyePanelVs, 360, true, kFormatTypeless, 2307, 1297) &&
-              isHeadLockedMenuDraw(kEyePanelVs, 360, true, kFormatUnorm, 2307, 1297),
+    check(isHeadLockedMenuDraw(kEyePanelVs, 360, true, kFormatTypeless, 2307, 1297, true) &&
+              isHeadLockedMenuDraw(kEyePanelVs, 360, true, kFormatUnorm, 2307, 1297, true),
           "the trader's draw: the eye-panel shader, 360 indices, into an eye, 2307x1297");
-    check(!isHeadLockedMenuDraw(kEyePanelVs, 6, true, kFormatTypeless, 2307, 1297), "a quad of 6: not withheld");
-    check(!isHeadLockedMenuDraw(kEyePanelVs, 360, false, kFormatTypeless, 2307, 1297), "not into an eye: not withheld");
-    check(!isHeadLockedMenuDraw(kGuiText, 360, true, kFormatTypeless, 2307, 1297) &&
-              !isHeadLockedMenuDraw(kGameCompositeA, 360, true, kFormatTypeless, 2307, 1297),
+    check(!isHeadLockedMenuDraw(kEyePanelVs, 6, true, kFormatTypeless, 2307, 1297, true), "a quad of 6: not withheld");
+    check(!isHeadLockedMenuDraw(kEyePanelVs, 360, false, kFormatTypeless, 2307, 1297, true), "not into an eye: not withheld");
+    check(!isHeadLockedMenuDraw(kGuiText, 360, true, kFormatTypeless, 2307, 1297, true) &&
+              !isHeadLockedMenuDraw(kGameCompositeA, 360, true, kFormatTypeless, 2307, 1297, true),
           "another shader: not withheld");
-    check(!isHeadLockedMenuDraw(kEyePanelVs, 360, true, kFormatTypeless, 1410, 245) &&
-              !isHeadLockedMenuDraw(kEyePanelVs, 6, true, kFormatTypeless, 288, 171),
+    check(!isHeadLockedMenuDraw(kEyePanelVs, 360, true, kFormatTypeless, 1410, 245, true) &&
+              !isHeadLockedMenuDraw(kEyePanelVs, 6, true, kFormatTypeless, 288, 171, true),
           "the small panels the same shader lays: not withheld");
-    check(!isHeadLockedMenuDraw(kEyePanelVs, 360, true, 44, 2307, 1297), "another format: not withheld");
-    check(classifyEyePanelDraw(kEyePanelVs, 420, true, kFormatTypeless, 2307, 1297) == EyePanelDraw::OtherMesh &&
-              classifyEyePanelDraw(kEyePanelVs, 6, true, kFormatTypeless, 2307, 1297) == EyePanelDraw::OtherMesh &&
-              classifyEyePanelDraw(kEyePanelVs, 6, true, kFormatTypeless, 1410, 245) == EyePanelDraw::No,
+    check(!isHeadLockedMenuDraw(kEyePanelVs, 360, true, 44, 2307, 1297, true), "another format: not withheld");
+    check(classifyEyePanelDraw(kEyePanelVs, 420, true, kFormatTypeless, 2307, 1297, true) == EyePanelDraw::OtherMesh &&
+              classifyEyePanelDraw(kEyePanelVs, 6, true, kFormatTypeless, 2307, 1297, true) == EyePanelDraw::OtherMesh &&
+              classifyEyePanelDraw(kEyePanelVs, 6, true, kFormatTypeless, 1410, 245, true) == EyePanelDraw::No,
           "a 16:9 panel on another mesh: the other-mesh line; a small panel: nothing");
+
+    // .48: the wide mesh of 5760 -- the Summary while a HUD panel was drawn, the loading dialog without one.
+    const uint32_t sizes48[2][2] = {{1730, 973}, {2307, 1297}};
+    for (const auto& z : sizes48) {
+        check(classifyEyePanelDraw(kEyePanelVs, 360, true, kFormatTypeless, z[0], z[1], true) == EyePanelDraw::Withhold &&
+                  classifyEyePanelDraw(kEyePanelVs, 360, true, kFormatUnorm, z[0], z[1], false) == EyePanelDraw::Withhold,
+              ".48: the 360 mesh is withheld with the HUD panel and without, at both qualities");
+        check(classifyEyePanelDraw(kEyePanelVs, kWideMenuIndices, true, kFormatTypeless, z[0], z[1], true) == EyePanelDraw::WithholdWide &&
+                  classifyEyePanelDraw(kEyePanelVs, kWideMenuIndices, true, kFormatUnorm, z[0], z[1], true) == EyePanelDraw::WithholdWide,
+              ".48: the wide mesh with a HUD panel in the last 30 frames: withheld as wide, at both qualities");
+        check(classifyEyePanelDraw(kEyePanelVs, kWideMenuIndices, true, kFormatTypeless, z[0], z[1], false) == EyePanelDraw::LoaderWide,
+              ".48: the wide mesh without a HUD panel (the loading dialog): left alone, no other-mesh line");
+        check(classifyEyePanelDraw(kEyePanelVs, 108, true, kFormatTypeless, z[0], z[1], true) == EyePanelDraw::OtherMesh &&
+                  classifyEyePanelDraw(kEyePanelVs, 6, true, kFormatTypeless, z[0], z[1], false) == EyePanelDraw::OtherMesh,
+              ".48: 108 and 6 indices stay the other mesh");
+    }
+    check(kWideMenuIndices == 5760, ".48: the wide mesh is 5760 indices");
+    check(classifyEyePanelDraw(kEyePanelVs, 5760, true, kFormatTypeless, 1410, 245, true) == EyePanelDraw::No &&
+              classifyEyePanelDraw(kEyePanelVs, 5760, false, kFormatTypeless, 1730, 973, true) == EyePanelDraw::No &&
+              classifyEyePanelDraw(kGameCompositeA, 5760, true, kFormatTypeless, 1730, 973, true) == EyePanelDraw::No &&
+              classifyEyePanelDraw(kEyePanelVs, 5760, true, 44, 1730, 973, true) == EyePanelDraw::No,
+          ".48: the wide mesh not 16:9, not into an eye, another shader or format: nothing");
+    check(isHeadLockedMenuDraw(kEyePanelVs, 5760, true, kFormatTypeless, 1730, 973, true) &&
+              !isHeadLockedMenuDraw(kEyePanelVs, 5760, true, kFormatTypeless, 1730, 973, false) &&
+              isHeadLockedMenuDraw(kEyePanelVs, 360, true, kFormatTypeless, 1730, 973, false),
+          ".48: withheld means the 360 mesh, or the wide one with a HUD panel");
 
     // Places at 85 degrees: the description as wide as the answers, centred, its bottom on their top; the trader the whole frame.
     const Place answers = placeOf(Layer::Answers, 85), mission = placeOf(Layer::Mission, 85);
@@ -589,6 +615,13 @@ void partMissionTrader() {
     formatOtherMesh(2307, 1297, 420, line, sizeof(line));
     check(has(line, "2307x1297 panel") && has(line, "mesh of 420 indices") && has(line, "trader menu's 360") && has(line, "Said once."),
           "the other-mesh line names the size and the count");
+    check(has(line, "or the wide menus' 5760"), ".48: the other-mesh line names the wide mesh too");
+    formatMenuShowing(Layer::Trader, menu, trader, Mode::Body, line, sizeof(line), 5760);
+    check(has(line, "anchor body; the game's own head-locked copy withheld (mesh 5760)"), ".48: the trader's line on the wide mesh");
+    formatMenuShowing(Layer::Trader, menu, trader, Mode::Body, line, sizeof(line), 360);
+    check(has(line, "anchor body; the game's own head-locked copy withheld (mesh 360)"), ".48: the trader's line on the 360 mesh");
+    formatMenuShowing(Layer::Info, menu, trader, Mode::Body, line, sizeof(line), 5760);
+    check(!has(line, "mesh") && !has(line, "withheld"), ".48: no mesh on another layer's line");
     Summary s;
     s.frames = 900;
     s.menus[int(Layer::Trader)].shown = 880;
@@ -599,6 +632,21 @@ void partMissionTrader() {
     formatSummary(s, t.panels, t.count, 0, 0, seen, line, sizeof(line));
     check(has(line, "menus=[mission shown=300 held=0, trader shown=880 held=400] withheld=1760 new-panels=[]"),
           "the summary: the description, the trader and the withheld draws");
+    check(!has(line, "wide"), ".48: no wide draws: the summary as on .47");
+    s.withheldWide = 40;
+    formatSummary(s, t.panels, t.count, 0, 0, seen, line, sizeof(line));
+    check(has(line, "trader shown=880 held=400] withheld=1760 (wide 40) new-panels=[]"), ".48: the summary with the wide share");
+    s.wideLeft = 12;
+    formatSummary(s, t.panels, t.count, 0, 0, seen, line, sizeof(line));
+    check(has(line, "withheld=1760 (wide 40) wide-left=12 new-panels=[]"), ".48: the summary with the wide draws left to the game");
+    s.withheldWide = 0;
+    formatSummary(s, t.panels, t.count, 0, 0, seen, line, sizeof(line));
+    check(has(line, "withheld=1760 wide-left=12 new-panels=[]"), ".48: wide-left alone");
+    s.withheld = 0;
+    formatSummary(s, t.panels, t.count, 0, 0, seen, line, sizeof(line));
+    check(has(line, "held=400] wide-left=12 new-panels=[]") && !has(line, "withheld"), ".48: wide-left without any withheld");
+    s.wideLeft = 0;
+    s.withheld = 1760;
     s.withheld = 0;
     formatSummary(s, t.panels, t.count, 0, 0, seen, line, sizeof(line));
     check(!has(line, "withheld"), "nothing withheld: no withheld field");

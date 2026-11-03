@@ -57,6 +57,9 @@ std::atomic<int> g_mode{int(ofh::Mode::Body)};
 std::atomic<bool> g_nativeOnFoot{true};
 std::atomic<int> g_onFoot{-1};
 std::atomic<uint64_t> g_frameSeq{1};
+// .48: a HUD panel was drawn no more than kHoldFrames frames ago (the boundary's, from the frame that ended; "no" on stepping onto
+// the feet). The draw hook reads it to tell the Summary on the wide mesh from the loading dialog on the same mesh.
+std::atomic<bool> g_hudRecent{false};
 
 // The door's, one per layer (the HUD, then the menus): the copy its sheet reads, its hold and its line, and this frame's decision for
 // the second eye. Under g_mutex with the summary.
@@ -198,19 +201,26 @@ bool eyePanelWithhold(ID3D11DeviceContext* ctx, uint64_t vs, uint32_t count) {
     if (!tex) return false;
     D3D11_TEXTURE2D_DESC d{};
     tex->GetDesc(&d);
-    const ofh::EyePanelDraw kind = ofh::classifyEyePanelDraw(vs, count, true, uint32_t(d.Format), d.Width, d.Height);
+    const bool hudRecent = g_hudRecent.load(std::memory_order_relaxed);
+    const ofh::EyePanelDraw kind = ofh::classifyEyePanelDraw(vs, count, true, uint32_t(d.Format), d.Width, d.Height, hudRecent);
     if (kind == ofh::EyePanelDraw::OtherMesh && !saidOtherMesh.exchange(true)) {
         char line[300];
         ofh::formatOtherMesh(d.Width, d.Height, count, line, sizeof(line));
         say(line);
     }
-    if (kind != ofh::EyePanelDraw::Withhold) {
+    if (!ofh::isWithheldKind(kind)) {
         tex->Release();
+        if (kind == ofh::EyePanelDraw::LoaderWide) {  // the loading dialog: left to the game, counted for the summary
+            std::lock_guard<std::mutex> lock(g_mutex);
+            ++g_cur.tally.wideLeftDraws;
+        }
         return false;
     }
     std::lock_guard<std::mutex> lock(g_mutex);
     g_cur.tally.withheld = id;
     ++g_cur.tally.withheldDraws;
+    if (kind == ofh::EyePanelDraw::WithholdWide) ++g_cur.tally.withheldWideDraws;
+    if (!g_cur.tally.withheldMesh) g_cur.tally.withheldMesh = count;
     if (!g_cur.withheldTex)
         g_cur.withheldTex = tex;  // the frame's reference, given back at the boundary after next
     else
@@ -308,12 +318,24 @@ void onFootHudFrameBoundary() {
     g_last = ranked;
     const int hud = ofh::findHud(g_last.tally.panels, g_last.tally.count);
     if (hud >= 0) g_hudWidth = g_last.tally.panels[hud].w;
+    // .48: frames since the last HUD panel, kHoldFrames for none; "no" while not on foot, so a loading right at stepping out is not
+    // taken for a menu.
+    static uint32_t sinceHud = ofh::kHoldFrames;
+    if (!wants)
+        sinceHud = ofh::kHoldFrames;
+    else if (hud >= 0)
+        sinceHud = 0;
+    else if (sinceHud < ofh::kHoldFrames)
+        ++sinceHud;
+    g_hudRecent.store(wants && sinceHud < ofh::kHoldFrames, std::memory_order_relaxed);
     for (auto*& t : g_cur.tex) t = nullptr;  // carried into g_last
     g_cur.withheldTex = nullptr;              // so is this
     g_cur.tally.clear();
     if (wants) {
         ++g_summary.frames;
         g_summary.withheld += g_last.tally.withheldDraws;
+        g_summary.withheldWide += g_last.tally.withheldWideDraws;
+        g_summary.wideLeft += g_last.tally.wideLeftDraws;
         if (g_last.tally.composites) ++g_summary.gameComposites;
         if (!g_last.tally.count) ++g_summary.noPanels;
         // A size met for the first time while the sheet is needed, in stereo (the game's own composite is the cinema): one line.
@@ -471,7 +493,11 @@ void decideLayers(ID3D11Device* device, ofh::Mode mode, float width) {
             else if (layer == ofh::Layer::Hud)
                 ofh::formatStopped(reason, line, sizeof(line));
             else if (reason == ofh::Reason::Showing)
-                ofh::formatMenuShowing(layer, panel, L.place, mode, line, sizeof(line));
+                // the trader's: the mesh of this frame's first withheld draw, else the last frame's (.48)
+                ofh::formatMenuShowing(layer, panel, L.place, mode, line, sizeof(line),
+                                       layer == ofh::Layer::Trader
+                                           ? (g_cur.tally.withheldMesh ? g_cur.tally.withheldMesh : g_last.tally.withheldMesh)
+                                           : 0u);
             else
                 ofh::formatMenuStopped(layer, reason, line, sizeof(line));
             say(line);
