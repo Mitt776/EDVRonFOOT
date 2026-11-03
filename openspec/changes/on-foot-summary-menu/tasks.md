@@ -33,10 +33,10 @@
   широкая сетка, экран загрузки не трогается); что искать в логе (`(mesh 5760)`, `wide`, `wide-left`). Исследование
   `docs/research/native-vr-on-foot.md`: раздел «Сводка (`.48`)» (таблица из design, загрузка на 5760, решение по
   HUD-панели); `## Status` — следующий шаг полёт `.48`. Проверка: `py -3.12 edvr\tools\check_status_blocks.py` проходит.
-- [ ] 3.2 Полная сборка по `edvr/AGENTS.md` (`build.bat` по абсолютному пути, `--jobs 8`). Проверка: «all gates passed»,
+- [x] 3.2 Полная сборка по `edvr/AGENTS.md` (`build.bat` по абсолютному пути, `--jobs 8`). Проверка: «all gates passed»,
   `config contract ok` (131 ключ); дерево чистое (без случайных файлов), коммит через `git commit -F`, тег
   `v0.19.1-edvronfoot.48`; `build.bat --dll-only` проходит.
-- [ ] 3.3 Установка при закрытой игре: `install_edvr.py --target steam --keep-backups 1000` (сначала `--dry-run`).
+- [x] 3.3 Установка при закрытой игре: `install_edvr.py --target steam --keep-backups 1000` (сначала `--dry-run`).
   Живой `edvr.ini` не трогать. Проверка: `--verify-only` ok; хеш `edvr.ini` до и после один и тот же.
 
 ## 4. Полёт и итог
