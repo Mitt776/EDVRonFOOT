@@ -230,7 +230,7 @@ void partLayers() {
     } bases[] = {{Layer::Hud, 2412, 1449},     {Layer::Hud, 3564, 2140},     {Layer::Lift, 1029, 949},     {Layer::Lift, 1521, 1402},
                  {Layer::Answers, 1410, 245},  {Layer::Answers, 2083, 362},  {Layer::Dialog, 1410, 749},   {Layer::Dialog, 2083, 1107},
                  {Layer::Mission, 1410, 761},  {Layer::Trader, 2307, 1297},  {Layer::Trader, 3408, 1917},
-                 {Layer::Biologist, 1399, 961}, {Layer::Arms, 1410, 878},    {Layer::Arms, 1761, 1096}};
+                 {Layer::Biologist, 1399, 961}, {Layer::Arms, 1410, 878},    {Layer::Arms, 1761, 1096},  {Layer::Info, 1584, 938}};
     int scaledWrong = 0;
     for (const auto& b : bases)
         for (int q = 50; q <= 100; ++q)
@@ -308,6 +308,60 @@ void partLayers() {
         findLayers(shop.panels, shop.count, out, 2412);
         check(out[int(Layer::Arms)] == 0 && out[int(Layer::Hud)] == 1, "the HUD in the frame is the measure before the remembered one");
     }
+    // The info panel (.47, the walks of 03.11: the taxi 25 draws, an info item 4, the loadout 69): 1584x938, 1188x703 at 0.75 --
+    // its own layer only, found with as few as one draw beside the HUD of its quality, never with none.
+    {
+        const uint32_t infos[][2] = {{1584, 938}, {1188, 703}};
+        for (const auto& s : infos) {
+            int layers = 0;
+            for (int k = 0; k < kLayers; ++k) layers += isLayerShape(Layer(k), s[0], s[1]) ? 1 : 0;
+            check(layers == 1 && isLayerShape(Layer::Info, s[0], s[1]), "the info panel's size is its own layer only");
+            const uint32_t hud = s[0] == 1584 ? 2412 : 1809;
+            for (uint32_t draws : {25u, 4u, 1u}) {
+                FrameTally f;
+                for (uint32_t i = 0; i < draws; ++i) f.note(&g_res[0], s[0], s[1], kFormatTypeless);
+                int out[kLayers];
+                findLayers(f.panels, f.count, out, hud);
+                int any = 0;
+                for (int k = 0; k < kLayers; ++k) any += out[k] >= 0 ? 1 : 0;
+                check(out[int(Layer::Info)] == 0 && any == 1, "the info panel with 25, 4 or 1 draws: the info layer, and no other");
+            }
+            const Panel none{&g_res[0], s[0], s[1], kFormatTypeless, 0};
+            int anyNone = 0;
+            for (int k = 0; k < kLayers; ++k) anyNone += findLayer(Layer(k), &none, 1, hud) >= 0 ? 1 : 0;
+            check(anyNone == 0, "the info panel's size with no draws: no layer");
+        }
+        const Panel taxi{&g_res[0], 1188, 703, kFormatTypeless, 25};
+        check(findLayer(Layer::Info, &taxi, 1, 1809) == 0, "1188x703 beside the HUD 1809x1086: found");
+        check(findLayer(Layer::Info, &taxi, 1, 2412) == -1, "1188x703 beside the HUD 2412x1449: not found");
+        check(findLayer(Layer::Info, &taxi, 1, 0) == -1, "1188x703 while no HUD panel has been seen: not found");
+        FrameTally f;
+        for (int i = 0; i < 25; ++i) f.note(&g_res[0], 1188, 703, kFormatTypeless);
+        int out[kLayers];
+        findLayers(f.panels, f.count, out, 1809);
+        check(out[int(Layer::Info)] == 0 && out[int(Layer::Hud)] == -1, "the info panel without the HUD in the frame: by the last HUD's width");
+        // The HUD's neighbour: 1.689 and 1.665 never mixed.
+        const uint32_t huds[][2] = {{1809, 1086}, {2412, 1449}};
+        for (const auto& h : huds)
+            check(isLayerShape(Layer::Hud, h[0], h[1]) && !isLayerShape(Layer::Info, h[0], h[1]), "the HUD panel is the HUD only, not the info panel");
+        for (const auto& s : infos)
+            check(!isLayerShape(Layer::Hud, s[0], s[1]), "the info panel is not the HUD");
+        FrameTally both;
+        for (int i = 0; i < 9; ++i) both.note(&g_res[0], 1809, 1086, kFormatTypeless);
+        for (int i = 0; i < 4; ++i) both.note(&g_res[1], 1188, 703, kFormatTypeless);
+        findLayers(both.panels, both.count, out, 0);
+        check(out[int(Layer::Hud)] == 0 && out[int(Layer::Info)] == 1, "the HUD and the info panel in one frame: each its own");
+        // Every quality 0.50..1.00, both roundings, beside the HUD of that quality: found.
+        int infoMissed = 0;
+        for (int q = 50; q <= 100; ++q)
+            for (int nearest = 0; nearest < 2; ++nearest) {
+                const double fq = q / 100.0, add = nearest ? 0.5 : 0.0;
+                const uint32_t hud = uint32_t(std::floor(2412 * fq + add));
+                const Panel info{&g_res[0], uint32_t(std::floor(1584 * fq + add)), uint32_t(std::floor(938 * fq + add)), kFormatTypeless, 1};
+                if (findLayer(Layer::Info, &info, 1, hud) != 0) ++infoMissed;
+            }
+        check(infoMissed == 0, "the info panel at HMD quality 0.50..1.00 beside the HUD of that quality: found");
+    }
     check(specOf(Layer::Answers).minDraws == 0 && specOf(Layer::Hud).minDraws == 0, "the other layers need no draws: the answers come with one");
     const Panel answersOne{&g_res[0], 1057, 183, kFormatTypeless, 1};
     check(findLayer(Layer::Answers, &answersOne, 1) == 0, "the answers with one draw: found");
@@ -360,6 +414,15 @@ void partPlaces() {
               std::fabs((specOf(Layer::Biologist).x1 - specOf(Layer::Biologist).x0) * 3408.0f / bb / 1917.0f - 1399.0f / 961.0f) < 0.005f,
           "the shops: as high as their proportions give");
     check(std::fabs(placeOf(Layer::Arms, 50).widthDeg - arms.widthDeg * r) < 1e-3f, "the shops at 50 deg: narrower in proportion");
+    // The info panel: centred at the eyes, about 66 deg at the answers' density, as high as its proportions give.
+    const Place info = placeOf(Layer::Info, 85);
+    check(std::fabs(info.widthDeg - 66.0f) < 1.0f && std::fabs(info.widthDeg - answers.widthDeg * 1584.0f / 1410.0f) < 0.1f,
+          "the info panel: about 66 deg wide, by its pixels at the answers' density");
+    check(std::fabs(info.yawDeg) < 0.01f && std::fabs(info.downM) < 0.002f && near(info.curve, kMenuCurve),
+          "the info panel: straight ahead, at the eyes, the menus' curve");
+    const float ib = specOf(Layer::Info).y1 - specOf(Layer::Info).y0;
+    check(std::fabs((specOf(Layer::Info).x1 - specOf(Layer::Info).x0) * 3408.0f / ib / 1917.0f - 1584.0f / 938.0f) < 0.005f,
+          "the info panel: as high as its proportions give");
 }
 
 bool rigid(const float* p) {
@@ -548,6 +611,14 @@ void partMissionTrader() {
     check(has(line, "showing the biologist menu (1399x961"), "the biologist's line");
     formatMenuShowing(Layer::Arms, pioneer, placeOf(Layer::Arms, 85), Mode::Body, line, sizeof(line));
     check(has(line, "showing the weapons menu (1410x878"), "the weapons menu's line");
+    s.menus[int(Layer::Info)].shown = 60;
+    formatSummary(s, t.panels, t.count, 0, 0, seen, line, sizeof(line));
+    check(has(line, "arms shown=0 held=7, info shown=60 held=0]"), "the summary: the info panel as info");
+    const Panel taxi{&g_res[0], 1188, 703, kFormatTypeless, 25};
+    formatMenuShowing(Layer::Info, taxi, placeOf(Layer::Info, 85), Mode::Body, line, sizeof(line));
+    check(has(line, "showing the info panel (1188x703"), "the info panel's line");
+    formatMenuStopped(Layer::Info, Reason::NoPanels, line, sizeof(line));
+    check(std::strcmp(line, "on-foot hud: the info panel stopped (closed: not drawn for 30 frames)") == 0, "the info panel closed");
 }
 
 void partMenuLatch() {

@@ -3052,6 +3052,8 @@ REM the trader's layer only by what the withheld draw read, 60/85 of the HUD's w
 REM .31: the shops 1399x961 and 1410x878 (and at 0.75) their own layers only, with 5 draws or more; 922x576 and 1230x769 (Pioneer's
 REM shape, one draw) none; both centred at the eyes, as wide as the answers' pixels; bio and arms in the summary. .32: a shop is as
 REM wide as its share of the HUD panel's (this frame's or the last seen), 922x576 with 13 draws at the ship's ramp none.
+REM .47: the info panel 1584x938 / 1188x703 (1.689) its own layer only, never the HUD's, with one draw or more beside the HUD of its
+REM quality (0.50..1.00), none with no draws; centred at the eyes, about 66 deg; info in the summary.
 if not exist "%OBJ%\onfoothud" mkdir "%OBJ%\onfoothud"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\onfoothud"\ /Fe"%BUILD%\on_foot_hud_test.exe" ^

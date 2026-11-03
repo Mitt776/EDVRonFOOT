@@ -83,9 +83,10 @@ constexpr float kMenuCurve = 0.4f;
 // 0.204 of the frame high about 0.81, top 0.708; the description 0.66 / 1.853 / 0.5625 = 0.633 high, centre 0.392). The two shops
 // (.30, 29.10) the game hangs in the world over the counter, turned, right of the vendor -- no place in the frame to take; Dima's
 // choice: centred at the eyes, as wide as their pixels at the answers' density (1410 px = 0.66 of the frame), as high as their
-// proportions give.
-enum class Layer : int { Hud = 0, Lift = 1, Answers = 2, Dialog = 3, Mission = 4, Trader = 5, Biologist = 6, Arms = 7 };
-constexpr int kLayers = 8;
+// proportions give. The info panel (.47, the walks of 03.11) -- the taxi, the ship's loadout and the info items of the TAB wheel, one
+// panel of the game's with whatever it holds -- the same way: centred, at the answers' density, last over all.
+enum class Layer : int { Hud = 0, Lift = 1, Answers = 2, Dialog = 3, Mission = 4, Trader = 5, Biologist = 6, Arms = 7, Info = 8 };
+constexpr int kLayers = 9;
 struct LayerSpec {
     double aspect;
     float x0, x1, y0, y1;
@@ -113,6 +114,9 @@ constexpr LayerSpec kLayerSpecs[kLayers] = {
     {1399.0 / 961.0, 0.1726f, 0.8274f, 0.1002f, 0.8998f, kMenuCurve, "the biologist menu", "bio", 5, 1399},
     // Pioneer Supplies: stereo 1410x878, 1057x658 at 0.75, cinema 1761x1096; 0.66 wide, 0.7306 high
     {1410.0 / 878.0, 0.17f, 0.83f, 0.1347f, 0.8653f, kMenuCurve, "the weapons menu", "arms", 5, 1410},
+    // the info panel: stereo 1584x938, 1188x703 at 0.75 (1.689, not the HUD's 1.665); 0.66 * 1584 / 1410 = 0.7414 wide, 0.7805 high;
+    // one draw is enough (an info item of the wheel came with 4), the HUD's share guards the shape
+    {1584.0 / 938.0, 0.1293f, 0.8707f, 0.1097f, 0.8903f, kMenuCurve, "the info panel", "info", 1, 1584},
 };
 inline const LayerSpec& specOf(Layer l) { return kLayerSpecs[int(l)]; }
 inline bool isLayerShape(Layer l, uint32_t w, uint32_t h) {

@@ -51,9 +51,9 @@ void onFootHudFrameBoundary();
 // What the door draws for this eye, sheet by sheet: the copy's view, its height over its width, the width in degrees, its place
 // from the anchor (degrees to the right, metres down), its bend, the anchor (0 visor, 1 body) and the layer (0 the HUD, then the
 // menus: on_foot_hud_core.h's Layer, menu_panel's set of textures). Returns how many, in compositing order -- the HUD first, the menus
-// over it, the trader's menu and the shops (never with it) last; 0 is nothing this frame (the reason is in the log when it changed).
-// Eye 0 decides and copies; eye 1 reuses it.
-constexpr int kOnFootHudSheets = 8;
+// over it, the trader's menu and the shops (never with it), then the info panel (.47) last; 0 is nothing this frame (the reason is in
+// the log when it changed). Eye 0 decides and copies; eye 1 reuses it.
+constexpr int kOnFootHudSheets = 9;
 struct OnFootHudSheet {
     ID3D11ShaderResourceView* srv = nullptr;
     float aspect = 0.0f;
