@@ -26,10 +26,12 @@
 // both centred at the eyes, as wide as the answers' pixels give; the summary names them bio and arms. A shop is as wide as its share of
 // the HUD panel's width (this frame's, else the last seen): 922x576 with 13 draws at the ship's ramp (.31) is none.
 #include "../../src/d3d11/on_foot_hud_core.h"
+#include "../../src/d3d11/summary_probe_core.h"  // .49, TEMPORARY
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 
 using namespace edvr;
 using namespace edvr::ofh;
@@ -924,6 +926,85 @@ void partLines() {
     // Every line carries the one prefix the log reader looks for.
     check(has(line, "on-foot hud"), "the prefix");
 }
+
+// .49, the Summary probe (summary_probe_core.h) -- TEMPORARY, removed with it.
+void partSummaryProbe() {
+    using namespace edvr::smp;
+    // 8x8 RGBA8, pitch 40 (8 spare bytes a row): rows 0-1 opaque, 2-3 colour without alpha, the rest empty.
+    std::vector<uint8_t> px(40 * 8, 0);
+    for (int y = 0; y < 8; ++y)
+        for (int x = 0; x < 8; ++x) {
+            uint8_t* q = &px[size_t(y) * 40 + size_t(x) * 4];
+            if (y < 2) { q[0] = 200; q[3] = 255; }
+            else if (y < 4) { q[1] = 100; q[3] = 0; }
+            else { q[2] = 8; q[3] = 8; }
+        }
+    PixelStats a = pixelStats(px.data(), 40, 8, 8, 1);
+    check(a.sampled == 64 && a.opaque == 16 && a.colourNoAlpha == 16 && a.empty == 32, ".49 probe: every pixel counted by kind");
+    check(a.alphaSum == 16u * 255 + 32u * 8 && a.colourSum == 16u * 200 + 16u * 100 + 32u * 8, ".49 probe: the sums");
+    PixelStats b = pixelStats(px.data(), 40, 8, 8, 4);
+    check(b.sampled == 4 && b.opaque == 2 && b.colourNoAlpha == 0 && b.empty == 2, ".49 probe: every 4th pixel each way (rows 0 and 4)");
+    check(pixelStats(nullptr, 40, 8, 8).sampled == 0 && pixelStats(px.data(), 16, 8, 8).sampled == 0 &&
+              pixelStats(px.data(), 40, 0, 8).sampled == 0,
+          ".49 probe: no data, a pitch too short or no width: nothing");
+    PixelStats one = pixelStats(px.data(), 40, 5, 5, 4);
+    check(one.sampled == 4, ".49 probe: 5x5 by 4 samples 0 and 4 each way");
+
+    char line[700];
+    formatCopy(1500, 1730, 973, a, line, sizeof(line));
+    check(has(line, "summary probe: copy 1730x973 +1500 ms: opaque 25.0% colour-no-alpha 25.0% empty 50.0% mean-alpha 67.8") &&
+              has(line, "(64 sampled)"),
+          ".49 probe: the copy line");
+    PixelStats none;
+    formatCopy(0, 1730, 973, none, line, sizeof(line));
+    check(has(line, "opaque 0.0% colour-no-alpha 0.0% empty 0.0% mean-alpha 0.0") && has(line, "(0 sampled)"),
+          ".49 probe: nothing sampled: zeros, no division");
+
+    Tables t;
+    Combo c;
+    c.indices = 360;
+    c.ps = 0xF2F872B191F656D5ull;
+    c.w[1] = 1730; c.h[1] = 973; c.fmt[1] = 27;
+    bool fresh = false;
+    check(t.noteCombo(c, &fresh) == 0 && fresh, ".49 probe: the first combination is new");
+    check(t.noteCombo(c, &fresh) == 0 && !fresh, ".49 probe: the same again is not");
+    Combo wide = c;
+    wide.indices = 5760;
+    check(t.noteCombo(wide, &fresh) == 1 && fresh, ".49 probe: another index count is another combination");
+    Combo slot0 = c;
+    slot0.w[0] = 16; slot0.h[0] = 16; slot0.fmt[0] = 71;
+    check(t.noteCombo(slot0, &fresh) == 2 && fresh, ".49 probe: another texture in slot 0 is another combination");
+    formatCombo(2, slot0, 250, line, sizeof(line));
+    check(std::strcmp(line, "summary probe: eye draw #2 at +250 ms: vs A888D51024D9798E ps F2F872B191F656D5 n=360 slots [0: 16x16 fmt "
+                            "71, 1: 1730x973 fmt 27, 2: -, 3: -]") == 0,
+          ".49 probe: the combination line");
+    for (int i = 0; i < kMaxCombos + 2; ++i) {
+        Combo k = c;
+        k.indices = 1000 + uint32_t(i);
+        t.noteCombo(k, &fresh);
+    }
+    check(t.comboCount == kMaxCombos && t.combosLost == 5, ".49 probe: past 16 combinations, counted as lost");
+    t.noteVs(0x1012E00B3CB44469ull);
+    t.noteVs(0x1012E00B3CB44469ull);
+    t.noteVs(0x0123456789ABCDEFull);
+    formatWindow(1000, t, line, sizeof(line));
+    check(has(line, "summary probe: window +1000 ms: eye draws [#0=2, #1=1, #2=1, #3=1") && has(line, "lost=5]") &&
+              has(line, "into the panel [gui-text=2, vs 0123456789ABCDEF=1]"),
+          ".49 probe: the window line");
+    t.newWindow();
+    formatWindow(1500, t, line, sizeof(line));
+    check(std::strcmp(line, "summary probe: window +1500 ms: eye draws [] into the panel []") == 0, ".49 probe: an empty window");
+    for (int i = 0; i < kMaxVs + 3; ++i) t.noteVs(uint64_t(i) + 1);
+    check(t.vsCount == kMaxVs && t.vsLost == 5, ".49 probe: past 8 vertex shaders, counted as lost");
+    t.clear();
+    check(t.comboCount == 0 && t.vsCount == 0, ".49 probe: clear");
+    formatStart(1730, 973, 27, line, sizeof(line));
+    check(has(line, "summary probe: the trader sheet is shown (1730x973, format 27)"), ".49 probe: the start line");
+    formatEnd(28000, 3, 1, line, sizeof(line));
+    check(std::strcmp(line, "summary probe: the trader sheet stopped after 28000 ms; lines unwritten 3, copies unread 1") == 0,
+          ".49 probe: the end line");
+    check(kPeriodMs == 500 && kLinesPerShow == 240 && kRing == 3, ".49 probe: 0.5 s, 240 lines a show, 3 copies");
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -949,6 +1030,7 @@ int main(int argc, char** argv) {
     partKeys();
     partLatch();
     partLines();
+    partSummaryProbe();  // .49, TEMPORARY
     std::printf("%s: on_foot_hud_test, %d checks, %d failed\n", g_failures ? "FAIL" : "PASS", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

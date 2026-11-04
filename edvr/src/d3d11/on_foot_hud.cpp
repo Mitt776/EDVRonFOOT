@@ -1,5 +1,6 @@
 #include "on_foot_hud.h"
 #include "on_foot_hud_core.h"
+#include "summary_probe_core.h"  // .49, TEMPORARY
 #include "aim_dot.h"
 #include "binding_shadow.h"
 #include "draw_gate.h"
@@ -136,6 +137,102 @@ void rankInto(const Frame& from, Frame& to) {
 
 void say(const char* line) { Log::get().note("%s", line); }
 
+// ---- .49: the Summary probe (summary_probe_core.h) -- TEMPORARY, removed whole after its flight ----
+// While the trader's sheet is shown: the door reads its copy back every 0.5 s (a ring of staging copies, read without waiting) and
+// writes the window's counts; the draw hook notes every eye draw of the eye-panel shader as a combination and every draw into the
+// trader's panel by its vertex shader. The door holds g_mutex and then takes the probe's; the draw hook takes only the probe's.
+std::atomic<bool> g_probeOn{false};              // the trader's sheet is shown (the door's; the draw hook reads it)
+std::atomic<const void*> g_probePanel{nullptr};  // the trader's panel, identity only
+struct Probe {
+    std::mutex mutex;  // the tables and the line budget
+    smp::Tables tables;
+    uint32_t lines = 0, unwritten = 0;
+    // the door's alone
+    bool showing = false;
+    uint64_t start = 0, lastPeriod = 0;
+    uint32_t unread = 0;
+    ID3D11Texture2D* ring[smp::kRing] = {};
+    uint64_t ringStamp[smp::kRing] = {};  // ms since the show's start + 1, 0 for a free slot
+    ID3D11Device* ringDevice = nullptr;   // identity only
+    uint32_t ringW = 0, ringH = 0, ringFmt = 0;
+    uint32_t ringNext = 0;
+    bool failSaid = false;
+    void releaseRing() {
+        for (uint32_t i = 0; i < smp::kRing; ++i) {
+            if (ring[i]) ring[i]->Release();
+            ring[i] = nullptr;
+            ringStamp[i] = 0;
+        }
+        ringDevice = nullptr;
+        ringW = ringH = ringFmt = 0;
+        ringNext = 0;
+    }
+};
+Probe g_probe;
+
+// A line within the show's budget; past it counted. Under g_probe.mutex.
+void probeSay(const char* line) {
+    if (g_probe.lines >= smp::kLinesPerShow) {
+        ++g_probe.unwritten;
+        return;
+    }
+    ++g_probe.lines;
+    say(line);
+}
+
+uint64_t probeMs() {
+    const uint64_t now = GetTickCount64();
+    return g_probe.showing && now >= g_probe.start ? now - g_probe.start : 0;
+}
+
+// The draw hook: an eye draw of the eye-panel shader. Its pixel shader and slots 0-3, every reference given back before the return.
+void probeEyeDraw(ID3D11DeviceContext* ctx, uint32_t count) {
+    smp::Combo c;
+    c.indices = count;
+    c.ps = bindingGet(BindSlot::Ps) ? bindingShaderHash(BindSlot::Ps) : 0;
+    ID3D11ShaderResourceView* srv[smp::kSlots] = {};
+    ctx->PSGetShaderResources(0, smp::kSlots, srv);
+    for (int i = 0; i < smp::kSlots; ++i) {
+        if (!srv[i]) continue;
+        ID3D11Resource* res = nullptr;
+        srv[i]->GetResource(&res);
+        srv[i]->Release();
+        srv[i] = nullptr;
+        if (!res) continue;
+        ID3D11Texture2D* tex = nullptr;
+        res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex));
+        res->Release();
+        if (!tex) continue;
+        D3D11_TEXTURE2D_DESC d{};
+        tex->GetDesc(&d);
+        tex->Release();
+        c.w[i] = d.Width;
+        c.h[i] = d.Height;
+        c.fmt[i] = uint32_t(d.Format);
+    }
+    std::lock_guard<std::mutex> lock(g_probe.mutex);
+    bool fresh = false;
+    const int index = g_probe.tables.noteCombo(c, &fresh);
+    if (fresh) {
+        char line[400];
+        smp::formatCombo(index, c, probeMs(), line, sizeof(line));
+        probeSay(line);
+    }
+}
+
+// The draw hook: a draw into a target that is not an eye -- counted by its vertex shader when the target is the trader's panel.
+void probeTargetDraw(uint64_t vs) {
+    const uint32_t gen = bindingGeneration(BindSlot::Rtv0);
+    if (gen != g_rtvGen) {
+        g_rtvGen = gen;
+        resolveTarget();
+    }
+    const void* panel = g_probePanel.load(std::memory_order_relaxed);
+    if (!g_rtvPanel || !panel || g_rtvId != panel) return;
+    std::lock_guard<std::mutex> lock(g_probe.mutex);
+    g_probe.tables.noteVs(vs);
+}
+
 // Which layers' panels (this frame's, or last frame's while this one's are not drawn yet) does this draw of the game's composite
 // shaders read as a texture in slots 0-2? Bit k: layer k. The game's own crosshair, markers and captions in stereo come through the
 // same shaders from their own atlases and must not stop a sheet. The references the calls take are all given back before the return.
@@ -247,9 +344,11 @@ bool onFootHudNoteDraw(ID3D11DeviceContext* ctx, bool eye, uint32_t count) {
     }
     if (vs == ofh::kEyePanelVs) {
         bool withhold = false;
+        if (eye && g_probeOn.load(std::memory_order_relaxed)) guardedBudget(g_budget, [&] { probeEyeDraw(ctx, count); });  // .49
         if (eye) guardedBudget(g_budget, [&] { withhold = eyePanelWithhold(ctx, vs, count); });
         return withhold;
     }
+    if (!eye && g_probeOn.load(std::memory_order_relaxed)) guardedBudget(g_budget, [&] { probeTargetDraw(vs); });  // .49
     if (eye || !ofh::isGuiVs(vs)) return false;
     guardedBudget(g_budget, [&] {
         const uint32_t gen = bindingGeneration(BindSlot::Rtv0);
@@ -416,6 +515,107 @@ bool copyInto(LayerState& L, ID3D11Device* device, ID3D11Texture2D* tex) {
     return copied;
 }
 
+// .49, the Summary probe's door half (TEMPORARY): once per frame for the trader's layer, after its decision. Shown: every 0.5 s the
+// ring's ready copies are read (oldest first, never waiting) and counted, the sheet's copy goes into the next slot, and the window's
+// counts are written. Not shown: the show's end line, the ring given back. Under g_mutex.
+void probeDoor(ID3D11Device* device, const LayerState& L, const void* panel) {
+    if (!L.show || !L.copy) {
+        g_probeOn.store(false, std::memory_order_relaxed);
+        if (!g_probe.showing) return;
+        std::lock_guard<std::mutex> lock(g_probe.mutex);
+        char line[200];
+        smp::formatEnd(probeMs(), g_probe.unwritten, g_probe.unread, line, sizeof(line));
+        say(line);  // the end line is always written
+        g_probe.showing = false;
+        g_probe.releaseRing();
+        g_probe.tables.clear();
+        g_probePanel.store(nullptr, std::memory_order_relaxed);
+        return;
+    }
+    if (panel) g_probePanel.store(panel, std::memory_order_relaxed);
+    const uint64_t now = GetTickCount64();
+    if (!g_probe.showing) {
+        std::lock_guard<std::mutex> lock(g_probe.mutex);
+        g_probe.showing = true;
+        g_probe.start = now;
+        g_probe.lastPeriod = 0;
+        g_probe.lines = g_probe.unwritten = g_probe.unread = 0;
+        g_probe.tables.clear();
+        char line[300];
+        smp::formatStart(L.w, L.h, L.fmt, line, sizeof(line));
+        probeSay(line);
+        g_probeOn.store(true, std::memory_order_relaxed);
+    }
+    if (g_probe.lastPeriod && now - g_probe.lastPeriod < smp::kPeriodMs) return;
+    g_probe.lastPeriod = now;
+    guardedBudget(g_budget, [&] {
+        if (!g_probe.ring[0] || g_probe.ringDevice != device || g_probe.ringW != L.w || g_probe.ringH != L.h || g_probe.ringFmt != L.fmt) {
+            g_probe.releaseRing();
+            D3D11_TEXTURE2D_DESC d{};
+            d.Width = L.w;
+            d.Height = L.h;
+            d.MipLevels = 1;
+            d.ArraySize = 1;
+            d.Format = DXGI_FORMAT(L.fmt);
+            d.SampleDesc.Count = 1;
+            d.Usage = D3D11_USAGE_STAGING;
+            d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            bool ok = true;
+            for (uint32_t i = 0; i < smp::kRing && ok; ++i)
+                ok = SUCCEEDED(device->CreateTexture2D(&d, nullptr, &g_probe.ring[i])) && g_probe.ring[i];
+            if (!ok) {
+                g_probe.releaseRing();
+                if (!g_probe.failSaid) {
+                    g_probe.failSaid = true;
+                    say("summary probe: the staging copies could not be made; no copy lines. Said once.");
+                }
+                return;
+            }
+            g_probe.ringDevice = device;
+            g_probe.ringW = L.w;
+            g_probe.ringH = L.h;
+            g_probe.ringFmt = L.fmt;
+        }
+        ID3D11DeviceContext* ctx = nullptr;
+        device->GetImmediateContext(&ctx);
+        if (!ctx) return;
+        // The COM calls outside the probe's lock (the draw hook takes it); the lines after, under it.
+        char copyLines[smp::kRing][300];
+        uint32_t copyCount = 0;
+        for (;;) {
+            int oldest = -1;
+            for (uint32_t i = 0; i < smp::kRing; ++i)
+                if (g_probe.ringStamp[i] && (oldest < 0 || g_probe.ringStamp[i] < g_probe.ringStamp[oldest])) oldest = int(i);
+            if (oldest < 0) break;
+            D3D11_MAPPED_SUBRESOURCE m{};
+            const HRESULT hr = ctx->Map(g_probe.ring[oldest], 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
+            if (hr == DXGI_ERROR_WAS_STILL_DRAWING) break;
+            if (SUCCEEDED(hr)) {
+                const smp::PixelStats st = smp::pixelStats(static_cast<const uint8_t*>(m.pData), m.RowPitch, L.w, L.h);
+                ctx->Unmap(g_probe.ring[oldest], 0);
+                if (copyCount < smp::kRing)
+                    smp::formatCopy(g_probe.ringStamp[oldest] - 1, L.w, L.h, st, copyLines[copyCount++], sizeof(copyLines[0]));
+            } else if (!g_probe.failSaid) {
+                g_probe.failSaid = true;
+                say("summary probe: a staging copy could not be read; it is dropped. Said once.");
+            }
+            g_probe.ringStamp[oldest] = 0;
+        }
+        const uint32_t slot = g_probe.ringNext;
+        if (g_probe.ringStamp[slot]) ++g_probe.unread;
+        ctx->CopyResource(g_probe.ring[slot], L.copy);
+        g_probe.ringStamp[slot] = (now - g_probe.start) + 1;
+        g_probe.ringNext = (slot + 1) % smp::kRing;
+        ctx->Release();
+        std::lock_guard<std::mutex> lock(g_probe.mutex);
+        for (uint32_t i = 0; i < copyCount; ++i) probeSay(copyLines[i]);
+        char line[600];
+        smp::formatWindow(now - g_probe.start, g_probe.tables, line, sizeof(line));
+        g_probe.tables.newWindow();
+        probeSay(line);
+    });
+}
+
 // Eye 0's decision for every layer, its copies and its lines. Under g_mutex.
 void decideLayers(ID3D11Device* device, ofh::Mode mode, float width) {
     // Each layer's panel: this frame's when the Submit comes after its draws, else the one of the frame that just ended. A frame that
@@ -503,6 +703,8 @@ void decideLayers(ID3D11Device* device, ofh::Mode mode, float width) {
             say(line);
         }
     }
+    // .49: the Summary probe, after the trader's decision (TEMPORARY)
+    probeDoor(device, g_layers[int(ofh::Layer::Trader)], g_cur.tally.withheld ? g_cur.tally.withheld : g_last.tally.withheld);
     for (auto*& t : ranked.tex) t = nullptr;  // g_cur's, not this copy's to release
     ranked.withheldTex = nullptr;
     // A menu layer (anything but the HUD) is held: shown, or kept by its hold. The head aim reads this (onFootMenuHeld).
