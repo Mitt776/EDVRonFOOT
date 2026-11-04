@@ -26,7 +26,6 @@
 // both centred at the eyes, as wide as the answers' pixels give; the summary names them bio and arms. A shop is as wide as its share of
 // the HUD panel's width (this frame's, else the last seen): 922x576 with 13 draws at the ship's ramp (.31) is none.
 #include "../../src/d3d11/on_foot_hud_core.h"
-#include "../../src/d3d11/summary_probe_core.h"  // .50, TEMPORARY
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -927,76 +926,95 @@ void partLines() {
     check(has(line, "on-foot hud"), "the prefix");
 }
 
-// .50, the info-panel watch (summary_probe_core.h) -- TEMPORARY, removed with it.
-void partInfoWatch() {
-    using namespace edvr::smp;
-    // 8x8 RGBA8, pitch 40 (8 spare bytes a row): rows 0-1 opaque, 2-3 colour without alpha, the rest empty.
+// .51: the info panel's keep -- a static menu (the Summary) held while its panel holds a picture, gone when the game clears it.
+void partInfoKeep() {
+    // 8x8 RGBA8, pitch 40: all clear but for one pixel.
     std::vector<uint8_t> px(40 * 8, 0);
-    for (int y = 0; y < 8; ++y)
-        for (int x = 0; x < 8; ++x) {
-            uint8_t* q = &px[size_t(y) * 40 + size_t(x) * 4];
-            if (y < 2) { q[0] = 200; q[3] = 255; }
-            else if (y < 4) { q[1] = 100; q[3] = 0; }
-            else { q[2] = 8; q[3] = 8; }
-        }
-    PixelStats a = pixelStats(px.data(), 40, 8, 8, 1);
-    check(a.sampled == 64 && a.opaque == 16 && a.colourNoAlpha == 16 && a.empty == 32 && !a.allEmpty(),
-          ".50 watch: every pixel counted by kind; not all empty");
-    PixelStats b = pixelStats(px.data(), 40, 8, 8, 4);
-    check(b.sampled == 4 && b.opaque == 2 && b.empty == 2, ".50 watch: every 4th pixel each way (rows 0 and 4)");
-    check(pixelStats(nullptr, 40, 8, 8).sampled == 0 && pixelStats(px.data(), 16, 8, 8).sampled == 0 && !PixelStats{}.allEmpty(),
-          ".50 watch: no data or a short pitch: nothing sampled, and nothing sampled is not empty");
-    std::vector<uint8_t> clear(40 * 8, 0);
-    check(pixelStats(clear.data(), 40, 8, 8).allEmpty(), ".50 watch: a cleared panel is all empty");
+    check(!panelHasPicture(px.data(), 40, 8, 8, 1), ".51 keep: a cleared panel holds no picture");
+    px[size_t(4) * 40 + 4 * 4 + 3] = 9;  // alpha 9 at (4,4)
+    check(panelHasPicture(px.data(), 40, 8, 8, 1) && panelHasPicture(px.data(), 40, 8, 8, 4),
+          ".51 keep: one pixel with alpha above 8 is a picture (also at every 4th pixel: (4,4) is sampled)");
+    px[size_t(4) * 40 + 4 * 4 + 3] = 8;
+    px[size_t(4) * 40 + 4 * 4 + 1] = 8;
+    check(!panelHasPicture(px.data(), 40, 8, 8, 1), ".51 keep: 8 and below is no picture");
+    px[size_t(5) * 40 + 5 * 4 + 0] = 200;  // colour at (5,5), not on the 4-grid
+    check(panelHasPicture(px.data(), 40, 8, 8, 1) && !panelHasPicture(px.data(), 40, 8, 8, 4),
+          ".51 keep: colour without alpha is a picture; off the sampled grid it is not seen");
+    check(!panelHasPicture(nullptr, 40, 8, 8) && !panelHasPicture(px.data(), 16, 8, 8) && !panelHasPicture(px.data(), 40, 0, 8),
+          ".51 keep: no data, a short pitch or no width: no picture");
 
-    Watch w;
-    check(!w.due(100) && w.ended(100) == WatchEnd::None, ".50 watch: idle: nothing due, nothing ended");
-    check(w.drawn(1000) && !w.drawn(1016), ".50 watch: the first draw starts it, the next does not");
-    check(w.due(1016), ".50 watch: a read is due at once");
-    w.read(1016, false);
-    check(!w.due(1400) && w.due(1516), ".50 watch: then every 0.5 s");
-    w.read(1516, true);
-    w.read(2016, true);
-    check(w.ended(2100) == WatchEnd::None, ".50 watch: two empty reads: not yet");
-    w.read(2516, true);
-    check(w.ended(2600) == WatchEnd::Emptied, ".50 watch: three empty reads in a row: emptied");
-    w.drawn(2700);
-    check(w.emptyRun == 0 && w.ended(2700) == WatchEnd::None, ".50 watch: a fresh draw clears the empty run");
-    w.read(3000, true);
-    w.read(3500, false);
-    w.read(4000, true);
-    w.read(4500, true);
-    check(w.ended(4600) == WatchEnd::None, ".50 watch: a read with a picture breaks the run");
-    check(w.ended(2700 + kWatchMs - 1) == WatchEnd::None && w.ended(2700 + kWatchMs) == WatchEnd::Timeout,
-          ".50 watch: 30 s after the last draw: timeout");
-    w.stop();
-    check(!w.active && !w.due(99999), ".50 watch: stopped");
-    Watch cap;
-    cap.drawn(0);
-    for (uint32_t i = 0; i < kLinesPerWatch + 5; ++i) cap.admit();
-    check(cap.lines == kLinesPerWatch && cap.unwritten == 5, ".50 watch: 120 lines a watch, the rest counted");
-    cap.stop();
-    cap.drawn(10);
-    check(cap.lines == 0 && cap.unwritten == 0 && cap.start == 10, ".50 watch: a new watch starts its budget afresh");
+    PanelKeep k;
+    check(!k.armed && k.verdict() == Kept::None && !k.due(0), ".51 keep: idle: no verdict, nothing due");
+    k.drawn();
+    check(k.armed && k.due(1000) && k.verdict() == Kept::Pictured, ".51 keep: after a draw: pictured, a read due at once");
+    k.lastRead = 1000;
+    check(!k.due(1099) && k.due(1100), ".51 keep: then every 100 ms");
+    k.read(true);
+    k.read(false);
+    check(k.verdict() == Kept::Pictured, ".51 keep: one empty read: still pictured");
+    k.read(true);
+    k.read(false);
+    check(k.verdict() == Kept::Pictured, ".51 keep: a picture breaks the empty run");
+    k.read(false);
+    check(!k.armed && k.verdict() == Kept::Cleared && k.verdict() == Kept::None, ".51 keep: two empty in a row: cleared, once");
+    k.drawn();
+    check(k.verdict() == Kept::Pictured && k.emptyRun == 0, ".51 keep: a fresh draw arms it again");
+    k.reset();
+    check(!k.armed && k.verdict() == Kept::None, ".51 keep: reset");
+    check(kKeepPeriodMs == 100 && kKeepEmptyToStop == 2, ".51 keep: 100 ms, 2 empty reads");
 
-    char line[600];
-    formatWatchStart(1188, 703, 27, line, sizeof(line));
-    check(has(line, "info watch: the info panel 1188x703 (format 27) is drawn; after its last draw"), ".50 watch: the start line");
-    formatWatchRead(1500, 2100, false, a, line, sizeof(line));
-    check(std::strcmp(line, "info watch: +1500 ms after its last draw (+2100 ms of the watch): opaque 25.0% colour-no-alpha 25.0% "
-                            "empty 50.0% mean-alpha 67.8, sheet not shown") == 0,
-          ".50 watch: the read line");
-    formatWatchRead(0, 0, true, PixelStats{}, line, sizeof(line));
-    check(has(line, "opaque 0.0%") && has(line, "sheet shown"), ".50 watch: nothing sampled: zeros; the sheet shown");
-    formatWatchEnd(WatchEnd::Emptied, 4000, 0, 1, line, sizeof(line));
-    check(std::strcmp(line, "info watch: ended (the panel is empty: 3 reads in a row), 4000 ms after the panel's last draw; lines "
-                            "unwritten 0, copies unread 1") == 0,
-          ".50 watch: the end line, emptied");
-    formatWatchEnd(WatchEnd::Timeout, 30000, 2, 0, line, sizeof(line));
-    check(has(line, "ended (30 s without a draw)"), ".50 watch: the end line, timeout");
-    formatWatchEnd(WatchEnd::None, 10, 0, 0, line, sizeof(line));
-    check(has(line, "ended (left the feet)"), ".50 watch: the end line, left the feet");
-    check(kPeriodMs == 500 && kWatchMs == 30000 && kEmptyToStop == 3 && kRing == 3, ".50 watch: 0.5 s, 30 s, 3 empty, 3 copies");
+    // The hold: kept frames are held without a missed frame -- far past 30; cleared expires at once; no keep is .47's hold.
+    Hold h;
+    check(h.step(true) == HoldStep::Fresh, ".51 hold: a drawn frame is fresh");
+    bool heldAll = true;
+    for (uint32_t i = 0; i < kHoldFrames * 20; ++i) heldAll = heldAll && h.step(false, Kept::Pictured) == HoldStep::Held;
+    check(heldAll && h.missed == 0, ".51 hold: a pictured panel is held 600 frames, nothing missed");
+    check(h.step(false, Kept::Cleared) == HoldStep::Expired && !h.have, ".51 hold: cleared: expired at once");
+    check(h.step(false, Kept::Pictured) == HoldStep::Expired, ".51 hold: nothing to hold after it");
+    Hold plain;
+    plain.step(true);
+    HoldStep last = HoldStep::Held;
+    for (uint32_t i = 0; i < kHoldFrames; ++i) last = plain.step(false);
+    check(last == HoldStep::Expired, ".51 hold: without the keep: 30 frames, as on .47");
+    Hold mixed;
+    mixed.step(true);
+    for (uint32_t i = 0; i < kHoldFrames - 1; ++i) mixed.step(false);
+    check(mixed.step(false, Kept::Pictured) == HoldStep::Held && mixed.missed == 0, ".51 hold: the keep resets the missed frames");
+
+    // stepLayer: the info layer of the Summary -- 5 drawn frames, then 600 kept: shown throughout; cleared: no panels.
+    DecisionIn in;
+    in.onFoot = 1;
+    Hold info;
+    HoldStep st;
+    bool shown = true;
+    for (int i = 0; i < 5; ++i) shown = shown && stepLayer(in, true, info, &st) == Reason::Showing;
+    for (int i = 0; i < 600; ++i) shown = shown && stepLayer(in, false, info, &st, Kept::Pictured) == Reason::Showing;
+    check(shown, ".51 the Summary: 5 drawn frames and 600 kept, shown throughout");
+    check(stepLayer(in, false, info, &st, Kept::Cleared) == Reason::NoPanels && st == HoldStep::Expired,
+          ".51 the Summary closed: the game cleared the panel, the sheet goes that frame");
+
+    char line[400];
+    formatMenuKept(Layer::Info, line, sizeof(line));
+    check(has(line, "on-foot hud: the info panel is kept: the game stopped drawing it and its picture stays") &&
+              has(line, "until the game clears the panel"),
+          ".51 the kept line");
+    formatMenuStopped(Layer::Info, Reason::NoPanels, line, sizeof(line), true);
+    check(std::strcmp(line, "on-foot hud: the info panel stopped (closed: the game cleared the panel)") == 0, ".51 closed by clearing");
+    formatMenuStopped(Layer::Info, Reason::NoPanels, line, sizeof(line));
+    check(std::strcmp(line, "on-foot hud: the info panel stopped (closed: not drawn for 30 frames)") == 0, ".51 closed as before");
+    formatMenuStopped(Layer::Info, Reason::InTheShip, line, sizeof(line), true);
+    check(std::strcmp(line, "on-foot hud: the info panel stopped (in the ship)") == 0, ".51 another reason wins over cleared");
+    Summary sum;
+    sum.frames = 900;
+    sum.menus[int(Layer::Info)].shown = 800;
+    sum.menus[int(Layer::Info)].held = 790;
+    sum.menus[int(Layer::Info)].kept = 780;
+    SeenSizes seen;
+    formatSummary(sum, nullptr, 0, 0, 0, seen, line, sizeof(line));
+    check(has(line, "menus=[info shown=800 held=790 kept=780]"), ".51 the summary: kept frames");
+    sum.menus[int(Layer::Info)].kept = 0;
+    formatSummary(sum, nullptr, 0, 0, 0, seen, line, sizeof(line));
+    check(has(line, "menus=[info shown=800 held=790]") && !has(line, "kept"), ".51 the summary: no kept field without them");
 }
 }  // namespace
 
@@ -1023,7 +1041,7 @@ int main(int argc, char** argv) {
     partKeys();
     partLatch();
     partLines();
-    partInfoWatch();  // .50, TEMPORARY
+    partInfoKeep();  // .51
     std::printf("%s: on_foot_hud_test, %d checks, %d failed\n", g_failures ? "FAIL" : "PASS", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

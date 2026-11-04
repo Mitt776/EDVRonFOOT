@@ -267,16 +267,27 @@ inline void findLayerPanels(const FrameTally& t, int out[kLayers], uint32_t last
 // cleared frame was the flicker of .10). step() once per frame the door decides; one per layer.
 constexpr uint32_t kHoldFrames = 30;
 enum class HoldStep : int { Fresh = 0, Held = 1, Expired = 2 };
+// .51, the info panel's keep (PanelKeep below): Pictured -- the game stopped drawing the panel but it still holds its picture, the
+// copy is held without a missed frame; Cleared -- the game cleared it, the hold expires at once.
+enum class Kept : int { None = 0, Pictured = 1, Cleared = 2 };
 struct Hold {
     bool have = false;
     uint32_t missed = 0;
-    HoldStep step(bool drew) {
+    HoldStep step(bool drew, Kept kept = Kept::None) {
         if (drew) {
             have = true;
             missed = 0;
             return HoldStep::Fresh;
         }
         if (!have) return HoldStep::Expired;
+        if (kept == Kept::Cleared) {
+            reset();
+            return HoldStep::Expired;
+        }
+        if (kept == Kept::Pictured) {
+            missed = 0;
+            return HoldStep::Held;
+        }
         if (++missed >= kHoldFrames) {
             reset();
             return HoldStep::Expired;
@@ -287,6 +298,57 @@ struct Hold {
         have = false;
         missed = 0;
     }
+};
+
+// .51 (the flights of .49 and .50, 04.11): the TAB wheel's Summary -- a summary of the system -- is the info panel, and a static one:
+// the game draws it in its first frames and then, in the cinema, only lays the finished panel into the picture every frame; in
+// stereo it skips that, and the hold expired after 30 frames (the Summary "gone after a second"). While such a menu is open the
+// panel keeps its picture (.50: 94% opaque for 13 s); when it closes the game clears it (empty within 0.3 s). So after the info
+// panel's last fresh draw the glue reads the panel back every kKeepPeriodMs: while it holds a picture the sheet stays, two empty
+// reads in a row and it goes.
+constexpr uint64_t kKeepPeriodMs = 100;
+constexpr uint32_t kKeepEmptyToStop = 2;
+constexpr uint32_t kKeepSampleStep = 4;  // every 4th pixel each way
+// Does the read-back panel (RGBA8, rows `pitch` apart) hold a picture: any sampled pixel with alpha or colour above 8.
+inline bool panelHasPicture(const uint8_t* data, uint32_t pitch, uint32_t w, uint32_t h, uint32_t step = kKeepSampleStep) {
+    if (!data || !w || !h || !step || pitch < w * 4) return false;
+    for (uint32_t y = 0; y < h; y += step) {
+        const uint8_t* row = data + size_t(y) * pitch;
+        for (uint32_t x = 0; x < w; x += step) {
+            const uint8_t* q = row + size_t(x) * 4;
+            if (q[0] > 8 || q[1] > 8 || q[2] > 8 || q[3] > 8) return true;
+        }
+    }
+    return false;
+}
+// The keep's state: armed by a fresh draw, a read due every kKeepPeriodMs while not drawn, its verdict for the hold.
+struct PanelKeep {
+    bool armed = false, saidKept = false, cleared = false;
+    uint32_t emptyRun = 0;
+    uint64_t lastRead = 0;
+    void drawn() {
+        armed = true;
+        emptyRun = 0;
+        cleared = false;
+        lastRead = 0;
+    }
+    bool due(uint64_t now) const { return armed && (!lastRead || now - lastRead >= kKeepPeriodMs); }
+    void read(bool pictured) {
+        emptyRun = pictured ? 0 : emptyRun + 1;
+        if (emptyRun >= kKeepEmptyToStop) {
+            cleared = true;
+            armed = false;
+        }
+    }
+    // For a frame that did not draw the panel: Pictured while armed and not proven empty; Cleared once, the frame the reads proved it.
+    Kept verdict() {
+        if (cleared) {
+            cleared = false;
+            return Kept::Cleared;
+        }
+        return armed ? Kept::Pictured : Kept::None;
+    }
+    void reset() { *this = PanelKeep{}; }
 };
 
 // The sizes of panels met while the sheet is needed, for the one line each gets (.24: where do the lift, dialog and door menus go).
@@ -433,12 +495,12 @@ inline Reason decide(const DecisionIn& in) {
 // One layer's frame: the decision (in.gameComposites is this layer's own bit), then the hold -- a layer whose panel the frame did not
 // draw keeps its copy up to kHoldFrames, then stops for no panels. Each layer steps its own hold: the HUD's frames never keep a menu
 // alive, nor a menu's the HUD.
-inline Reason stepLayer(DecisionIn in, bool drew, Hold& hold, HoldStep* step) {
+inline Reason stepLayer(DecisionIn in, bool drew, Hold& hold, HoldStep* step, Kept kept = Kept::None) {
     in.panels = 1;  // the panels are the hold's to judge
     Reason r = decide(in);
     HoldStep st = HoldStep::Expired;
     if (r == Reason::Showing) {
-        st = hold.step(drew);
+        st = hold.step(drew, kept);
         if (st == HoldStep::Expired) r = Reason::NoPanels;
     } else {
         hold.reset();
@@ -488,6 +550,7 @@ struct DecisionLatch {
 constexpr uint64_t kSummaryMs = 30000;
 struct LayerCount {
     uint64_t shown = 0, held = 0;
+    uint64_t kept = 0;  // .51: of the held, kept because the panel still held its picture (the info panel)
 };
 struct Summary {
     uint64_t frames = 0, shown = 0, held = 0, gameComposites = 0, copyFail = 0, noPanels = 0;
@@ -546,10 +609,20 @@ inline int formatOtherMesh(uint32_t w, uint32_t h, uint32_t indices, char* out, 
                          w, h, indices, kHeadLockedMenuIndices, kWideMenuIndices);
 }
 
-// A menu's end: closed when the game stopped drawing it, else the reason.
-inline int formatMenuStopped(Layer l, Reason r, char* out, size_t cap) {
+// A menu's end: closed when the game stopped drawing it (.51: or cleared the kept panel), else the reason.
+inline int formatMenuStopped(Layer l, Reason r, char* out, size_t cap, bool cleared = false) {
     return std::snprintf(out, cap, "on-foot hud: %s stopped (%s)", specOf(l).name,
-                         r == Reason::NoPanels ? "closed: not drawn for 30 frames" : reasonText(r));
+                         r != Reason::NoPanels ? reasonText(r)
+                         : cleared             ? "closed: the game cleared the panel"
+                                               : "closed: not drawn for 30 frames");
+}
+
+// .51, once a show: the game stopped drawing the menu's panel and its picture stays -- kept until the game clears it.
+inline int formatMenuKept(Layer l, char* out, size_t cap) {
+    return std::snprintf(out, cap,
+                         "on-foot hud: %s is kept: the game stopped drawing it and its picture stays (a static menu, e.g. the "
+                         "Summary); shown until the game clears the panel",
+                         specOf(l).name);
 }
 
 // A size met for the first time this session while the sheet is needed.
@@ -588,6 +661,8 @@ inline int formatSummary(const Summary& s, const Panel* p, int count, uint32_t d
         if (!c.shown && !c.held) continue;
         m += std::snprintf(menus + m, sizeof(menus) - size_t(m), "%s%s shown=%llu held=%llu", m ? ", " : " menus=[",
                            kLayerSpecs[k].brief, static_cast<unsigned long long>(c.shown), static_cast<unsigned long long>(c.held));
+        if (c.kept && m >= 0 && size_t(m) < sizeof(menus))
+            m += std::snprintf(menus + m, sizeof(menus) - size_t(m), " kept=%llu", static_cast<unsigned long long>(c.kept));
     }
     if (m > 0 && size_t(m) + 1 < sizeof(menus)) {
         menus[m] = ']';

@@ -1,6 +1,5 @@
 #include "on_foot_hud.h"
 #include "on_foot_hud_core.h"
-#include "summary_probe_core.h"  // .50, TEMPORARY
 #include "aim_dot.h"
 #include "binding_shadow.h"
 #include "draw_gate.h"
@@ -76,6 +75,7 @@ struct LayerState {
     ofh::DecisionLatch latch;
     ofh::Panel heldPanel;    // the panel the copy was made from, for the showing line while it is held
     bool copyFailSaid = false;
+    bool keptSaid = false;  // .51: the kept line, once a show
     void releaseCopy() {
         if (srv) srv->Release();
         if (copy) copy->Release();
@@ -417,24 +417,29 @@ bool copyInto(LayerState& L, ID3D11Device* device, ID3D11Texture2D* tex) {
     return copied;
 }
 
-// ---- .50: the info-panel watch (summary_probe_core.h) -- TEMPORARY, removed whole after its flight ----
-// After the info panel's last fresh draw: a reference of EDVR's own to the game's panel texture, read back every 0.5 s through a
-// ring of staging copies (never waiting), up to 30 s or 3 empty reads in a row. The door's alone, under g_mutex.
-struct InfoWatch {
-    smp::Watch watch;
+// .51, the info panel's keep (on_foot_hud_core.h, PanelKeep): after the panel's last fresh draw, a reference of EDVR's own to the
+// game's panel texture, read back every kKeepPeriodMs through a ring of three staging copies (never waiting). While it holds a
+// picture the info sheet is held without a missed frame; two empty reads in a row -- the game cleared it, the menu closed -- and the
+// sheet goes at once. Anything that goes wrong (no texture, no staging copy, a failed read) gives the keep up: the plain 30-frame
+// hold, as before .51. The door's alone, under g_mutex.
+struct InfoKeep {
+    ofh::PanelKeep keep;
     ID3D11Texture2D* tex = nullptr;  // the game's panel, with a reference of ours
     uint32_t w = 0, h = 0, fmt = 0;
-    ID3D11Texture2D* ring[smp::kRing] = {};
-    uint64_t ringSinceDraw[smp::kRing] = {}, ringSinceStart[smp::kRing] = {};  // + 1; 0 for a free slot
-    bool ringShown[smp::kRing] = {};
+    static constexpr uint32_t kRing = 3;
+    ID3D11Texture2D* ring[kRing] = {};
+    uint64_t ringAt[kRing] = {};  // the copy's moment, 0 for a free slot
     ID3D11Device* ringDevice = nullptr;  // identity only
-    uint32_t ringW = 0, ringH = 0, ringFmt = 0, ringNext = 0, unread = 0;
+    uint32_t ringW = 0, ringH = 0, ringFmt = 0, ringNext = 0;
     bool failSaid = false;
+    void dropPending() {
+        for (auto& t : ringAt) t = 0;
+    }
     void releaseRing() {
-        for (uint32_t i = 0; i < smp::kRing; ++i) {
+        for (uint32_t i = 0; i < kRing; ++i) {
             if (ring[i]) ring[i]->Release();
             ring[i] = nullptr;
-            ringSinceDraw[i] = ringSinceStart[i] = 0;
+            ringAt[i] = 0;
         }
         ringDevice = nullptr;
         ringW = ringH = ringFmt = ringNext = 0;
@@ -444,122 +449,117 @@ struct InfoWatch {
         if (tex) tex->Release();
         tex = nullptr;
         w = h = fmt = 0;
+        keep.reset();
     }
 };
-InfoWatch g_watch;
+InfoKeep g_keep;
 
-void watchSay(const char* line) {
-    if (g_watch.watch.admit()) say(line);
-}
-
-void watchEnd(smp::WatchEnd why, uint64_t now) {
-    char line[300];
-    smp::formatWatchEnd(why, now - g_watch.watch.lastDraw, g_watch.watch.unwritten, g_watch.unread, line, sizeof(line));
-    say(line);  // the end line is always written
-    g_watch.watch.stop();
-    g_watch.unread = 0;
-    g_watch.releaseAll();
-}
-
-// Once per frame after the info layer's decision. `fresh`: the panel's texture when the game drew it this frame (the layer copied
-// from it), else null; `shown`: the info sheet is shown; `away`: not on foot or the key off.
-void watchDoor(ID3D11Device* device, ID3D11Texture2D* fresh, bool shown, bool away) {
-    const uint64_t now = GetTickCount64();
-    InfoWatch& W = g_watch;
-    if (away) {
-        if (W.watch.active) watchEnd(smp::WatchEnd::None, now);
-        return;
+void keepGiveUp(const char* why) {
+    if (!g_keep.failSaid) {
+        g_keep.failSaid = true;
+        Log::get().note("on-foot hud: the info panel's keep gives up (%s); a static menu goes after 30 frames as before. Said once.", why);
     }
-    if (fresh) {
+    g_keep.releaseAll();
+}
+
+// One frame of the info layer, before its hold steps. `fresh`: the panel's texture when the game drew it this frame; `away`: not
+// shown on foot in stereo (the key off, in the ship, the game's own composite). Returns the keep's verdict for the hold.
+ofh::Kept infoKeepFrame(ID3D11Device* device, ID3D11Texture2D* fresh, bool drew, bool away) {
+    InfoKeep& K = g_keep;
+    if (away) {
+        if (K.tex || K.keep.armed) K.releaseAll();
+        return ofh::Kept::None;
+    }
+    if (drew) {
+        if (!fresh) {  // drawn, but its texture not taken: nothing to read, no keep
+            K.keep.reset();
+            return ofh::Kept::None;
+        }
         guardedBudget(g_budget, [&] {
-            if (W.tex != fresh) {
-                if (W.tex) W.tex->Release();
-                W.tex = fresh;
-                W.tex->AddRef();
+            if (K.tex != fresh) {
+                if (K.tex) K.tex->Release();
+                K.tex = fresh;
+                K.tex->AddRef();
                 D3D11_TEXTURE2D_DESC d{};
-                W.tex->GetDesc(&d);
-                W.w = d.Width;
-                W.h = d.Height;
-                W.fmt = uint32_t(d.Format);
+                K.tex->GetDesc(&d);
+                K.w = d.Width;
+                K.h = d.Height;
+                K.fmt = uint32_t(d.Format);
             }
         });
-        if (W.watch.drawn(now)) {
-            char line[300];
-            smp::formatWatchStart(W.w, W.h, W.fmt, line, sizeof(line));
-            watchSay(line);
-        }
-        return;  // read only after the last draw
+        K.keep.drawn();
+        K.dropPending();  // copies from before this draw say nothing about it
+        return ofh::Kept::None;
     }
-    if (!W.watch.active || !W.tex) return;
-    const smp::WatchEnd why = W.watch.ended(now);
-    if (why != smp::WatchEnd::None) {
-        watchEnd(why, now);
-        return;
-    }
-    if (!W.watch.due(now)) return;
-    W.watch.lastRead = now;  // the period starts; the empty run is decided by the reads below
+    if (!K.tex || !K.keep.armed) return K.keep.verdict();
+    const uint64_t now = GetTickCount64();
+    if (!K.keep.due(now)) return K.keep.verdict();
+    K.keep.lastRead = now;
+    bool failed = false;
+    const char* why = "";
     guardedBudget(g_budget, [&] {
-        if (!W.ring[0] || W.ringDevice != device || W.ringW != W.w || W.ringH != W.h || W.ringFmt != W.fmt) {
-            W.releaseRing();
+        if (!K.ring[0] || K.ringDevice != device || K.ringW != K.w || K.ringH != K.h || K.ringFmt != K.fmt) {
+            K.releaseRing();
             D3D11_TEXTURE2D_DESC d{};
-            d.Width = W.w;
-            d.Height = W.h;
+            d.Width = K.w;
+            d.Height = K.h;
             d.MipLevels = 1;
             d.ArraySize = 1;
-            d.Format = DXGI_FORMAT(W.fmt);
+            d.Format = DXGI_FORMAT(K.fmt);
             d.SampleDesc.Count = 1;
             d.Usage = D3D11_USAGE_STAGING;
             d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
             bool ok = true;
-            for (uint32_t i = 0; i < smp::kRing && ok; ++i) ok = SUCCEEDED(device->CreateTexture2D(&d, nullptr, &W.ring[i])) && W.ring[i];
+            for (uint32_t i = 0; i < InfoKeep::kRing && ok; ++i) ok = SUCCEEDED(device->CreateTexture2D(&d, nullptr, &K.ring[i])) && K.ring[i];
             if (!ok) {
-                W.releaseRing();
-                if (!W.failSaid) {
-                    W.failSaid = true;
-                    say("info watch: the staging copies could not be made; no reads. Said once.");
-                }
+                failed = true;
+                why = "the copies to read the panel back could not be made";
                 return;
             }
-            W.ringDevice = device;
-            W.ringW = W.w;
-            W.ringH = W.h;
-            W.ringFmt = W.fmt;
+            K.ringDevice = device;
+            K.ringW = K.w;
+            K.ringH = K.h;
+            K.ringFmt = K.fmt;
         }
         ID3D11DeviceContext* ctx = nullptr;
         device->GetImmediateContext(&ctx);
-        if (!ctx) return;
-        uint32_t emptyRun = W.watch.emptyRun;
-        for (;;) {
+        if (!ctx) {
+            failed = true;
+            why = "no immediate context";
+            return;
+        }
+        for (;;) {  // the ready copies, the oldest first, never waiting
             int oldest = -1;
-            for (uint32_t i = 0; i < smp::kRing; ++i)
-                if (W.ringSinceStart[i] && (oldest < 0 || W.ringSinceStart[i] < W.ringSinceStart[oldest])) oldest = int(i);
+            for (uint32_t i = 0; i < InfoKeep::kRing; ++i)
+                if (K.ringAt[i] && (oldest < 0 || K.ringAt[i] < K.ringAt[oldest])) oldest = int(i);
             if (oldest < 0) break;
             D3D11_MAPPED_SUBRESOURCE m{};
-            const HRESULT hr = ctx->Map(W.ring[oldest], 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
+            const HRESULT hr = ctx->Map(K.ring[oldest], 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
             if (hr == DXGI_ERROR_WAS_STILL_DRAWING) break;
-            if (SUCCEEDED(hr)) {
-                const smp::PixelStats st = smp::pixelStats(static_cast<const uint8_t*>(m.pData), m.RowPitch, W.w, W.h);
-                ctx->Unmap(W.ring[oldest], 0);
-                emptyRun = st.allEmpty() ? emptyRun + 1 : 0;
-                char line[300];
-                smp::formatWatchRead(W.ringSinceDraw[oldest] - 1, W.ringSinceStart[oldest] - 1, W.ringShown[oldest], st, line, sizeof(line));
-                watchSay(line);
-            } else if (!W.failSaid) {
-                W.failSaid = true;
-                say("info watch: a staging copy could not be read; it is dropped. Said once.");
+            K.ringAt[oldest] = 0;
+            if (FAILED(hr)) {
+                failed = true;
+                why = "a copy of the panel could not be read";
+                break;
             }
-            W.ringSinceDraw[oldest] = W.ringSinceStart[oldest] = 0;
+            const bool pictured = ofh::panelHasPicture(static_cast<const uint8_t*>(m.pData), m.RowPitch, K.w, K.h);
+            ctx->Unmap(K.ring[oldest], 0);
+            K.keep.read(pictured);
+            if (!K.keep.armed) break;  // cleared: the rest say nothing more
         }
-        W.watch.emptyRun = emptyRun;
-        const uint32_t slot = W.ringNext;
-        if (W.ringSinceStart[slot]) ++W.unread;
-        ctx->CopyResource(W.ring[slot], W.tex);
-        W.ringSinceDraw[slot] = (now - W.watch.lastDraw) + 1;
-        W.ringSinceStart[slot] = (now - W.watch.start) + 1;
-        W.ringShown[slot] = shown;
-        W.ringNext = (slot + 1) % smp::kRing;
+        if (!failed && K.keep.armed) {
+            const uint32_t slot = K.ringNext;
+            ctx->CopyResource(K.ring[slot], K.tex);
+            K.ringAt[slot] = now;
+            K.ringNext = (slot + 1) % InfoKeep::kRing;
+        }
         ctx->Release();
     });
+    if (failed) {
+        keepGiveUp(why);
+        return ofh::Kept::None;
+    }
+    return K.keep.verdict();
 }
 
 // Eye 0's decision for every layer, its copies and its lines. Under g_mutex.
@@ -573,8 +573,6 @@ void decideLayers(ID3D11Device* device, ofh::Mode mode, float width) {
     ofh::findLayerPanels(ranked.tally, cur, g_hudWidth);
     ofh::findLayerPanels(g_last.tally, last, g_hudWidth);
     const uint32_t composites = g_cur.tally.composites | g_last.tally.composites;
-    ID3D11Texture2D* infoFresh = nullptr;  // .50
-    bool infoShown = false, infoAway = false;
     ofh::DecisionIn base;
     base.onFoot = g_onFoot.load(std::memory_order_relaxed);
     base.nativeOnFoot = g_nativeOnFoot.load(std::memory_order_relaxed);
@@ -599,7 +597,13 @@ void decideLayers(ID3D11Device* device, ofh::Mode mode, float width) {
         in.gameComposites = ((composites >> k) & 1u) != 0;
         ofh::HoldStep step = ofh::HoldStep::Expired;
         const bool drew = layer == ofh::Layer::Trader ? source != nullptr : use != nullptr;
-        const ofh::Reason reason = ofh::stepLayer(in, drew, L.hold, &step);
+        // .51: the info panel's keep -- held while the game's panel still holds its picture, gone when the game clears it
+        ofh::Kept kept = ofh::Kept::None;
+        if (layer == ofh::Layer::Info) {
+            const bool away = in.mode == ofh::Mode::Off || !in.nativeOnFoot || in.onFoot != 1 || in.gameComposites;
+            kept = infoKeepFrame(device, drew ? source : nullptr, drew, away);
+        }
+        const ofh::Reason reason = ofh::stepLayer(in, drew, L.hold, &step, kept);
         uint64_t& shown = layer == ofh::Layer::Hud ? g_summary.shown : g_summary.menus[k].shown;
         uint64_t& held = layer == ofh::Layer::Hud ? g_summary.held : g_summary.menus[k].held;
         ofh::Panel panel;
@@ -610,6 +614,15 @@ void decideLayers(ID3D11Device* device, ofh::Mode mode, float width) {
             if (L.show) {
                 ++held;
                 ++shown;
+                if (kept == ofh::Kept::Pictured) {
+                    ++g_summary.menus[k].kept;
+                    if (!L.keptSaid) {
+                        L.keptSaid = true;
+                        char line[300];
+                        ofh::formatMenuKept(layer, line, sizeof(line));
+                        say(line);
+                    }
+                }
             }
         } else if (reason == ofh::Reason::Showing) {
             panel = fresh;
@@ -633,11 +646,7 @@ void decideLayers(ID3D11Device* device, ofh::Mode mode, float width) {
             }
         }
         if (L.show) L.place = ofh::placeOf(layer, width);
-        if (layer == ofh::Layer::Info) {  // .50, the info-panel watch (TEMPORARY)
-            infoFresh = reason == ofh::Reason::Showing && step == ofh::HoldStep::Fresh && L.show ? source : nullptr;
-            infoShown = L.show;
-            infoAway = reason == ofh::Reason::KeyOff || reason == ofh::Reason::InTheShip;
-        }
+        if (!L.show) L.keptSaid = false;  // .51: the kept line once a show
         // A panel that could not be copied is not shown and not said as shown: the line stays what it was, the summary counts copy-fail.
         if ((reason != ofh::Reason::Showing || L.show) && L.latch.admit(reason, panel.w, panel.h, mode)) {
             char line[400];
@@ -652,11 +661,10 @@ void decideLayers(ID3D11Device* device, ofh::Mode mode, float width) {
                                            ? (g_cur.tally.withheldMesh ? g_cur.tally.withheldMesh : g_last.tally.withheldMesh)
                                            : 0u);
             else
-                ofh::formatMenuStopped(layer, reason, line, sizeof(line));
+                ofh::formatMenuStopped(layer, reason, line, sizeof(line), kept == ofh::Kept::Cleared);
             say(line);
         }
     }
-    watchDoor(device, infoFresh, infoShown, infoAway);  // .50, TEMPORARY
     for (auto*& t : ranked.tex) t = nullptr;  // g_cur's, not this copy's to release
     ranked.withheldTex = nullptr;
     // A menu layer (anything but the HUD) is held: shown, or kept by its hold. The head aim reads this (onFootMenuHeld).
