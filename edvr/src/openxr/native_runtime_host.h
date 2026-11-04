@@ -12,6 +12,7 @@
 #endif
 #include <windows.h>
 #include "../common/game_call_probe.h"
+#include "api_layer_pin.h"
 #include <d3d11.h>
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
@@ -2775,6 +2776,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     nativeTracePrintf("steam_identity,variable=SteamAppId,source=%s,app_id=%ls,withdrawn=%u,instance=%d\n",
       identity.sourceName(),identity.appId(),unsigned(identity.isWithdrawn()),int(created));
     if(!result("xrCreateInstance",created)) return false;
+    // The API layers the loader just loaded stay mapped to the end of the process
+    // (api_layer_pin.h: OpenXR Toolkit's D3D11 detour outlived its DLL, the exit
+    // crash at ...F780). A failure is only this line; open() goes on regardless.
+    nativeTracePrintf("%s\n",layer_pin::formatLine(layer_pin::pinLoadedApiLayers()).c_str());
     // Optional capability: an unavailable query cannot prevent VR startup.
     if(displayRefreshExtension&&!load(api,instance,"xrGetDisplayRefreshRateFB",api.displayRefreshRate))
       api.displayRefreshRate=nullptr;

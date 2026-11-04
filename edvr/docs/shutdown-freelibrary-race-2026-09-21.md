@@ -2,6 +2,42 @@
 
 ## Status
 
+- **Состояние (2026-11-05, EDVRonFOOT): причина НАЙДЕНА, правка `.52` собрана, НЕ облетана**
+  (заявка `exit-crash-openxr-layers`). Гипотеза «выгрузка системного `d3d11.dll`» отброшена
+  (`## Ruled out`). Старый блок Status (2026-09-25) целиком — в «Status до 2026-11-05» ниже.
+- **Причина:** неявный слой OpenXR **OpenXR Toolkit 1.3.2** (у Димы стоит, для Elite ничего
+  не включено). При старте сессии он через Microsoft Detours правит код
+  `ID3D11DeviceContext::RSSetViewports` на весь процесс. На выходе EDVR закрывает экземпляр
+  и выгружает загрузчик (`host_instance_destroy`, `host_loader_free`), загрузчик выгружает
+  DLL Toolkit, а прыжок в коде `d3d11.dll` остаётся. Через 31 мс оверлей Steam в своём
+  `Present` зовёт `RSSetViewports` на контексте игры и прыгает в пустую память.
+- **Доказательства (дамп `20261105_003944` + логи того же выхода, `tools\exit_crash_dump.py`):**
+  адрес падения всегда `…F780` = обработчик `RSSetViewports` Toolkit по RVA `0x8F780` его DLL;
+  `rax − rcx = 0x168` (слот 44 таблицы контекста) в 30 падениях подряд; стек
+  `d3d11.dll+0x2EC9C4` (наш прокси) → `gameoverlayrenderer64.dll+0x71D05`; в DLL Toolkit
+  строки `ID3D11DeviceContext_RSSetViewports` и `Detour failed`; лог Toolkit кончается на
+  «Session destroyed» в ту же секунду. Сходится с третьим опытом ниже: без оверлея Steam
+  `RSSetViewports` после закрытия сессии никто не зовёт — падения нет. Не видели своими
+  глазами: байтов прыжка в `d3d11.dll` (код системных DLL в дамп не попадает).
+- **Масштаб до правки (05.11):** 114 дампов, 4,0 ГБ в
+  `%LOCALAPPDATA%\Temp\Frontier Developments\EliteDangerous\CrashDumps`; 65 записей
+  `UNHANDLED` в `edvr_breadcrumbs.txt`, последняя 05.11 00:39.
+- **Правка `.52`:** после удачного `xrCreateInstance` EDVR находит DLL слоёв (экспорт
+  `xrNegotiateLoaderApiLayerInterface`) и закрепляет их до конца процесса
+  (`src\openxr\api_layer_pin.h`, `GetModuleHandleExW(FROM_ADDRESS | PIN)`). Перехват Toolkit
+  ведёт в живой код, а тот передаёт вызов оригиналу. Ключа нет. Строка в OpenXR-логе:
+  `openxr_layers,found=1,pinned=1,list=XR_APILAYER_MBUCCHIA_toolkit.dll:pinned`.
+  Стенд `tools\openxr_layer_pin_test` (гейт `:rig_openxr_layer_pin_test`).
+- **Правка PR #40** (`device_module_reset,pinned=1`) остаётся: безвредна, но не лечила.
+- **Следующий полёт (`.52`):** 2–3 выхода из игры через меню, Toolkit и оверлей Steam
+  не трогать. Успех: строка `openxr_layers … :pinned` в каждой сессии, нет новых `UNHANDLED`
+  и новых папок в `CrashDumps`. Если падение осталось при `pinned=1` — гипотеза о Toolkit
+  опровергнута: разобрать новый дамп `exit_crash_dump.py`, записать сюда.
+- **Скорее всего, то же у апстрима** (VirtualDesktopXR, второй bundle): неявный слой с
+  перехватом D3D11 — самый частый случай OpenXR Toolkit.
+
+## Status до 2026-11-05 (перенесено из Status без изменений)
+
 - **State (2026-09-25): fix BUILT, NOT FLOWN.** Opened 2026-09-21 from a
   supporter's log bundle: a crash after closing the game, on a thread that
   lands in unmapped ("no module") memory 31 ms, to the millisecond in both
@@ -375,6 +411,10 @@ late call left to land in the unmapped module.
 
 ## Ruled out
 
+- ruled out (2026-11-05): выгрузка системного `d3d11.dll` в `NativeDevice::reset()` как
+  причина падения, потому что `device_module_reset,pinned=1` стоит во всех логах с PR #40,
+  а падение продолжалось (65 записей `UNHANDLED`); адрес `…F780` лежит в выгруженной DLL
+  OpenXR Toolkit, а не в образе `d3d11.dll` (см. Status).
 - EDVR's own OpenXR shutdown throwing: the log reports every stage `ok=1`
   and `module_shutdown_return,exception=0` on its own thread, in both
   logged flights. The exception is not there; a different thread lands in

@@ -165,6 +165,8 @@ python tools\release_credits.py --self-test || exit /b 1
 python tools\flash_patch_residual.py --self-test || exit /b 1
 python tools\check_status_blocks.py --self-test || exit /b 1
 python tools\check_status_blocks.py || exit /b 1
+REM The exit-crash minidump reader (docs\shutdown-freelibrary-race-2026-09-21.md).
+python tools\exit_crash_dump.py --self-test || exit /b 1
 REM The fixtures of the supercruise layer rigs (tools\orbit_layer_test, tools\supercruise_census_test): the writers' encoders and readers, the census
 REM parser, every writer's --dry-run, and the three fixtures in the repo read back and held to their shape.
 python tools\layer_fixtures.py --self-test || exit /b 1
@@ -1696,6 +1698,39 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: journal_unload_test build failed & exit /b 1 )
 "%BUILD%\journal_unload_test.exe" "%BUILD%\d3d11.dll" || (
     echo [edvr] ERROR: the graphics DLL's pin does not keep its code mapped under a running worker
+    exit /b 1
+)
+exit /b 0
+
+:rig_openxr_layer_pin_test
+echo [edvr] === openxr_layer_pin_test.exe ===
+REM The OpenXR API-layer pin (src\openxr\api_layer_pin.h; the exit crash at ...F780,
+REM docs\shutdown-freelibrary-race-2026-09-21.md). OpenXR Toolkit detours D3D11 code
+REM process-wide and the loader unmapped it on xrDestroyInstance, so the Steam overlay's
+REM next RSSetViewports executed into freed memory. The rig loads a fake layer (it
+REM exports xrNegotiateLoaderApiLayerInterface) and a plain DLL, runs the REAL scan and
+REM pin, frees each twice, and requires the layer to stay mapped and the plain DLL to go
+REM -- the second is what shows the rig can tell. Then the log line's text for 0, 1 and
+REM 2 layers, a refused pin and a failed module walk.
+if not exist "%OBJ%\xrlayerpin" mkdir "%OBJ%\xrlayerpin"
+if not exist "%OBJ%\xrlayerpin\layer" mkdir "%OBJ%\xrlayerpin\layer"
+if not exist "%OBJ%\xrlayerpin\plain" mkdir "%OBJ%\xrlayerpin\plain"
+if not exist "%OBJ%\xrlayerpin\host" mkdir "%OBJ%\xrlayerpin\host"
+if not exist "%BUILD%\xrlayerpin" mkdir "%BUILD%\xrlayerpin"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /LD /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /Fo"%OBJ%\xrlayerpin\layer"\ /Fe"%BUILD%\xrlayerpin\layer_fixture.dll" ^
+    "tools\openxr_layer_pin_test\layer_fixture.cpp" /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: layer_fixture build failed & exit /b 1 )
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /LD /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /Fo"%OBJ%\xrlayerpin\plain"\ /Fe"%BUILD%\xrlayerpin\plain_fixture.dll" ^
+    "tools\openxr_layer_pin_test\plain_fixture.cpp" /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: plain_fixture build failed & exit /b 1 )
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /DUNICODE /D_UNICODE ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\xrlayerpin\host"\ /Fe"%BUILD%\openxr_layer_pin_test.exe" ^
+    "tools\openxr_layer_pin_test\openxr_layer_pin_test.cpp" /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: openxr_layer_pin_test build failed & exit /b 1 )
+"%BUILD%\openxr_layer_pin_test.exe" "%BUILD%\xrlayerpin" || (
+    echo [edvr] ERROR: an OpenXR API layer is not kept mapped after its FreeLibrary
     exit /b 1
 )
 exit /b 0
