@@ -26,7 +26,7 @@
 // both centred at the eyes, as wide as the answers' pixels give; the summary names them bio and arms. A shop is as wide as its share of
 // the HUD panel's width (this frame's, else the last seen): 922x576 with 13 draws at the ship's ramp (.31) is none.
 #include "../../src/d3d11/on_foot_hud_core.h"
-#include "../../src/d3d11/summary_probe_core.h"  // .49, TEMPORARY
+#include "../../src/d3d11/summary_probe_core.h"  // .50, TEMPORARY
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -927,8 +927,8 @@ void partLines() {
     check(has(line, "on-foot hud"), "the prefix");
 }
 
-// .49, the Summary probe (summary_probe_core.h) -- TEMPORARY, removed with it.
-void partSummaryProbe() {
+// .50, the info-panel watch (summary_probe_core.h) -- TEMPORARY, removed with it.
+void partInfoWatch() {
     using namespace edvr::smp;
     // 8x8 RGBA8, pitch 40 (8 spare bytes a row): rows 0-1 opaque, 2-3 colour without alpha, the rest empty.
     std::vector<uint8_t> px(40 * 8, 0);
@@ -940,70 +940,63 @@ void partSummaryProbe() {
             else { q[2] = 8; q[3] = 8; }
         }
     PixelStats a = pixelStats(px.data(), 40, 8, 8, 1);
-    check(a.sampled == 64 && a.opaque == 16 && a.colourNoAlpha == 16 && a.empty == 32, ".49 probe: every pixel counted by kind");
-    check(a.alphaSum == 16u * 255 + 32u * 8 && a.colourSum == 16u * 200 + 16u * 100 + 32u * 8, ".49 probe: the sums");
+    check(a.sampled == 64 && a.opaque == 16 && a.colourNoAlpha == 16 && a.empty == 32 && !a.allEmpty(),
+          ".50 watch: every pixel counted by kind; not all empty");
     PixelStats b = pixelStats(px.data(), 40, 8, 8, 4);
-    check(b.sampled == 4 && b.opaque == 2 && b.colourNoAlpha == 0 && b.empty == 2, ".49 probe: every 4th pixel each way (rows 0 and 4)");
-    check(pixelStats(nullptr, 40, 8, 8).sampled == 0 && pixelStats(px.data(), 16, 8, 8).sampled == 0 &&
-              pixelStats(px.data(), 40, 0, 8).sampled == 0,
-          ".49 probe: no data, a pitch too short or no width: nothing");
-    PixelStats one = pixelStats(px.data(), 40, 5, 5, 4);
-    check(one.sampled == 4, ".49 probe: 5x5 by 4 samples 0 and 4 each way");
+    check(b.sampled == 4 && b.opaque == 2 && b.empty == 2, ".50 watch: every 4th pixel each way (rows 0 and 4)");
+    check(pixelStats(nullptr, 40, 8, 8).sampled == 0 && pixelStats(px.data(), 16, 8, 8).sampled == 0 && !PixelStats{}.allEmpty(),
+          ".50 watch: no data or a short pitch: nothing sampled, and nothing sampled is not empty");
+    std::vector<uint8_t> clear(40 * 8, 0);
+    check(pixelStats(clear.data(), 40, 8, 8).allEmpty(), ".50 watch: a cleared panel is all empty");
 
-    char line[700];
-    formatCopy(1500, 1730, 973, a, line, sizeof(line));
-    check(has(line, "summary probe: copy 1730x973 +1500 ms: opaque 25.0% colour-no-alpha 25.0% empty 50.0% mean-alpha 67.8") &&
-              has(line, "(64 sampled)"),
-          ".49 probe: the copy line");
-    PixelStats none;
-    formatCopy(0, 1730, 973, none, line, sizeof(line));
-    check(has(line, "opaque 0.0% colour-no-alpha 0.0% empty 0.0% mean-alpha 0.0") && has(line, "(0 sampled)"),
-          ".49 probe: nothing sampled: zeros, no division");
+    Watch w;
+    check(!w.due(100) && w.ended(100) == WatchEnd::None, ".50 watch: idle: nothing due, nothing ended");
+    check(w.drawn(1000) && !w.drawn(1016), ".50 watch: the first draw starts it, the next does not");
+    check(w.due(1016), ".50 watch: a read is due at once");
+    w.read(1016, false);
+    check(!w.due(1400) && w.due(1516), ".50 watch: then every 0.5 s");
+    w.read(1516, true);
+    w.read(2016, true);
+    check(w.ended(2100) == WatchEnd::None, ".50 watch: two empty reads: not yet");
+    w.read(2516, true);
+    check(w.ended(2600) == WatchEnd::Emptied, ".50 watch: three empty reads in a row: emptied");
+    w.drawn(2700);
+    check(w.emptyRun == 0 && w.ended(2700) == WatchEnd::None, ".50 watch: a fresh draw clears the empty run");
+    w.read(3000, true);
+    w.read(3500, false);
+    w.read(4000, true);
+    w.read(4500, true);
+    check(w.ended(4600) == WatchEnd::None, ".50 watch: a read with a picture breaks the run");
+    check(w.ended(2700 + kWatchMs - 1) == WatchEnd::None && w.ended(2700 + kWatchMs) == WatchEnd::Timeout,
+          ".50 watch: 30 s after the last draw: timeout");
+    w.stop();
+    check(!w.active && !w.due(99999), ".50 watch: stopped");
+    Watch cap;
+    cap.drawn(0);
+    for (uint32_t i = 0; i < kLinesPerWatch + 5; ++i) cap.admit();
+    check(cap.lines == kLinesPerWatch && cap.unwritten == 5, ".50 watch: 120 lines a watch, the rest counted");
+    cap.stop();
+    cap.drawn(10);
+    check(cap.lines == 0 && cap.unwritten == 0 && cap.start == 10, ".50 watch: a new watch starts its budget afresh");
 
-    Tables t;
-    Combo c;
-    c.indices = 360;
-    c.ps = 0xF2F872B191F656D5ull;
-    c.w[1] = 1730; c.h[1] = 973; c.fmt[1] = 27;
-    bool fresh = false;
-    check(t.noteCombo(c, &fresh) == 0 && fresh, ".49 probe: the first combination is new");
-    check(t.noteCombo(c, &fresh) == 0 && !fresh, ".49 probe: the same again is not");
-    Combo wide = c;
-    wide.indices = 5760;
-    check(t.noteCombo(wide, &fresh) == 1 && fresh, ".49 probe: another index count is another combination");
-    Combo slot0 = c;
-    slot0.w[0] = 16; slot0.h[0] = 16; slot0.fmt[0] = 71;
-    check(t.noteCombo(slot0, &fresh) == 2 && fresh, ".49 probe: another texture in slot 0 is another combination");
-    formatCombo(2, slot0, 250, line, sizeof(line));
-    check(std::strcmp(line, "summary probe: eye draw #2 at +250 ms: vs A888D51024D9798E ps F2F872B191F656D5 n=360 slots [0: 16x16 fmt "
-                            "71, 1: 1730x973 fmt 27, 2: -, 3: -]") == 0,
-          ".49 probe: the combination line");
-    for (int i = 0; i < kMaxCombos + 2; ++i) {
-        Combo k = c;
-        k.indices = 1000 + uint32_t(i);
-        t.noteCombo(k, &fresh);
-    }
-    check(t.comboCount == kMaxCombos && t.combosLost == 5, ".49 probe: past 16 combinations, counted as lost");
-    t.noteVs(0x1012E00B3CB44469ull);
-    t.noteVs(0x1012E00B3CB44469ull);
-    t.noteVs(0x0123456789ABCDEFull);
-    formatWindow(1000, t, line, sizeof(line));
-    check(has(line, "summary probe: window +1000 ms: eye draws [#0=2, #1=1, #2=1, #3=1") && has(line, "lost=5]") &&
-              has(line, "into the panel [gui-text=2, vs 0123456789ABCDEF=1]"),
-          ".49 probe: the window line");
-    t.newWindow();
-    formatWindow(1500, t, line, sizeof(line));
-    check(std::strcmp(line, "summary probe: window +1500 ms: eye draws [] into the panel []") == 0, ".49 probe: an empty window");
-    for (int i = 0; i < kMaxVs + 3; ++i) t.noteVs(uint64_t(i) + 1);
-    check(t.vsCount == kMaxVs && t.vsLost == 5, ".49 probe: past 8 vertex shaders, counted as lost");
-    t.clear();
-    check(t.comboCount == 0 && t.vsCount == 0, ".49 probe: clear");
-    formatStart(1730, 973, 27, line, sizeof(line));
-    check(has(line, "summary probe: the trader sheet is shown (1730x973, format 27)"), ".49 probe: the start line");
-    formatEnd(28000, 3, 1, line, sizeof(line));
-    check(std::strcmp(line, "summary probe: the trader sheet stopped after 28000 ms; lines unwritten 3, copies unread 1") == 0,
-          ".49 probe: the end line");
-    check(kPeriodMs == 500 && kLinesPerShow == 240 && kRing == 3, ".49 probe: 0.5 s, 240 lines a show, 3 copies");
+    char line[600];
+    formatWatchStart(1188, 703, 27, line, sizeof(line));
+    check(has(line, "info watch: the info panel 1188x703 (format 27) is drawn; after its last draw"), ".50 watch: the start line");
+    formatWatchRead(1500, 2100, false, a, line, sizeof(line));
+    check(std::strcmp(line, "info watch: +1500 ms after its last draw (+2100 ms of the watch): opaque 25.0% colour-no-alpha 25.0% "
+                            "empty 50.0% mean-alpha 67.8, sheet not shown") == 0,
+          ".50 watch: the read line");
+    formatWatchRead(0, 0, true, PixelStats{}, line, sizeof(line));
+    check(has(line, "opaque 0.0%") && has(line, "sheet shown"), ".50 watch: nothing sampled: zeros; the sheet shown");
+    formatWatchEnd(WatchEnd::Emptied, 4000, 0, 1, line, sizeof(line));
+    check(std::strcmp(line, "info watch: ended (the panel is empty: 3 reads in a row), 4000 ms after the panel's last draw; lines "
+                            "unwritten 0, copies unread 1") == 0,
+          ".50 watch: the end line, emptied");
+    formatWatchEnd(WatchEnd::Timeout, 30000, 2, 0, line, sizeof(line));
+    check(has(line, "ended (30 s without a draw)"), ".50 watch: the end line, timeout");
+    formatWatchEnd(WatchEnd::None, 10, 0, 0, line, sizeof(line));
+    check(has(line, "ended (left the feet)"), ".50 watch: the end line, left the feet");
+    check(kPeriodMs == 500 && kWatchMs == 30000 && kEmptyToStop == 3 && kRing == 3, ".50 watch: 0.5 s, 30 s, 3 empty, 3 copies");
 }
 }  // namespace
 
@@ -1030,7 +1023,7 @@ int main(int argc, char** argv) {
     partKeys();
     partLatch();
     partLines();
-    partSummaryProbe();  // .49, TEMPORARY
+    partInfoWatch();  // .50, TEMPORARY
     std::printf("%s: on_foot_hud_test, %d checks, %d failed\n", g_failures ? "FAIL" : "PASS", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

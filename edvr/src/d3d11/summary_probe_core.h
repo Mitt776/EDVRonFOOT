@@ -1,13 +1,12 @@
 #pragma once
-// The Summary probe, the pure half (EDVRonFOOT, .49, openspec change on-foot-summary-menu, design decision 5; the project's
-// docs\research\native-vr-on-foot.md, "Полёт .48"). TEMPORARY: removed whole after its flight.
+// The info-panel watch, the pure half (EDVRonFOOT, .50, openspec change on-foot-summary-menu, design decision 6; the project's
+// docs\research\native-vr-on-foot.md, "Перепись в кинотеатре"). TEMPORARY: removed whole after its flight.
 //
-// On .48 the TAB wheel's Summary (1730x973) came on the trader's 360 mesh the whole time and the trader's sheet was shown the whole
-// 28 s, yet Dima saw the menu only a couple of seconds. Which of three: C1 the panel empties (the copy has nothing in it), C2 its
-// content has no alpha (colour without alpha, dark), C3 the content comes another way (another texture of the same draw, another
-// eye draw, or draws into the panel by shaders that are not the interface's). While the trader's sheet is shown: every 0.5 s the
-// copy the sheet reads is read back and counted (pixelStats), every eye draw of the eye-panel shader is a combination (indices, ps,
-// slots 0-3), every draw into the trader's panel is counted by its vertex shader. Plain C++ the rig (tools\on_foot_hud_test) drives.
+// The TAB wheel's Summary is the info panel (1188x703 at HMD quality 0.75). The game draws it in its first frames and then only lays
+// the finished panel into the picture -- in stereo it skips that, so EDVR's hold expires after 30 frames and the sheet goes. Does the
+// panel keep its picture while the Summary is open, and is it cleared when the Summary closes? After the panel's last fresh draw
+// the glue keeps a reference to its texture and every 0.5 s reads it back: up to 30 s, or until three reads in a row are empty.
+// Plain C++ the rig (tools\on_foot_hud_test) drives.
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -15,16 +14,20 @@
 namespace edvr {
 namespace smp {
 
-constexpr uint64_t kPeriodMs = 500;       // one copy line and one window line each
-constexpr uint32_t kLinesPerShow = 240;   // past it, counted, not written
-constexpr uint32_t kSampleStep = 4;       // every 4th pixel each way
-constexpr uint32_t kRing = 3;             // staging copies, read without waiting
+constexpr uint64_t kPeriodMs = 500;      // one read a period
+constexpr uint64_t kWatchMs = 30000;     // after the last fresh draw
+constexpr uint32_t kEmptyToStop = 3;     // empty reads in a row
+constexpr uint32_t kSampleStep = 4;      // every 4th pixel each way
+constexpr uint32_t kRing = 3;            // staging copies, read without waiting
+constexpr uint32_t kLinesPerWatch = 120; // past it, counted, not written
 
-// The copy, RGBA8 (27/28; 87 BGRA reads the same for the counts), rows `pitch` bytes apart. A pixel is opaque with alpha above 8,
-// colour without alpha with its largest colour above 8 and alpha 8 or less, empty with all four 8 or less.
+// The copy, RGBA8 (27/28), rows `pitch` bytes apart. A pixel is opaque with alpha above 8, colour without alpha with its largest
+// colour above 8 and alpha 8 or less, empty with all four 8 or less.
 struct PixelStats {
     uint32_t sampled = 0, opaque = 0, colourNoAlpha = 0, empty = 0;
-    uint64_t alphaSum = 0, colourSum = 0;  // of the sampled: alpha, and the largest colour
+    uint64_t alphaSum = 0, colourSum = 0;
+    // Empty as the watch reads it: nothing but empty pixels (the game cleared the panel).
+    bool allEmpty() const { return sampled && empty == sampled; }
 };
 inline PixelStats pixelStats(const uint8_t* data, uint32_t pitch, uint32_t w, uint32_t h, uint32_t step = kSampleStep) {
     PixelStats s;
@@ -51,144 +54,74 @@ inline PixelStats pixelStats(const uint8_t* data, uint32_t pitch, uint32_t w, ui
 }
 inline double pct(uint32_t part, uint32_t whole) { return whole ? 100.0 * part / whole : 0.0; }
 
-// One eye draw of the eye-panel shader: its index count, pixel shader and slots 0-3 (0x0 and format 0 for an empty slot or not a
-// 2D texture).
-constexpr int kSlots = 4;
-struct Combo {
-    uint32_t indices = 0;
-    uint64_t ps = 0;
-    uint32_t w[kSlots] = {}, h[kSlots] = {}, fmt[kSlots] = {};
-    bool same(const Combo& o) const {
-        if (indices != o.indices || ps != o.ps) return false;
-        for (int i = 0; i < kSlots; ++i)
-            if (w[i] != o.w[i] || h[i] != o.h[i] || fmt[i] != o.fmt[i]) return false;
+// One watch: started by a fresh draw (and restarted by each one: lastDraw moves), a read due every kPeriodMs, stopped after kWatchMs
+// since the last fresh draw or kEmptyToStop empty reads in a row since it.
+enum class WatchEnd : int { None = 0, Timeout = 1, Emptied = 2 };
+struct Watch {
+    bool active = false;
+    uint64_t start = 0, lastDraw = 0, lastRead = 0;
+    uint32_t emptyRun = 0, lines = 0, unwritten = 0;
+    // A fresh draw of the panel: true when it starts a watch (the start line).
+    bool drawn(uint64_t now) {
+        const bool fresh = !active;
+        if (fresh) {
+            start = now;
+            lastRead = 0;
+            lines = unwritten = 0;
+        }
+        active = true;
+        lastDraw = now;
+        emptyRun = 0;
+        return fresh;
+    }
+    bool due(uint64_t now) const { return active && (!lastRead || now - lastRead >= kPeriodMs); }
+    void read(uint64_t now, bool empty) {
+        lastRead = now;
+        emptyRun = empty ? emptyRun + 1 : 0;
+    }
+    WatchEnd ended(uint64_t now) const {
+        if (!active) return WatchEnd::None;
+        if (emptyRun >= kEmptyToStop) return WatchEnd::Emptied;
+        if (now - lastDraw >= kWatchMs) return WatchEnd::Timeout;
+        return WatchEnd::None;
+    }
+    // A line within the watch's budget; past it counted.
+    bool admit() {
+        if (lines >= kLinesPerWatch) {
+            ++unwritten;
+            return false;
+        }
+        ++lines;
         return true;
     }
+    void stop() { active = false; }
 };
-constexpr int kMaxCombos = 16;
-constexpr int kMaxVs = 8;
-// One show's tables: the combinations met (a 17th counted, not kept) and the window's counts; the vertex shaders drawing into the
-// trader's panel and their counts in the window.
-struct Tables {
-    Combo combos[kMaxCombos];
-    int comboCount = 0;
-    uint32_t comboWindow[kMaxCombos] = {};
-    uint32_t combosLost = 0;
-    uint64_t vs[kMaxVs] = {};
-    uint32_t vsWindow[kMaxVs] = {};
-    int vsCount = 0;
-    uint32_t vsLost = 0;
-    // The combination's index, *fresh true when it is new this show; -1 when the table is full.
-    int noteCombo(const Combo& c, bool* fresh) {
-        if (fresh) *fresh = false;
-        for (int i = 0; i < comboCount; ++i)
-            if (combos[i].same(c)) {
-                ++comboWindow[i];
-                return i;
-            }
-        if (comboCount == kMaxCombos) {
-            ++combosLost;
-            return -1;
-        }
-        combos[comboCount] = c;
-        comboWindow[comboCount] = 1;
-        if (fresh) *fresh = true;
-        return comboCount++;
-    }
-    void noteVs(uint64_t v) {
-        for (int i = 0; i < vsCount; ++i)
-            if (vs[i] == v) {
-                ++vsWindow[i];
-                return;
-            }
-        if (vsCount == kMaxVs) {
-            ++vsLost;
-            return;
-        }
-        vs[vsCount] = v;
-        vsWindow[vsCount++] = 1;
-    }
-    void newWindow() {
-        for (auto& n : comboWindow) n = 0;
-        for (auto& n : vsWindow) n = 0;
-        combosLost = vsLost = 0;
-    }
-    void clear() { *this = Tables{}; }
-};
-
-// The interface's three vertex shaders (on_foot_hud_core.h's kGuiVector/kGuiText/kGuiIcons), named in the window line.
-inline const char* vsName(uint64_t v) {
-    switch (v) {
-        case 0x666EF0C4C616F67Eull: return "gui-vector";
-        case 0x1012E00B3CB44469ull: return "gui-text";
-        case 0xA3E5D3FCBC1165F8ull: return "gui-icons";
-    }
-    return nullptr;
-}
 
 // ---- the lines ----
 
-inline int formatStart(uint32_t w, uint32_t h, uint32_t fmt, char* out, size_t cap) {
+inline int formatWatchStart(uint32_t w, uint32_t h, uint32_t fmt, char* out, size_t cap) {
     return std::snprintf(out, cap,
-                         "summary probe: the trader sheet is shown (%ux%u, format %u): every 0.5 s its copy read back, the eye-panel "
-                         "draws and the draws into its panel counted (temporary, .49)",
+                         "info watch: the info panel %ux%u (format %u) is drawn; after its last draw it is read back every 0.5 s, up to "
+                         "30 s or 3 empty reads (temporary, .50)",
                          w, h, fmt);
 }
 
-inline int formatCopy(uint64_t ms, uint32_t w, uint32_t h, const PixelStats& s, char* out, size_t cap) {
+// `sinceDraw` the ms since the panel's last fresh draw (the read's own moment), `shown` whether the info sheet was shown then.
+inline int formatWatchRead(uint64_t sinceDraw, uint64_t sinceStart, bool shown, const PixelStats& s, char* out, size_t cap) {
     const double meanA = s.sampled ? double(s.alphaSum) / s.sampled : 0.0;
-    const double meanC = s.sampled ? double(s.colourSum) / s.sampled : 0.0;
     return std::snprintf(out, cap,
-                         "summary probe: copy %ux%u +%llu ms: opaque %.1f%% colour-no-alpha %.1f%% empty %.1f%% mean-alpha %.1f "
-                         "mean-colour %.1f (%u sampled)",
-                         w, h, static_cast<unsigned long long>(ms), pct(s.opaque, s.sampled), pct(s.colourNoAlpha, s.sampled),
-                         pct(s.empty, s.sampled), meanA, meanC, s.sampled);
+                         "info watch: +%llu ms after its last draw (+%llu ms of the watch): opaque %.1f%% colour-no-alpha %.1f%% empty "
+                         "%.1f%% mean-alpha %.1f, sheet %s",
+                         static_cast<unsigned long long>(sinceDraw), static_cast<unsigned long long>(sinceStart),
+                         pct(s.opaque, s.sampled), pct(s.colourNoAlpha, s.sampled), pct(s.empty, s.sampled), meanA,
+                         shown ? "shown" : "not shown");
 }
 
-inline int formatCombo(int index, const Combo& c, uint64_t ms, char* out, size_t cap) {
-    int n = std::snprintf(out, cap, "summary probe: eye draw #%d at +%llu ms: vs A888D51024D9798E ps %016llX n=%u slots [", index,
-                          static_cast<unsigned long long>(ms), static_cast<unsigned long long>(c.ps), c.indices);
-    for (int i = 0; i < kSlots && n >= 0 && size_t(n) < cap; ++i) {
-        if (c.w[i])
-            n += std::snprintf(out + n, cap - size_t(n), "%s%d: %ux%u fmt %u", i ? ", " : "", i, c.w[i], c.h[i], c.fmt[i]);
-        else
-            n += std::snprintf(out + n, cap - size_t(n), "%s%d: -", i ? ", " : "", i);
-    }
-    if (n >= 0 && size_t(n) < cap) n += std::snprintf(out + n, cap - size_t(n), "]");
-    return n;
-}
-
-// The window: the eye draws by combination, the draws into the trader's panel by vertex shader; empty fields say none.
-inline int formatWindow(uint64_t ms, const Tables& t, char* out, size_t cap) {
-    int n = std::snprintf(out, cap, "summary probe: window +%llu ms: eye draws [", static_cast<unsigned long long>(ms));
-    bool any = false;
-    for (int i = 0; i < t.comboCount && n >= 0 && size_t(n) < cap; ++i) {
-        if (!t.comboWindow[i]) continue;
-        n += std::snprintf(out + n, cap - size_t(n), "%s#%d=%u", any ? ", " : "", i, t.comboWindow[i]);
-        any = true;
-    }
-    if (t.combosLost && n >= 0 && size_t(n) < cap)
-        n += std::snprintf(out + n, cap - size_t(n), "%slost=%u", any ? ", " : "", t.combosLost);
-    if (n >= 0 && size_t(n) < cap) n += std::snprintf(out + n, cap - size_t(n), "] into the panel [");
-    any = false;
-    for (int i = 0; i < t.vsCount && n >= 0 && size_t(n) < cap; ++i) {
-        if (!t.vsWindow[i]) continue;
-        const char* name = vsName(t.vs[i]);
-        if (name)
-            n += std::snprintf(out + n, cap - size_t(n), "%s%s=%u", any ? ", " : "", name, t.vsWindow[i]);
-        else
-            n += std::snprintf(out + n, cap - size_t(n), "%svs %016llX=%u", any ? ", " : "", static_cast<unsigned long long>(t.vs[i]),
-                               t.vsWindow[i]);
-        any = true;
-    }
-    if (t.vsLost && n >= 0 && size_t(n) < cap) n += std::snprintf(out + n, cap - size_t(n), "%slost=%u", any ? ", " : "", t.vsLost);
-    if (n >= 0 && size_t(n) < cap) n += std::snprintf(out + n, cap - size_t(n), "]");
-    return n;
-}
-
-inline int formatEnd(uint64_t ms, uint32_t unwritten, uint32_t unread, char* out, size_t cap) {
-    return std::snprintf(out, cap, "summary probe: the trader sheet stopped after %llu ms; lines unwritten %u, copies unread %u",
-                         static_cast<unsigned long long>(ms), unwritten, unread);
+inline int formatWatchEnd(WatchEnd why, uint64_t sinceDraw, uint32_t unwritten, uint32_t unread, char* out, size_t cap) {
+    return std::snprintf(out, cap, "info watch: ended %s, %llu ms after the panel's last draw; lines unwritten %u, copies unread %u",
+                         why == WatchEnd::Emptied ? "(the panel is empty: 3 reads in a row)"
+                                                  : why == WatchEnd::Timeout ? "(30 s without a draw)" : "(left the feet)",
+                         static_cast<unsigned long long>(sinceDraw), unwritten, unread);
 }
 
 }  // namespace smp
