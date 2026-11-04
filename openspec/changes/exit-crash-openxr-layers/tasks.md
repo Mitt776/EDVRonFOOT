@@ -28,7 +28,7 @@
 
 ## 3. Подключение
 
-- [ ] 3.1 `edvr/src/openxr/native_runtime_host.h`, `open()`: сразу после удачного `api.createInstance` найти и закрепить
+- [x] 3.1 `edvr/src/openxr/native_runtime_host.h`, `open()`: сразу после удачного `api.createInstance` найти и закрепить
   слои, записать строку `openxr_layers,…` через `nativeTracePrintf`. Неудача не меняет исход `open()`. Порядок закрытия
   (`host_instance_destroy`, `host_loader_free`) не трогать. Перечитать по `AGENTS.md`. Проверка: полная сборка 4.2,
   все гейты OpenXR (`openxr_*_test`) проходят.
@@ -45,10 +45,10 @@
     (`openxr_layers`).
 
   Проверка: `py -3.12 edvr\tools\check_status_blocks.py` проходит.
-- [ ] 4.2 Полная сборка по `edvr/AGENTS.md`: `build.bat` по абсолютному пути, `--jobs 8`. Проверка: «all gates passed»,
+- [x] 4.2 Полная сборка по `edvr/AGENTS.md`: `build.bat` по абсолютному пути, `--jobs 8`. Проверка: «all gates passed»,
   `config contract ok`, число ключей то же, что на `.51`. Дерево чистое, коммит через `git commit -F`, тег
   `v0.19.1-edvronfoot.52`; `build.bat --dll-only` проходит.
-- [ ] 4.3 Установка при закрытой игре: `python tools\install_edvr.py --target steam --keep-backups 1000`, сначала
+- [x] 4.3 Установка при закрытой игре: `python tools\install_edvr.py --target steam --keep-backups 1000`, сначала
   `--dry-run`. Живой `edvr.ini` не трогать. Проверка: `--verify-only` ok, хеш `edvr.ini` до и после один и тот же.
 
 ## 5. Полёт и итог
