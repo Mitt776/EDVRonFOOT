@@ -7,6 +7,8 @@
 // Part G: the cinema switch's reader found by its code on a synthetic image (one match, many, outside, not writable, other registers),
 // the find lines, and the glue on a synthetic PE in memory for both switches (unreadable headers fault into a not-found).
 // Part H: the game HUD switch -- its reader on build 334473's own bytes, the search, its step (only -1 -> 1 and back) and its lines.
+// Part I: the main menu after gameplay (nvf::mainMenuStep) -- both switches back to the game in the menu and ours again at LoadGame,
+// one line each and no key lines, a value not ours left alone, nothing at all with the key off.
 #include "../../src/d3d11/native_vr_on_foot.h"
 #include "../../src/d3d11/native_vr_on_foot_core.h"
 #include <windows.h>
@@ -19,6 +21,7 @@ namespace edvr {
 void breadcrumb(const char*) {}  // production guard.cpp's crash-channel dependency (proxy.cpp), as the other rigs stub it
 bool journalOnFootKnown() { return false; }  // journal_watch.cpp's, for the frame boundary the rig never calls
 bool journalOnFoot() { return false; }
+bool journalMainMenu() { return false; }
 }
 
 using namespace edvr;
@@ -518,6 +521,99 @@ void partH() {
         check(std::strstr(line, "game HUD cannot work (the HUD switch holds 7, not the game's -1)") != nullptr, "hud text: the refusal says the value");
     }
 }
+
+// ---- Part I: the main menu after gameplay ------------------------------------------------------------------------------------------
+// One frame as nativeVrOnFootFrameBoundary composes it: nvf::mainMenuStep, its line, then both switches' REAL glue with `held` and
+// `menu`, on a byte and an int of the rig's own.
+struct MenuRig {
+    nvf::MainMenuState state;
+    uint8_t cinema = 1;
+    alignas(4) int32_t hud = -1;
+    void frame(bool key, bool mainMenu) {
+        const nvf::MainMenuStep m = nvf::mainMenuStep(state, key, mainMenu);
+        char line[200];
+        if (nvf::formatMainMenu(m.kind, line, sizeof(line)) > 0) sink(nullptr, line);
+        nativeVrCinemaSwitchStep(&cinema, 0x5E85B8Au, m.held, 0, &sink, nullptr, m.menu);
+        nativeVrHudSwitchStep(&hud, 0x5E85B94u, m.held, 0, &sink, nullptr, m.menu);
+    }
+};
+size_t keyLines() { return countLines("head camera on:") + countLines("head camera off:") + countLines("game HUD on:") + countLines("game HUD off:"); }
+
+void partI() {
+    // The pure step.
+    {
+        nvf::MainMenuState s;
+        nvf::MainMenuStep m = nvf::mainMenuStep(s, true, false);
+        check(m.held && !m.menu && m.kind == nvf::kMenuNone, "menu step: key on, no menu: held, nothing said");
+        m = nvf::mainMenuStep(s, true, true);
+        check(!m.held && m.menu && m.kind == nvf::kMenuEnter, "menu step: the menu begins: not held, quiet, the enter line");
+        m = nvf::mainMenuStep(s, true, true);
+        check(!m.held && m.menu && m.kind == nvf::kMenuNone, "menu step: in the menu: not held, said once");
+        m = nvf::mainMenuStep(s, true, false);
+        check(m.held && m.menu && m.kind == nvf::kMenuLeave, "menu step: LoadGame: held, quiet, the leave line");
+        m = nvf::mainMenuStep(s, true, false);
+        check(m.held && !m.menu && m.kind == nvf::kMenuNone, "menu step: after it, as before");
+        nvf::MainMenuState off;
+        m = nvf::mainMenuStep(off, false, true);
+        check(!m.held && !m.menu && m.kind == nvf::kMenuNone, "menu step: key off: the menu says nothing");
+        m = nvf::mainMenuStep(off, false, false);
+        check(!m.held && !m.menu && m.kind == nvf::kMenuNone, "menu step: key off, LoadGame: nothing");
+        nvf::MainMenuState f8;
+        nvf::mainMenuStep(f8, true, true);
+        m = nvf::mainMenuStep(f8, false, true);
+        check(!m.held && !m.menu && m.kind == nvf::kMenuNone, "menu step: key off in the menu is the key's line, not LoadGame's");
+        char line[200];
+        nvf::formatMainMenu(nvf::kMenuEnter, line, sizeof(line));
+        check(std::strcmp(line, "native-vr-on-foot: main menu (journal Music: MainMenu): both switches back to the game until the next "
+                                "LoadGame") == 0,
+              "text: the main menu's line");
+        nvf::formatMainMenu(nvf::kMenuLeave, line, sizeof(line));
+        check(std::strcmp(line, "native-vr-on-foot: LoadGame (journal): both switches ours again") == 0, "text: the LoadGame line");
+        check(nvf::formatMainMenu(nvf::kMenuNone, line, sizeof(line)) == 0, "text: no change, no line");
+    }
+
+    // The glue: key on, play, the menu, LoadGame.
+    MenuRig r;
+    g_lines.clear();
+    r.frame(true, false);
+    check(r.cinema == 0 && r.hud == 1 && keyLines() == 2, "glue menu: key on in play: both ours (0 and 1), their on lines");
+    g_lines.clear();
+    r.frame(true, true);
+    check(r.cinema == 1 && r.hud == -1, "glue menu: the main menu: both the game's again (1 and -1)");
+    check(countLines("main menu (journal Music: MainMenu)") == 1 && keyLines() == 0 && g_lines.size() == 1,
+          "glue menu: ...one main-menu line, no head camera off / game HUD off lines");
+    for (int i = 0; i < 10; ++i) r.frame(true, true);
+    check(r.cinema == 1 && r.hud == -1 && g_lines.size() == 1, "glue menu: in the menu, nothing written, nothing more said");
+    g_lines.clear();
+    r.frame(true, false);
+    check(r.cinema == 0 && r.hud == 1, "glue menu: LoadGame: both ours again (0 and 1)");
+    check(countLines("LoadGame (journal): both switches ours again") == 1 && keyLines() == 0 && g_lines.size() == 1,
+          "glue menu: ...one LoadGame line, no on lines");
+    g_lines.clear();
+    r.frame(true, false);
+    check(r.cinema == 0 && r.hud == 1 && g_lines.empty(), "glue menu: next frame, nothing more");
+
+    // A value that is not ours when the menu begins: left as it is, said, as with the key off.
+    r.cinema = 7;
+    g_lines.clear();
+    r.frame(true, true);
+    check(r.cinema == 7 && r.hud == -1 && countLines("head camera off: the cinema-on-foot switch holds 7, not our 0; left as it is") == 1,
+          "glue menu: a cinema value not ours is left alone and said; the HUD still goes back");
+    r.cinema = 1;
+    r.frame(true, false);  // LoadGame
+    r.frame(false, false);  // key off: both back, as the key line says
+    check(r.cinema == 1 && r.hud == -1, "glue menu: key off afterwards: both the game's");
+
+    // Key off: the menu and LoadGame write nothing and say nothing.
+    MenuRig k;
+    k.state = nvf::MainMenuState{};
+    g_lines.clear();
+    k.frame(false, false);
+    k.frame(false, true);
+    k.frame(false, true);
+    k.frame(false, false);
+    check(k.cinema == 1 && k.hud == -1 && g_lines.empty(), "glue menu: key off: the menu and LoadGame touch nothing, say nothing");
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -528,6 +624,7 @@ int main(int argc, char** argv) {
     partF();
     partG();
     partH();
+    partI();
     std::printf("%s: native_vr_on_foot_test, %d checks, %d failed\n", g_failures ? "FAIL" : "PASS", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

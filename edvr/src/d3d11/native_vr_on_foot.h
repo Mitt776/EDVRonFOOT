@@ -15,7 +15,8 @@ using NativeVrOnFootSink = void (*)(void* ctx, const char* line);
 
 // Once a frame at the Present boundary (device_hook.cpp's tkNativeVrOnFoot). Reads experimental.native_vr_on_foot (on when
 // missing); the first time it is on, finds both switches; while it is on, the cinema-on-foot switch is off and the game HUD switch
-// is on, and when it goes off both go back to the game's values. Render thread only.
+// is on, and when it goes off both go back to the game's values. The main menu after gameplay (journalMainMenu) is the game's: there
+// both go back as with the key off, with one line, and the next LoadGame takes them again, with one line. Render thread only.
 void nativeVrOnFootFrameBoundary();
 
 // The pieces the frame boundary is made of, exposed for the rig.
@@ -23,14 +24,17 @@ void nativeVrOnFootFrameBoundary();
 // The head camera. Find: the switch's RVA in the image at `base`, by its reader's code (nvf::findCinemaSwitch over the image's own
 // section table), with one line saying where or why not; 0 if not found. Once. Step (nvf::cinemaSwitchStep): once a frame, the
 // switch at `address` (null: not found; `rva` names it in the lines) is turned 1 -> 0 while the key is on, and our 0 back to 1 when
-// it goes off, with a line on each change and when the journal's on-foot answer changes while the switch is ours. Frame thread.
+// it goes off, with a line on each change and when the journal's on-foot answer changes while the switch is ours. `menu`: this
+// step is the main menu's hand-over or take-back, whose own line stands for both switches (nvf::mainMenuStep). Frame thread.
 uint32_t nativeVrCinemaSwitchFind(uintptr_t base, NativeVrOnFootSink sink, void* ctx);
-void nativeVrCinemaSwitchStep(uint8_t* address, uint32_t rva, bool key, int onFoot, NativeVrOnFootSink sink, void* ctx);
+void nativeVrCinemaSwitchStep(uint8_t* address, uint32_t rva, bool key, int onFoot, NativeVrOnFootSink sink, void* ctx,
+                              bool menu = false);
 
 // The game's own on-foot HUD in headset stereo. Find: the HUD switch's RVA (an int; -1 auto) by its reader's code
 // (nvf::findHudSwitch), one line, 0 if not found (or not 4-aligned). Once. Step (nvf::hudSwitchStep): once a frame, the int at
 // `address` is turned -1 -> 1 while `key` is on, and our 1 back to -1 when it goes off, with a line on each change. Frame thread.
 uint32_t nativeVrHudSwitchFind(uintptr_t base, NativeVrOnFootSink sink, void* ctx);
-void nativeVrHudSwitchStep(int32_t* address, uint32_t rva, bool key, int onFoot, NativeVrOnFootSink sink, void* ctx);
+void nativeVrHudSwitchStep(int32_t* address, uint32_t rva, bool key, int onFoot, NativeVrOnFootSink sink, void* ctx,
+                           bool menu = false);
 
 }  // namespace edvr

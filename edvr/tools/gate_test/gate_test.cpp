@@ -1267,6 +1267,43 @@ int journalWorkerChecks() {
         appendTo(journal, ev("Embark"));
         verify(tickUntil([] { return journalEmbarks() > 0; }, 10000), "Embark");
 
+        // The main menu after gameplay (journalMainMenu): the Music event's track MainMenu sets it, any other track does not,
+        // LoadGame clears it. A read is waited on through a Disembark appended after it: the count changing means the worker
+        // has scanned everything before it.
+        auto music = [](const char* track) {
+            return std::string("{ \"timestamp\":\"2026-11-05T21:50:27Z\", \"event\":\"Music\", \"MusicTrack\":\"") + track +
+                   "\" }\n";
+        };
+        auto readThrough = [&](const std::string& text) {
+            const uint32_t before = journalDisembarks();
+            appendTo(journal, text + ev("Disembark"));
+            return tickUntil([before] { return journalDisembarks() != before; }, 10000);
+        };
+        verify(!journalMainMenu(), "no main menu before a Music: MainMenu");
+        verify(readThrough(music("Exploration")) && !journalMainMenu(), "Music with another track is not the main menu");
+        appendTo(journal, music("MainMenu"));
+        verify(tickUntil([] { return journalMainMenu(); }, 10000), "Music with the track MainMenu is the main menu");
+        appendTo(journal, ev("LoadGame"));
+        verify(tickUntil([] { return !journalMainMenu(); }, 10000), "the next LoadGame ends the main menu");
+        verify(journalGameplay(), "...and gameplay goes on");
+        verify(readThrough(music("MainMenu") + ev("LoadGame")) && !journalMainMenu(),
+               "MainMenu and LoadGame in one read end on the later: not the main menu");
+        verify(readThrough(ev("LoadGame") + music("MainMenu")) && journalMainMenu(),
+               "LoadGame and MainMenu in one read end on the later: the main menu");
+        appendTo(journal, ev("LoadGame"));
+        verify(tickUntil([] { return !journalMainMenu(); }, 10000), "LoadGame again ends it");
+        {
+            // A read boundary through the token: the carry stitches it, as it does a name.
+            const std::string line = music("MainMenu");
+            const size_t cut = line.find("Menu\" }");
+            appendTo(journal, line.substr(0, cut));
+            tickUntil([] { return false; }, 300);
+            verify(!journalMainMenu(), "half of the MainMenu track is not the main menu");
+            appendTo(journal, line.substr(cut));
+            verify(tickUntil([] { return journalMainMenu(); }, 10000),
+                   "a MainMenu track cut between two reads is found whole");
+        }
+
         // 0x40000010: the FSD-jump bit and the supercruise bit; Flags2 1: on foot.
         writeWhole(statusFile, statusText(0x40000010u, 1, 9));
         verify(tickUntil([] { return journalFssFocus(); }, 10000),
@@ -1318,8 +1355,10 @@ int journalWorkerChecks() {
                "a Status.json that goes missing drops what was known, after three misses");
         verify(!journalSeatedKnown(), "...the seat included");
 
+        verify(journalMainMenu(), "the main menu holds through Status.json changes");
         appendTo(journal, ev("Shutdown"));
         verify(tickUntil([] { return !journalGameplay(); }, 10000), "a Shutdown event ends gameplay");
+        verify(!journalMainMenu(), "...and the main menu with it");
         stopWorker();
     }
 

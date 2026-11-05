@@ -282,8 +282,11 @@ inline bool switchAgainSaid(uint32_t again) {
     while (again >= 10 && again % 10 == 0) again /= 10;
     return again == 1;
 }
-// `rva` is where the switch was found (findCinemaSwitch).
-inline int formatSwitch(const SwitchStep& step, const SwitchState& s, int value, int onFoot, uint32_t rva, char* out, size_t cap) {
+// `rva` is where the switch was found (findCinemaSwitch). `menu`: the step is the main menu's hand-over or take-back
+// (mainMenuStep), whose one line says it for both switches, so kSwitchSet and kSwitchRestored say nothing here.
+inline int formatSwitch(const SwitchStep& step, const SwitchState& s, int value, int onFoot, uint32_t rva, char* out, size_t cap,
+                        bool menu = false) {
+    if (menu && (step.kind == kSwitchSet || step.kind == kSwitchRestored)) return 0;
     switch (step.kind) {
         case kSwitchSet:
             return std::snprintf(out, cap,
@@ -325,7 +328,8 @@ inline int formatHeadCameraJournal(int onFoot, char* out, size_t cap) {
 
 // The game HUD switch's lines (hudSwitchStep); `rva` is where it was found, `value` what it held when read.
 inline int formatHudSwitch(const ValueStep& step, const SwitchState& s, bool readOk, int32_t value, int onFoot, uint32_t rva, char* out,
-                           size_t cap) {
+                           size_t cap, bool menu = false) {
+    if (menu && (step.kind == kSwitchSet || step.kind == kSwitchRestored)) return 0;
     switch (step.kind) {
         case kSwitchSet:
             return std::snprintf(out, cap,
@@ -350,6 +354,46 @@ inline int formatHudSwitch(const ValueStep& step, const SwitchState& s, bool rea
                                  value);
         case kSwitchGameOff:
             return std::snprintf(out, cap, "native-vr-on-foot: game HUD: the HUD switch is already 1, the game's own; nothing written");
+        default:
+            return 0;
+    }
+}
+
+// THE MAIN MENU AFTER GAMEPLAY (journalMainMenu). Leaving to the menu on foot, the game is still in its own on-foot state, and
+// with both switches held it places the menu where the headset cannot see it (05.11, .52); handing both back, as the key going off
+// does, shows it at once. So while the key is on and the journal says main menu, the switches step as with the key off, and the
+// next LoadGame takes them back. `in` is "key on and main menu"; a change of it because the key changed is the key's own line.
+struct MainMenuState {
+    bool in = false;
+};
+enum : uint8_t {
+    kMenuNone = 0,
+    kMenuEnter = 1,  // key on, the journal's main menu began: both switches back to the game
+    kMenuLeave = 2,  // key on, LoadGame ended it: both ours again
+};
+struct MainMenuStep {
+    bool held = false;   // the key as the switch steps see it: on, and not the main menu
+    bool menu = false;   // the switch steps' lines for a hand-over or take-back stay quiet (formatSwitch / formatHudSwitch)
+    uint8_t kind = kMenuNone;
+};
+inline MainMenuStep mainMenuStep(MainMenuState& s, bool key, bool mainMenu) {
+    MainMenuStep r;
+    const bool now = key && mainMenu;
+    if (now && !s.in) r.kind = kMenuEnter;
+    else if (!now && s.in && key) r.kind = kMenuLeave;
+    r.held = key && !mainMenu;
+    r.menu = now || r.kind == kMenuLeave;
+    s.in = now;
+    return r;
+}
+inline int formatMainMenu(uint8_t kind, char* out, size_t cap) {
+    switch (kind) {
+        case kMenuEnter:
+            return std::snprintf(out, cap,
+                                 "native-vr-on-foot: main menu (journal Music: MainMenu): both switches back to the game until the next "
+                                 "LoadGame");
+        case kMenuLeave:
+            return std::snprintf(out, cap, "native-vr-on-foot: LoadGame (journal): both switches ours again");
         default:
             return 0;
     }

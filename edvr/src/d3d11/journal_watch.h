@@ -9,7 +9,9 @@
 // at which EDVR re-anchors what it knows about an on-foot session).
 //
 // READ ONLY, names only. The tail is polled twice a second, and the only
-// thing parsed out of it is which event happened; no payload is kept. If the
+// thing parsed out of it is which event happened; no payload is kept, with one
+// exception: the Music event's track MainMenu, compared whole and kept as a
+// flag (journalMainMenu). If the
 // folder cannot be found or the reads keep failing, this says so once and
 // stays off -- every consumer keeps its heuristic fallback, so a missing
 // journal returns EDVR to exactly yesterday's behaviour.
@@ -113,6 +115,14 @@ bool journalSupercruise();
 // live journal)? Menu time answers false, which is what gates the hotkeys:
 // a next-view press in a menu is somebody navigating a menu.
 bool journalGameplay();
+
+// The main menu after gameplay: the journal's Music event with the track
+// MainMenu (written the moment the commander leaves to the menu), until the
+// next LoadGame or Shutdown. False at the first menu after launch (no such
+// event), in flat, and when the watcher is off. The one value read from the
+// journal beyond event names; kept as this flag only. native_vr_on_foot.cpp
+// hands its two switches back to the game while it is true.
+bool journalMainMenu();
 
 // How many times the commander has disembarked this process. A change is the
 // authoritative new-on-foot-session boundary.

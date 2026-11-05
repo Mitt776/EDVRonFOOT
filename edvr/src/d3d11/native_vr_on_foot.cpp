@@ -104,7 +104,7 @@ uint32_t nativeVrCinemaSwitchFind(uintptr_t base, NativeVrOnFootSink sink, void*
     return found.result == nvf::kFindFound ? found.byteRva : 0;
 }
 
-void nativeVrCinemaSwitchStep(uint8_t* address, uint32_t rva, bool key, int onFoot, NativeVrOnFootSink sink, void* ctx) {
+void nativeVrCinemaSwitchStep(uint8_t* address, uint32_t rva, bool key, int onFoot, NativeVrOnFootSink sink, void* ctx, bool menu) {
     static nvf::SwitchState state;
     static bool saidNoAddress = false;
     static int lastOnFoot = -1;
@@ -125,7 +125,7 @@ void nativeVrCinemaSwitchStep(uint8_t* address, uint32_t rva, bool key, int onFo
         return;
     }
     if (step.kind != nvf::kSwitchAgain || nvf::switchAgainSaid(state.again)) {
-        if (nvf::formatSwitch(step, state, value, onFoot, rva, line, sizeof(line)) > 0) sink(ctx, line);
+        if (nvf::formatSwitch(step, state, value, onFoot, rva, line, sizeof(line), menu) > 0) sink(ctx, line);
     }
     if (state.ours && onFoot >= 0 && onFoot != lastOnFoot && lastOnFoot >= 0) {
         nvf::formatHeadCameraJournal(onFoot, line, sizeof(line));
@@ -154,7 +154,7 @@ uint32_t nativeVrHudSwitchFind(uintptr_t base, NativeVrOnFootSink sink, void* ct
     return found.byteRva;
 }
 
-void nativeVrHudSwitchStep(int32_t* address, uint32_t rva, bool key, int onFoot, NativeVrOnFootSink sink, void* ctx) {
+void nativeVrHudSwitchStep(int32_t* address, uint32_t rva, bool key, int onFoot, NativeVrOnFootSink sink, void* ctx, bool menu) {
     static nvf::SwitchState state;
     static bool saidNoAddress = false;
     char line[400];
@@ -175,7 +175,7 @@ void nativeVrHudSwitchStep(int32_t* address, uint32_t rva, bool key, int onFoot,
         return;
     }
     if (step.kind != nvf::kSwitchAgain || nvf::switchAgainSaid(state.again)) {
-        if (nvf::formatHudSwitch(step, state, readOk, value, onFoot, rva, line, sizeof(line)) > 0) sink(ctx, line);
+        if (nvf::formatHudSwitch(step, state, readOk, value, onFoot, rva, line, sizeof(line), menu) > 0) sink(ctx, line);
     }
 }
 
@@ -206,11 +206,18 @@ void nativeVrOnFootFrameBoundary() {
         hudRva = nativeVrHudSwitchFind(reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)), &logSink, nullptr);
     }
     if (!tried) return;
+    // The main menu after gameplay is the game's (nvf::mainMenuStep): both switches step as with the key off until the next LoadGame.
+    static nvf::MainMenuState menuState;
+    const nvf::MainMenuStep menu = nvf::mainMenuStep(menuState, onFootKey, journalMainMenu());
+    if (menu.kind != nvf::kMenuNone) {
+        char line[200];
+        if (nvf::formatMainMenu(menu.kind, line, sizeof(line)) > 0) Log::get().note("%s", line);
+    }
     const int onFoot = journalOnFootKnown() ? (journalOnFoot() ? 1 : 0) : -1;
     nativeVrCinemaSwitchStep(switchRva ? reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr)) + switchRva : nullptr, switchRva,
-                             onFootKey, onFoot, &logSink, nullptr);
+                             menu.held, onFoot, &logSink, nullptr, menu.menu);
     nativeVrHudSwitchStep(hudRva ? reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr)) + hudRva) : nullptr,
-                          hudRva, onFootKey, onFoot, &logSink, nullptr);
+                          hudRva, menu.held, onFoot, &logSink, nullptr, menu.menu);
 }
 
 }  // namespace edvr

@@ -94,6 +94,11 @@ HUD игры: с этим же ключом EDVR ставит свой пеши�
 native_vr_on_foot = 0
 ```
 
+Главное меню (с `.53`): когда ты выходишь из игры в главное меню, EDVR на это время отдаёт игре оба переключателя
+(кинотеатр и HUD), как будто ключ выключен, — иначе после выхода с ног меню в шлеме не видно. На следующей загрузке
+EDVR забирает их снова. Сам ключ при этом не меняется. Узнаёт EDVR это по журналу игры (событие `Music` с треком
+`MainMenu`). Первое меню после запуска игры не трогается — там меню и так видно.
+
 Ключ читается на лету; менять лучше в корабле. Если на ногах что-то не так:
 - вернуться в корабль: там всё как обычно;
 - или поставить `native_vr_on_foot = 0` и сохранить файл: EDVR сразу вернёт игре её переключатель, и на ногах снова
@@ -112,6 +117,9 @@ native_vr_on_foot = 0
 - `native-vr-on-foot: head camera: the game put its cinema-on-foot switch back to 1; 0 again (N time(s))` — игра сама
   вернула кинотеатр, EDVR снова его выключил. Пишется на 1-м, 10-м, 100-м… разе.
 - `native-vr-on-foot: head camera off: the cinema-on-foot switch is the game's 1 again; ...` — ключ выключен.
+- `native-vr-on-foot: main menu (journal Music: MainMenu): both switches back to the game until the next LoadGame` —
+  ты вышел в главное меню, оба переключателя отданы игре. `native-vr-on-foot: LoadGame (journal): both switches ours
+  again` — новая загрузка, переключатели снова у EDVR. Строк `head camera off` / `game HUD off` при этом нет.
 - `native-vr-on-foot: head camera cannot work (...)` — переключатель не тронут (не найден или в нём неожиданное
   значение); игра работает с обычным кинотеатром.
 - `native-vr-on-foot: game HUD switch found at EliteDangerous64.exe+0x5E85B94 (read at +0x288A055, ...)` — число HUD

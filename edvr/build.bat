@@ -3061,7 +3061,8 @@ REM the game's data. Part F: the cinema-on-foot switch's step (only 1 -> 0 with 
 REM other value, repeats said at 1, 10, 100, ...), its lines and the REAL glue on a byte of the rig's own. Part G: both readers found
 REM by their code on a synthetic image and a synthetic PE (one match, many, outside, not writable, other registers, unreadable
 REM headers), the find lines, and the HUD switch's glue. Part H: the game HUD switch's pattern on build 334473's own bytes, its step
-REM (only -1 -> 1 and back) and its lines.
+REM (only -1 -> 1 and back) and its lines. Part I: the main menu after gameplay (journalMainMenu): both switches back to the game
+REM in the menu, ours again at LoadGame, one line each, a value not ours left alone, nothing with the key off.
 if not exist "%OBJ%\nativevronfoot" mkdir "%OBJ%\nativevronfoot"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^

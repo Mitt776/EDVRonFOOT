@@ -83,6 +83,11 @@ struct Published {
     // the callers' cue to fall back to heuristics.
     bool     active = true;
     bool     gameplay = false;
+    // The main menu after gameplay: the journal's Music event with the track
+    // MainMenu, written the moment the commander leaves to the menu. Cleared by
+    // the next LoadGame and by Shutdown. The first menu after launch has no such
+    // event, so this stays false there. Kept as this flag, never as text.
+    bool     mainMenu = false;
     uint32_t disembarks = 0;
     uint32_t embarks = 0;
     // When a jump tunnel MAY be on screen: armed at StartJump, cleared by
@@ -127,6 +132,7 @@ struct Published {
 struct Visible {
     std::atomic<bool>     active{false};
     std::atomic<bool>     gameplay{false};
+    std::atomic<bool>     mainMenu{false};
     std::atomic<uint32_t> disembarks{0};
     std::atomic<uint32_t> embarks{0};
     std::atomic<uint64_t> jumpArmedMs{0};
@@ -153,6 +159,7 @@ T peek(const std::atomic<T>& a) {
 void applyPublished(const Published& p) {
     constexpr std::memory_order kRelaxed = std::memory_order_relaxed;
     g_v.gameplay.store(p.gameplay, kRelaxed);
+    g_v.mainMenu.store(p.mainMenu, kRelaxed);
     g_v.disembarks.store(p.disembarks, kRelaxed);
     g_v.embarks.store(p.embarks, kRelaxed);
     g_v.jumpArmedMs.store(p.jumpArmedMs, kRelaxed);
@@ -327,8 +334,11 @@ std::wstring newestJournal(const Session& s, bool& ours, size_t& enumerated) {
 void onEvent(Session& s, const char* name, uint32_t len) {
     // The five that matter. Everything else in the stream is somebody else's
     // business, and not keeping it is the privacy posture: names only, and
-    // only these names do anything.
+    // only these names do anything. The one value read beyond a name is the
+    // Music event's track MainMenu (scanRange, kMainMenuTok): one fixed string,
+    // compared and kept as a flag.
     if (len == 8 && memcmp(name, "LoadGame", 8) == 0) {
+        s.pub.mainMenu = false;
         if (!s.pub.gameplay) {
             s.pub.gameplay = true;
             Log::get().note("journal: LoadGame -- gameplay has started, so the "
@@ -343,6 +353,7 @@ void onEvent(Session& s, const char* name, uint32_t len) {
         // The game is leaving. Gameplay ends with it; a relaunch gets a new
         // journal and a fresh LoadGame.
         s.pub.gameplay = false;
+        s.pub.mainMenu = false;
         s.pub.jumpArmedMs = 0;
     } else if (len == 9 && memcmp(name, "StartJump", 9) == 0) {
         s.pub.jumpArmedMs = stampMs();
@@ -360,9 +371,21 @@ void onEvent(Session& s, const char* name, uint32_t len) {
 
 const char kEventTok[] = "\"event\":\"";
 constexpr uint32_t kEventTokLen = sizeof(kEventTok) - 1;
+// The Music event's track when the commander leaves to the main menu, found
+// whole in the same pass as the names so the events of one read apply in the
+// order they were written (a MainMenu and a LoadGame in one read end on the
+// later). 23 bytes, inside the 32-byte carry, so a read boundary through it is
+// stitched like a name's.
+const char kMainMenuTok[] = "\"MusicTrack\":\"MainMenu\"";
+constexpr uint32_t kMainMenuTokLen = sizeof(kMainMenuTok) - 1;
 
 void scanRange(Session& s, const char* p, uint32_t n) {
     for (uint32_t i = 0; i + kEventTokLen < n; ++i) {
+        if (i + kMainMenuTokLen <= n && memcmp(p + i, kMainMenuTok, kMainMenuTokLen) == 0) {
+            s.pub.mainMenu = true;
+            i += kMainMenuTokLen - 1;
+            continue;
+        }
         if (memcmp(p + i, kEventTok, kEventTokLen) != 0) continue;
         const uint32_t start = i + kEventTokLen;
         uint32_t end = start;
@@ -907,8 +930,10 @@ void journalWatchConfigure() {
                     "boundaries it states outright -- gameplay starting "
                     "(LoadGame), on-foot sessions beginning (Disembark), and "
                     "jumps (StartJump, resolved by FSDJump or "
-                    "SupercruiseEntry) for the witchspace star fix. Event "
-                    "names only; nothing else is read or kept.");
+                    "SupercruiseEntry) for the witchspace star fix, and the "
+                    "main menu (Music: MainMenu, cleared by LoadGame). Event "
+                    "names only, plus that one track; nothing else is read or "
+                    "kept.");
 }
 
 void journalWatchTick() {
@@ -975,6 +1000,7 @@ bool journalSupercruiseKnown() {
 }
 bool journalSupercruise() { return journalWatchActive() && peek(g_v.supercruise); }
 bool journalGameplay() { return !runtimeFlatProfile() && peek(g_v.gameplay); }
+bool journalMainMenu() { return journalWatchActive() && peek(g_v.mainMenu); }
 uint32_t journalDisembarks() { return runtimeFlatProfile() ? 0u : peek(g_v.disembarks); }
 uint32_t journalEmbarks() { return runtimeFlatProfile() ? 0u : peek(g_v.embarks); }
 
