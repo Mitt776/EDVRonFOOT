@@ -27,10 +27,10 @@
   ночной точки с допуском 48 узнаёт точку при любом свете». В `ROADMAP.md` — пункт. В `edvr/README_EDVRONFOOT.md` —
   строки `centre plain/other` с подписью и `centre pixels`. Проверка: `python tools\check_status_blocks.py` (из
   `edvr\`) проходит.
-- [ ] 2.2 Полная сборка по `edvr/AGENTS.md`: `build.bat` по абсолютному пути, `--jobs 8`. Проверка: «all gates passed»,
+- [x] 2.2 Полная сборка по `edvr/AGENTS.md`: `build.bat` по абсолютному пути, `--jobs 8`. Проверка: «all gates passed»,
   `config contract ok: 131 keys` (ключей не прибавилось). Коммит через `git commit -F`, тег `v0.19.1-edvronfoot.56`,
   `build.bat --dll-only` проходит.
-- [ ] 2.3 Установка при закрытой игре: `python tools\install_edvr.py --target steam --keep-backups 1000`, сначала
+- [x] 2.3 Установка при закрытой игре: `python tools\install_edvr.py --target steam --keep-backups 1000`, сначала
   `--dry-run`. Живой `edvr.ini` не трогать. Проверка: `--verify-only` ok, хеш `edvr.ini` до и после один и тот же.
 
 ## 3. Полёт и итог
