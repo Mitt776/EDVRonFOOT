@@ -3,8 +3,10 @@
 // Drives the pure half: the key's every value, rubbish and empty (both hide); the atlas by its 1.161 proportions; the centre in pixels
 // (2076x1787 -> x 1032..1044, y 456..467 with .42's dot x 1035..1041, y 459..464 inside; 2768x2383 -> x 1377..1391, y 608..623),
 // rounded outward, inside a tiny atlas and never empty; the weapon cue (vector 336 or 642 yes, each alone, the pistol's 168 and 546
-// too; .42's other vector counts and text or icons of 336 no); the plain dot's pattern on real centres (.42's plain dot yes; the
-// weapon's dot, a tool's red dot, an empty centre and another atlas size no); and the text of every line.
+// too; .42's other vector counts and text or icons of 336 no); the plain dot by tint and size (.56) on real centres (.42's plain dots
+// yes, the weapon's dot by its size and a tool's red dot by its hue no) and made ones (brighter, near white, blue, haloed yes; a paler
+// red, an empty or dim centre, a dot at the window's edge, a block, one pixel and another atlas size no); and the text of every line,
+// the signature and the pixels line.
 #include "../../src/d3d11/aim_dot_core.h"
 #include "aim_dot_samples.h"
 #include <cstdio>
@@ -81,27 +83,109 @@ void widen(const uint8_t* rgb, uint8_t* out, uint32_t pitch) {
         }
 }
 
+// A sample changed pixel by pixel: `f` gets R, G, B of one pixel and its x, y in the window.
+template <class F>
+void tweak(const uint8_t* rgb, uint8_t* out, F f) {
+    std::memcpy(out, rgb, kPatternW * kPatternH * 3);
+    for (uint32_t y = 0; y < kPatternH; ++y)
+        for (uint32_t x = 0; x < kPatternW; ++x) f(out + (y * kPatternW + x) * 3, x, y);
+}
+int peakOf(const uint8_t* p) { return p[0] > p[1] ? (p[0] > p[2] ? p[0] : p[2]) : (p[1] > p[2] ? p[1] : p[2]); }
+uint8_t clampByte(int v) { return uint8_t(v < 0 ? 0 : (v > 255 ? 255 : v)); }
+
 void partPattern() {
     const uint32_t pitch = 64;
     uint8_t c[64 * 11];
-    check(centreOf(2076, 1787).w() == kPatternW && centreOf(2076, 1787).h() == kPatternH, "the pattern is the centre's size");
+    uint8_t t[kPatternW * kPatternH * 3];
+    auto read = [&](const uint8_t* rgb) {
+        widen(rgb, c, pitch);
+        return readCentre(c, pitch, 2076, 1787);
+    };
+    check(centreOf(2076, 1787).w() == kPatternW && centreOf(2076, 1787).h() == kPatternH, "the window is the centre's size");
+
+    // Real centres.
+    CentreRead r = read(kPlainDot);
+    check(r.plain && r.why == Why::None, ".42's 01: the plain dot");
+    check(r.lit == 20 && r.bright == 17, ".42's 01: 20 lit, 17 bright");
+    check(r.box && r.bx0 == 3 && r.bx1 == 8 && r.by0 == 3 && r.by1 == 7, ".42's 01: the box x 3..8, y 3..7");
+    check(r.maxR == 173 && r.maxG == 255 && r.maxB == 250, ".42's 01: the brightest is 173,255,250");
+    check(read(kPlain42b).plain, ".42's 04: the plain dot at a door");
+    r = read(kWeapon42);
+    check(!r.plain && r.why == Why::Size && r.bright == 27, ".42's 02: the weapon's dot is other, by its size (27 bright)");
+    r = read(kTool43);
+    check(!r.plain && r.why == Why::Tint, ".43's 01: the tool's red dot is other, by its hue");
+
+    // The day side: the same dot brighter (Dima, 05.11: the same colour, brighter).
+    tweak(kPlainDot, t, [](uint8_t* p, uint32_t, uint32_t) {
+        if (peakOf(p))
+            for (int k = 0; k < 3; ++k) p[k] = clampByte(p[k] + 60);
+    });
+    r = read(t);
+    check(r.plain, "brighter by 60 a channel: plain");
+    check(r.bright == 22, "brighter: the faint rim turns bright, 22 (inside 24)");
+    tweak(kPlainDot, t, [](uint8_t* p, uint32_t, uint32_t) {
+        if (p[0] == 173 && p[1] == 255 && p[2] == 250) {
+            p[0] = 240;
+            p[2] = 255;
+        }
+    });
+    check(read(t).plain, "near white 240,255,255 in the core: plain");
+    tweak(kPlainDot, t, [](uint8_t* p, uint32_t, uint32_t) {
+        const int m = peakOf(p);
+        p[0] = uint8_t(m * 2 / 255);
+        p[1] = uint8_t(m * 163 / 255);
+        p[2] = uint8_t(m);
+    });
+    check(read(t).plain, "blue 2,163,255 (the pistol's colour at a ship): plain");
+    tweak(kPlainDot, t, [](uint8_t* p, uint32_t x, uint32_t y) {
+        if (!peakOf(p) && x >= 2 && x <= 9 && y >= 2 && y <= 8) p[0] = 0, p[1] = 40, p[2] = 40;
+    });
+    r = read(t);
+    check(r.plain && r.lit > 20 && r.bright == 17, "a halo of 40 around it: plain, more lit, the same bright");
+
+    // Others.
+    tweak(kTool43, t, [](uint8_t* p, uint32_t, uint32_t) {
+        if (peakOf(p))
+            for (int k = 1; k < 3; ++k) p[k] = clampByte(p[k] + 30);
+    });
+    r = read(t);
+    check(!r.plain && r.why == Why::Tint, "the tool's red dot, brighter and paler: other, hue");
+    tweak(kPlainDot, t, [](uint8_t* p, uint32_t, uint32_t) {
+        if (peakOf(p)) p[0] = clampByte(p[1] + 20);
+    });
+    check(read(t).why == Why::Tint, "red past G by 20: hue");
+    tweak(kPlainDot, t, [](uint8_t* p, uint32_t, uint32_t) {
+        if (peakOf(p)) p[0] = clampByte(p[1] + 8 < p[2] + 8 ? p[1] + 8 : p[2] + 8);
+    });
+    check(read(t).plain, "red equal to G and B plus the slack 8: still plain");
+    std::memset(t, 0, sizeof(t));
+    r = read(t);
+    check(!r.plain && r.why == Why::Empty && !r.box && r.lit == 0, "an empty centre: other, empty, no box");
+    tweak(kPlainDot, t, [](uint8_t* p, uint32_t, uint32_t) {
+        for (int k = 0; k < 3; ++k) p[k] = uint8_t(p[k] / 3);
+    });
+    check(read(t).why == Why::Empty, "a dot dimmer than 128 at its core: empty");
+    std::memset(t, 0, sizeof(t));
+    for (uint32_t y = 0; y < kPatternH; ++y)
+        for (uint32_t x = 3; x < kPatternW; ++x)
+            for (int k = 0; k < 3; ++k) t[(y * kPatternW + x - 3) * 3 + k] = kPlainDot[(y * kPatternW + x) * 3 + k];
+    r = read(t);
+    check(!r.plain && r.why == Why::Edge && r.bx0 == 0, "the dot moved to the window's edge: other, edge");
+    tweak(kPlainDot, t, [](uint8_t* p, uint32_t x, uint32_t y) {
+        if (x >= 1 && x <= 10 && y >= 1 && y <= 9) p[0] = 100, p[1] = 200, p[2] = 200;
+    });
+    check(read(t).why == Why::Size, "a teal block of 90 bright pixels: size");
+    tweak(kPlainDot, t, [](uint8_t* p, uint32_t x, uint32_t y) {
+        if (!(x == 5 && y == 5)) p[0] = p[1] = p[2] = 0;
+    });
+    check(read(t).why == Why::Size, "one pixel: size");
+
+    // The atlas.
     widen(kPlainDot, c, pitch);
-    check(matchesPlainDot(c, pitch, 2076, 1787), "the pattern itself");
-    widen(kPlain42b, c, pitch);
-    check(matchesPlainDot(c, pitch, 2076, 1787), ".42's 04: the plain dot at a door");
-    widen(kWeapon42, c, pitch);
-    check(!matchesPlainDot(c, pitch, 2076, 1787), ".42's 02: the weapon's dot is not");
-    widen(kTool43, c, pitch);
-    check(!matchesPlainDot(c, pitch, 2076, 1787), ".43's 01: the tool's red dot is not");
-    std::memset(c, 0, sizeof(c));
-    check(!matchesPlainDot(c, pitch, 2076, 1787), "an empty centre is not");
-    widen(kPlainDot, c, pitch);
-    check(!matchesPlainDot(c, pitch, 2768, 2383) && !patternFor(2768, 2383), "another atlas size has no pattern");
-    check(!matchesPlainDot(nullptr, pitch, 2076, 1787), "no pixels");
-    c[5 * pitch + 5 * 4 + 1] = uint8_t(c[5 * pitch + 5 * 4 + 1] - 40);
-    check(matchesPlainDot(c, pitch, 2076, 1787), "within the tolerance");
-    c[5 * pitch + 5 * 4 + 1] = uint8_t(c[5 * pitch + 5 * 4 + 1] - 20);
-    check(!matchesPlainDot(c, pitch, 2076, 1787), "past the tolerance");
+    r = readCentre(c, pitch, 2768, 2383);
+    check(!r.plain && r.why == Why::Atlas && !patternFor(2768, 2383), "another atlas size: other, atlas");
+    r = readCentre(nullptr, pitch, 2076, 1787);
+    check(!r.plain && r.why == Why::Atlas, "no pixels: other");
 }
 
 void partLines() {
@@ -125,10 +209,47 @@ void partLines() {
     check(std::strcmp(line, "aim dot: weapon on (vector n=168,546)") == 0, "weapon on, the pistol");
     formatWeaponOff(line, sizeof(line));
     check(std::strcmp(line, "aim dot: weapon off") == 0, "weapon off");
-    formatCentre(true, line, sizeof(line));
-    check(has(line, "aim dot: centre plain"), "centre plain");
-    formatCentre(false, line, sizeof(line));
-    check(has(line, "aim dot: centre other"), "centre other");
+    {
+        const uint32_t pitch = 64;
+        uint8_t c[64 * 11];
+        widen(kPlainDot, c, pitch);
+        formatCentre(readCentre(c, pitch, 2076, 1787), line, sizeof(line));
+        check(std::strcmp(line, "aim dot: centre plain (the plain dot without a weapon: erased; lit=20, bright=17, box=x3..8,y3..7, "
+                                "max=173,255,250)") == 0,
+              "centre plain, with the signature");
+        widen(kTool43, c, pitch);
+        formatCentre(readCentre(c, pitch, 2076, 1787), line, sizeof(line));
+        check(has(line, "aim dot: centre other (a weapon's or a tool's dot, or nothing: kept; why=hue, lit=24, bright=22, box=x3..8,y2..7, "
+                        "max=255,0,0)"),
+              "centre other, the tool: why=hue");
+        std::memset(c, 0, sizeof(c));
+        formatCentre(readCentre(c, pitch, 2076, 1787), line, sizeof(line));
+        check(has(line, "why=empty, lit=0, bright=0, box=none, max=0,0,0)"), "centre other, empty: box none");
+        widen(kPlainDot, c, pitch);
+        formatCentre(readCentre(c, pitch, 2768, 2383), line, sizeof(line));
+        check(has(line, "why=atlas"), "centre other, another atlas");
+        char pixels[kPixelsLineCap];
+        widen(kTool43, c, pitch);
+        formatCentrePixels(c, pitch, pixels, sizeof(pixels));
+        const char* head = "aim dot: centre pixels 000000 000000 000000 000000 000000 000000 000000 000000 000000 000000 000000 "
+                           "000000 / 000000";
+        check(std::strncmp(pixels, head, std::strlen(head)) == 0,
+              "pixels: the prefix, the first row, then a row split");
+        check(has(pixels, " / 000000 000000 000000 000000 FF0000 FF0000 FF0000 FF0000 000000"), "pixels: the tool's fourth row");
+        int rows = 1, cells = 0;
+        for (const char* q = pixels; *q; ++q) rows += (*q == '/');
+        for (const char* q = pixels + std::strlen("aim dot: centre pixels"); *q;) {  // tokens of six hex digits
+            while (*q == ' ' || *q == '/') ++q;
+            int n = 0;
+            while (q[n] && q[n] != ' ') ++n;
+            bool hex = n == 6;
+            for (int i = 0; hex && i < n; ++i) hex = std::strchr("0123456789ABCDEF", q[i]) != nullptr;
+            cells += hex;
+            q += n;
+        }
+        check(rows == int(kPatternH) && cells == int(kPatternW * kPatternH), "pixels: 11 rows, 132 cells");
+        check(std::strlen(pixels) < sizeof(pixels) - 1, "pixels: the line fits, not cut");
+    }
     formatNoPattern(2768, 2383, line, sizeof(line));
     check(has(line, "pattern is for a 2076x1787 atlas, this one is 2768x2383"), "no pattern");
     formatInert("why", line, sizeof(line));

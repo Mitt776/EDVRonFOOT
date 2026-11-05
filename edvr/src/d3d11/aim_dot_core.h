@@ -93,13 +93,11 @@ inline int weaponCue(bool vectorShader, uint32_t count) {
     return -1;
 }
 
-// The plain dot (.44, after .43: the pistol and the tools have no cue of their own, and .43 erased their dots): the centre is erased
-// only when it holds the plain dot without a weapon -- one fixed picture, read back off the atlas before the erase. The picture is
-// .42's snapshot 01 (2076x1787), R, G, B of the centre's 12x11, rows top down; .42's 04 is the same to the byte, the weapon's dot is
-// 202 away, the tools' red dot and an empty centre 255. A centre within kPatternTolerance on every channel is the plain dot; any other
-// atlas size has no picture, so nothing is erased there (the dot shows).
+// The plain dot's picture at night (.44; since .56 the rig's sample only -- the decision is readCentre below). .42's snapshot 01
+// (2076x1787), R, G, B of the centre's 12x11 window, rows top down; .42's 04 is the same to the byte. .44 erased only a centre within
+// 48 a channel of it, which a day side's brighter dot failed (.56). The window and the atlas size stay: any other atlas size has no
+// window, so nothing is erased there (the dot shows).
 constexpr uint32_t kPatternW = 12, kPatternH = 11, kPatternAtlasW = 2076, kPatternAtlasH = 1787;
-constexpr int kPatternTolerance = 48;
 constexpr uint8_t kPlainDot[kPatternW * kPatternH * 3] = {
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -114,16 +112,87 @@ constexpr uint8_t kPlainDot[kPatternW * kPatternH * 3] = {
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 };
 inline bool patternFor(uint32_t w, uint32_t h) { return w == kPatternAtlasW && h == kPatternAtlasH; }
+
+// The plain dot by its tint and size (.56, on-foot-aim-dot-daylight): kPlainDot above matched by the byte only at night -- on a
+// planet's day side the game draws the same dot brighter, 48 a channel did not hold, and the dot came back. kPlainDot stays as the
+// rig's sample. The centre is the plain dot when all hold:
+//  - not empty: some pixel's brightest channel is kCorePeak or more;
+//  - the tint: every lit pixel (brightest channel kLit or more) has G + kTintSlack >= R and B + kTintSlack >= R -- teal, blue or
+//    white, never red, orange or yellow (the tools' red dot, .43, is the plain dot's size: only its tint tells it apart);
+//  - the edge: no lit pixel on the window's outer rows or columns (the spot wholly inside);
+//  - the size: kBrightMin..kBrightMax bright pixels (kBright or more). The samples: the plain dot 17, the weapon's dot 27 (.42), the
+//    tool's red dot 22 (.43); the room up to 24 is for a brighter day halo.
+// Brightness enters only through those low thresholds, so a brighter dot is the same dot.
+constexpr int kLit = 24, kBright = 64, kCorePeak = 128, kTintSlack = 8;
+constexpr uint32_t kBrightMin = 8, kBrightMax = 24;
+enum class Why : int { None = 0, Atlas, Empty, Tint, Edge, Size };
+inline const char* whyName(Why w) {
+    switch (w) {
+        case Why::None: return "none";
+        case Why::Atlas: return "atlas";
+        case Why::Empty: return "empty";
+        case Why::Tint: return "hue";
+        case Why::Edge: return "edge";
+        case Why::Size: return "size";
+    }
+    return "?";
+}
+// The decision and the signature its lines carry: lit and bright pixels, the lit spot's box in the window (inclusive; none when
+// nothing is lit) and the brightest pixel's colour.
+struct CentreRead {
+    bool plain = false;
+    Why why = Why::Atlas;
+    uint32_t lit = 0, bright = 0;
+    bool box = false;
+    uint32_t bx0 = 0, bx1 = 0, by0 = 0, by1 = 0;
+    uint8_t maxR = 0, maxG = 0, maxB = 0;
+};
 // `rgba`: the centre's pixels, 4 bytes each (R, G, B, A as the atlas stores them), `pitch` bytes a row; `w`, `h`: the atlas's size.
-inline bool matchesPlainDot(const uint8_t* rgba, uint32_t pitch, uint32_t w, uint32_t h) {
-    if (!rgba || !patternFor(w, h)) return false;
+inline CentreRead readCentre(const uint8_t* rgba, uint32_t pitch, uint32_t w, uint32_t h) {
+    CentreRead r;
+    if (!rgba || !patternFor(w, h)) return r;
+    bool tintOk = true, edgeLit = false;
+    int peak = -1;
     for (uint32_t y = 0; y < kPatternH; ++y)
-        for (uint32_t x = 0; x < kPatternW; ++x)
-            for (uint32_t c = 0; c < 3; ++c) {
-                const int got = rgba[size_t(y) * pitch + x * 4 + c], want = kPlainDot[(y * kPatternW + x) * 3 + c];
-                if (got - want > kPatternTolerance || want - got > kPatternTolerance) return false;
+        for (uint32_t x = 0; x < kPatternW; ++x) {
+            const uint8_t* p = rgba + size_t(y) * pitch + size_t(x) * 4;
+            const int R = p[0], G = p[1], B = p[2];
+            const int m = R > G ? (R > B ? R : B) : (G > B ? G : B);
+            if (m > peak) {
+                peak = m;
+                r.maxR = p[0];
+                r.maxG = p[1];
+                r.maxB = p[2];
             }
-    return true;
+            if (m < kLit) continue;
+            ++r.lit;
+            if (m >= kBright) ++r.bright;
+            if (G + kTintSlack < R || B + kTintSlack < R) tintOk = false;
+            if (x == 0 || y == 0 || x + 1 == kPatternW || y + 1 == kPatternH) edgeLit = true;
+            if (!r.box) {
+                r.box = true;
+                r.bx0 = r.bx1 = x;
+                r.by0 = r.by1 = y;
+            } else {
+                if (x < r.bx0) r.bx0 = x;
+                if (x > r.bx1) r.bx1 = x;
+                if (y < r.by0) r.by0 = y;
+                if (y > r.by1) r.by1 = y;
+            }
+        }
+    if (peak < kCorePeak)
+        r.why = Why::Empty;
+    else if (!tintOk)
+        r.why = Why::Tint;
+    else if (edgeLit)
+        r.why = Why::Edge;
+    else if (r.bright < kBrightMin || r.bright > kBrightMax)
+        r.why = Why::Size;
+    else {
+        r.why = Why::None;
+        r.plain = true;
+    }
+    return r;
 }
 // The decision's lines, on each change: at most kCentreLinesPerWindow a summary window, the rest counted.
 constexpr int kCentreLinesPerWindow = 20;
@@ -164,9 +233,35 @@ inline void formatWeaponOn(uint32_t seen, char* out, size_t cap) {
     if (len > 0 && size_t(len) + 2 <= cap) std::snprintf(out + len, cap - size_t(len), ")");
 }
 inline void formatWeaponOff(char* out, size_t cap) { std::snprintf(out, cap, "aim dot: weapon off"); }
-inline void formatCentre(bool plain, char* out, size_t cap) {
-    std::snprintf(out, cap, plain ? "aim dot: centre plain (the plain dot without a weapon: erased)"
-                                  : "aim dot: centre other (a weapon's or a tool's dot, or nothing: kept)");
+// The decision with the read's signature (.56): lit and bright pixels, the spot's box in the window, the brightest colour; for other
+// the check that failed (empty, hue, edge, size).
+inline void formatCentre(const CentreRead& r, char* out, size_t cap) {
+    char box[48];
+    if (r.box)
+        std::snprintf(box, sizeof(box), "x%u..%u,y%u..%u", r.bx0, r.bx1, r.by0, r.by1);
+    else
+        std::snprintf(box, sizeof(box), "none");
+    if (r.plain)
+        std::snprintf(out, cap, "aim dot: centre plain (the plain dot without a weapon: erased; lit=%u, bright=%u, box=%s, max=%u,%u,%u)",
+                      r.lit, r.bright, box, r.maxR, r.maxG, r.maxB);
+    else
+        std::snprintf(out, cap,
+                      "aim dot: centre other (a weapon's or a tool's dot, or nothing: kept; why=%s, lit=%u, bright=%u, box=%s, max=%u,%u,%u)",
+                      whyName(r.why), r.lit, r.bright, box, r.maxR, r.maxG, r.maxB);
+}
+// The window's every pixel after an other line: kPatternH rows top down split by '/', kPatternW RRGGBB each split by spaces. ~950
+// characters; `cap` 1100 holds it (the log's line is 1200).
+constexpr size_t kPixelsLineCap = 1100;
+inline void formatCentrePixels(const uint8_t* rgba, uint32_t pitch, char* out, size_t cap) {
+    if (!cap) return;
+    int len = std::snprintf(out, cap, "aim dot: centre pixels");
+    for (uint32_t y = 0; y < kPatternH && len > 0 && size_t(len) < cap; ++y)
+        for (uint32_t x = 0; x < kPatternW && len > 0 && size_t(len) < cap; ++x) {
+            const uint8_t* p = rgba + size_t(y) * pitch + size_t(x) * 4;
+            const int k = std::snprintf(out + len, cap - size_t(len), "%s%02X%02X%02X", x ? " " : (y ? " / " : " "), p[0], p[1], p[2]);
+            if (k < 0) break;
+            len += k;
+        }
 }
 inline void formatNoPattern(uint32_t w, uint32_t h, char* out, size_t cap) {
     std::snprintf(out, cap, "aim dot: the plain dot's pattern is for a %ux%u atlas, this one is %ux%u: nothing is erased (the dot shows)",

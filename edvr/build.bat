@@ -3103,7 +3103,9 @@ echo [edvr] === aim_dot_test.exe ===
 REM EDVRonFOOT: build gate for the on-foot aim dot (src\d3d11\aim_dot_core.h, experimental.native_vr_on_foot_aim_dot, .43). Drives the
 REM pure half: the key's values, rubbish and empty (hide); the atlas by its 1.161 proportions; the centre in pixels (2076x1787 -> x
 REM 1032..1044, y 456..467, .42's dot inside; 2768x2383 -> x 1377..1391, y 608..623), outward, inside a tiny atlas and never empty; the
-REM weapon cue (vector 336 or 642, each alone; .42's other vector counts and text or icons no); every line's text.
+REM weapon cue (vector 336 or 642, each alone; .42's other vector counts and text or icons no); the plain dot by tint and size (.56:
+REM .42's dots and a brighter, near white, blue and haloed one plain; the weapon's dot by size, the tool's red dot by hue, an empty
+REM centre, a dot at the window's edge and another atlas other); every line's text, the signature and the pixels line.
 if not exist "%OBJ%\aimdot" mkdir "%OBJ%\aimdot"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\aimdot"\ /Fe"%BUILD%\aim_dot_test.exe" ^

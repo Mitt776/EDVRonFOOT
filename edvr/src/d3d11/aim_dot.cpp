@@ -231,8 +231,12 @@ bool ringReady() {
     return true;
 }
 
-// The decision from one read: counted, a line on a change (kCentreLinesPerWindow a window, the rest counted as quiet).
-void decide(bool plain) {
+// The decision from one read: counted, a line on a change (kCentreLinesPerWindow a window, the rest counted as quiet). The line
+// carries the read's signature; an other line is followed by the window's pixels, inside the same quota (.56). Called while the copy
+// is mapped: `rgba`, `pitch` are its bytes.
+void decide(const uint8_t* rgba, uint32_t pitch) {
+    const adh::CentreRead read = adh::readCentre(rgba, pitch, g_s.w, g_s.h);
+    const bool plain = read.plain;
     (plain ? g_cPlain : g_cOther).fetch_add(1, std::memory_order_relaxed);
     if (g_s.plainSaid && plain == g_s.plain) return;
     g_s.plain = plain;
@@ -241,9 +245,13 @@ void decide(bool plain) {
         g_cQuiet.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    char line[200];
-    adh::formatCentre(plain, line, sizeof(line));
+    char line[300];
+    adh::formatCentre(read, line, sizeof(line));
     say(line);
+    if (plain || !rgba) return;
+    char pixels[adh::kPixelsLineCap];
+    adh::formatCentrePixels(rgba, pitch, pixels, sizeof(pixels));
+    say(pixels);
 }
 
 // The ring's ready copies, the oldest first, without waiting: the newest read decides. Then this frame's centre into the next slot
@@ -280,10 +288,9 @@ bool readAndCopy(ID3D11DeviceContext* ctx) {
             standDown("the centre's copy could not be read");
             return false;
         }
-        const bool plain = adh::matchesPlainDot(static_cast<const uint8_t*>(m.pData), m.RowPitch, g_s.w, g_s.h);
+        decide(static_cast<const uint8_t*>(m.pData), m.RowPitch);
         ctx->Unmap(g_s.ring[oldest], 0);
         g_s.ringFrame[oldest] = 0;
-        decide(plain);
     }
     const int slot = g_s.ringNext;
     if (g_s.ringFrame[slot]) g_cUnread.fetch_add(1, std::memory_order_relaxed);
