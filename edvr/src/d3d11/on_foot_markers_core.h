@@ -200,7 +200,9 @@ inline Found findPoints(const uint8_t* image, const Section* sections, int count
 // ---- the decision ---------------------------------------------------------------------------------------------------------------
 
 // Why the correction is off (kWhyOn: it is on).
-enum Why : int { kWhyOn = 0, kWhyNative, kWhyShip, kWhyJournal, kWhyNotInstalled, kWhyDisabled };
+// kWhyMainMenu: the journal's main menu after gameplay (journalMainMenu). Status.json still says on foot there for ~35 s, and the
+// identity rotation on the PostGUI cameras pinned the game's main menu to the head (.54, 05.11).
+enum Why : int { kWhyOn = 0, kWhyNative, kWhyShip, kWhyJournal, kWhyNotInstalled, kWhyDisabled, kWhyMainMenu };
 inline const char* whyText(int w) {
     switch (w) {
         case kWhyNative: return "native_vr_on_foot is off";
@@ -208,6 +210,7 @@ inline const char* whyText(int w) {
         case kWhyJournal: return "journal unknown";
         case kWhyNotInstalled: return "not installed, the line above says why";
         case kWhyDisabled: return "the commit faulted 3 times";
+        case kWhyMainMenu: return "main menu (journal Music: MainMenu): the game places its menu itself";
         default: return "on";
     }
 }
@@ -215,9 +218,11 @@ struct Decision {
     bool on = false;
     int why = kWhyJournal;
 };
-// native: experimental.native_vr_on_foot; onFoot: the journal (1, 0, -1 unknown). Unknown means hands off.
-inline Decision decide(bool native, int onFoot) {
+// native: experimental.native_vr_on_foot; onFoot: the journal (1, 0, -1 unknown). Unknown means hands off. mainMenu: the journal's
+// main menu after gameplay, which outranks a stale on foot.
+inline Decision decide(bool native, int onFoot, bool mainMenu = false) {
     if (!native) return {false, kWhyNative};
+    if (mainMenu) return {false, kWhyMainMenu};
     if (onFoot < 0) return {false, kWhyJournal};
     if (onFoot == 0) return {false, kWhyShip};
     return {true, kWhyOn};

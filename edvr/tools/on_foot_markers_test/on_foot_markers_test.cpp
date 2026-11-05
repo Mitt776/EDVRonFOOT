@@ -27,6 +27,7 @@ namespace edvr {
 void breadcrumb(const char*) {}  // production guard.cpp's crash-channel dependency, as the other rigs stub it
 bool journalOnFootKnown() { return false; }  // journal_watch.cpp's, for the frame boundary the rig never calls
 bool journalOnFoot() { return false; }
+bool journalMainMenu() { return false; }
 }  // namespace edvr
 
 using namespace edvr;
@@ -278,6 +279,9 @@ void partA() {
     check(!ofm::decide(true, 0).on && ofm::decide(true, 0).why == ofm::kWhyShip, "decide: the ship");
     check(!ofm::decide(true, -1).on && ofm::decide(true, -1).why == ofm::kWhyJournal, "decide: journal unknown");
     check(ofm::decide(true, 1).on && ofm::decide(true, 1).why == ofm::kWhyOn, "decide: on foot");
+    check(!ofm::decide(true, 1, true).on && ofm::decide(true, 1, true).why == ofm::kWhyMainMenu,
+          "decide: the main menu, Status.json still on foot (.54): off");
+    check(ofm::decide(false, 1, true).why == ofm::kWhyNative, "decide: native_vr_on_foot off outranks the main menu");
 
     // The corrected pose.
     FakeGame g;
@@ -397,6 +401,9 @@ void partA() {
     check(std::string(line) == "on-foot markers: off (journal unknown)", "line: off, journal unknown");
     ofm::formatToggle(ofm::decide(false, 1), line, sizeof(line));
     check(std::string(line) == "on-foot markers: off (native_vr_on_foot is off)", "line: off, native_vr_on_foot off");
+    ofm::formatToggle(ofm::decide(true, 1, true), line, sizeof(line));
+    check(std::string(line) == "on-foot markers: off (main menu (journal Music: MainMenu): the game places its menu itself)",
+          "line: off, the main menu");
     ofm::formatHooked(0x287D660, 7, 0x28457F0, 12, line, sizeof(line));
     check(std::strstr(line, "hooked the pose writer (+0x287D660, 7 bytes moved) and the eye pose writer (+0x28457F0, 12 moved)") != nullptr,
           "line: hooked");
@@ -653,6 +660,18 @@ void partB() {
     check(anyLine("on-foot markers: off (native_vr_on_foot is off)") && g_lines.size() == 1, "step: native_vr_on_foot off");
     g_poseFn(mgr, 7, 0, 0);
     check(!ofm::identityRows(g_game.pose(0)), "step: native_vr_on_foot off, the game's pose stays");
+    // The main menu after gameplay with Status.json still on foot: off, the game's pose stays; LoadGame on foot: on again.
+    g_lines.clear();
+    onFootMarkersFrameStep(1065100, true, 1, base, kSections, 2, &sink, nullptr);
+    check(anyLine("on-foot markers: on (on foot)"), "step: on foot again");
+    g_lines.clear();
+    onFootMarkersFrameStep(1065200, true, 1, base, kSections, 2, &sink, nullptr, true);
+    check(anyLine("on-foot markers: off (main menu (journal Music: MainMenu)") && g_lines.size() == 1, "step: the main menu");
+    g_poseFn(mgr, 7, 0, 0);
+    check(!ofm::identityRows(g_game.pose(0)), "step: the main menu, the game's pose stays");
+    g_lines.clear();
+    onFootMarkersFrameStep(1065300, true, 1, base, kSections, 2, &sink, nullptr);
+    check(anyLine("on-foot markers: on (on foot)"), "step: LoadGame on foot, on again");
     g_lines.clear();
     onFootMarkersFrameStep(1066000, true, 0, base, kSections, 2, &sink, nullptr);
     check(anyLine("on-foot markers: off (the ship)"), "step: the ship");

@@ -99,7 +99,9 @@ native_vr_on_foot = 0
 EDVR забирает их снова. Сам ключ при этом не меняется. Узнаёт EDVR это по журналу игры (событие `Music` с треком
 `MainMenu`). Первое меню после запуска игры не трогается — там меню и так видно. С `.54` в главном меню молчит и лист
 HUD (раздел «Интерфейс на ногах»): ничего своего не показывает и меню игры не прячет — строка остановки листа с причиной
-`main menu (journal Music: MainMenu): the game's menu is left to the game`.
+`main menu (journal Music: MainMenu): the game's menu is left to the game`. С `.55` в главном меню выключены и метки
+`stereo` (иначе меню «прилипает» к голове): строка `on-foot markers: off (main menu (journal Music: MainMenu): the game
+places its menu itself)`.
 
 Ключ читается на лету; менять лучше в корабле. Если на ногах что-то не так:
 - вернуться в корабль: там всё как обычно;

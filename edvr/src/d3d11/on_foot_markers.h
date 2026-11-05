@@ -53,8 +53,9 @@ ofm::Counts onFootMarkersCounts();
 bool onFootMarkersDisabled();
 // The frame step: the search the first time `native` is on, the decision, one install attempt per process the first time the decision
 // is on, whether to correct published, the on and off lines, the disabled line once, the end-of-frame check and the 30-second summary.
-// `onFoot` is the journal's answer (-1 unknown, 0, 1); `base`, `sections` and `count` as onFootMarkersFind takes them. Frame thread.
+// `onFoot` is the journal's answer (-1 unknown, 0, 1); `base`, `sections` and `count` as onFootMarkersFind takes them; `mainMenu`
+// the journal's main menu after gameplay (off there, whatever onFoot says). Frame thread.
 void onFootMarkersFrameStep(uint64_t nowMs, bool native, int onFoot, uintptr_t base, const ofm::Section* sections, int count,
-                            OnFootMarkersSink sink, void* ctx);
+                            OnFootMarkersSink sink, void* ctx, bool mainMenu = false);
 
 }  // namespace edvr

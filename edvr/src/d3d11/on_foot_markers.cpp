@@ -279,7 +279,7 @@ ofm::Counts onFootMarkersCounts() {
 }
 
 void onFootMarkersFrameStep(uint64_t nowMs, bool native, int onFoot, uintptr_t base, const ofm::Section* sections, int count,
-                            OnFootMarkersSink sink, void* ctx) {
+                            OnFootMarkersSink sink, void* ctx, bool mainMenu) {
     static bool searched = false, tried = false, saidDisabled = false;
     static ofm::Toggle toggle;
     static ofm::Window window;
@@ -292,7 +292,7 @@ void onFootMarkersFrameStep(uint64_t nowMs, bool native, int onFoot, uintptr_t b
     }
 
     // The decision; the one install attempt the first time it is on (a refusal is said once, not every frame).
-    ofm::Decision d = ofm::decide(native, onFoot);
+    ofm::Decision d = ofm::decide(native, onFoot, mainMenu);
     if (d.on && !tried) {
         tried = true;
         onFootMarkersInstall(sink, ctx);
@@ -348,7 +348,7 @@ void onFootMarkersFrameBoundary() {
     }
     const int onFoot = journalOnFootKnown() ? (journalOnFoot() ? 1 : 0) : -1;
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
-    onFootMarkersFrameStep(GetTickCount64(), native, onFoot, base, nullptr, 0, &logSink, nullptr);
+    onFootMarkersFrameStep(GetTickCount64(), native, onFoot, base, nullptr, 0, &logSink, nullptr, journalMainMenu());
 }
 
 }  // namespace edvr

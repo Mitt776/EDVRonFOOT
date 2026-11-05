@@ -66,6 +66,12 @@ true→false — `native-vr-on-foot: LoadGame (journal): both switches ours agai
 game`. Отдача переключателей остаётся (решение Димы: безвредна, облетана, страховка). Остальные модули на `Status.json`
 (прицел головой, ведущий глаз, метки) не трогаются: прицел в `.53` сам выключился (`head aim: off (player)`).
 
+**7. После полёта `.54`: метки `stereo` в главном меню молчат.** Меню видно, но «прилипло» к голове: модуль меток
+(`on_foot_markers.cpp`) по устаревшему `Status.json` («на ногах») ставит камерам PostGUI единичный поворот и в меню
+(22:55:37–22:56:07: `2854 corrected`; `off (journal unknown)` только в 22:56:10). В `ofm::decide` новая причина
+`kWhyMainMenu` (после ключа); строка `on-foot markers: off (main menu (journal Music: MainMenu): the game places its menu
+itself)`. Прицел головой сам выключается (`head aim: off (player)`), ведущий глаз — только при LT; не трогаются.
+
 ## Risks / Trade-offs
 
 - [Загрузка сразу на ногах: переключатель возвращается на `LoadGame`, а игра решает «кинотеатр или стерео» раньше]
