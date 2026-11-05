@@ -31,7 +31,7 @@ HUD — частично, см. ниже. Подробности: «Экспер
 - **H6 — половинчатое состояние: ПОДТВЕРЖДЕНА (`.6`).** Байт = 0 → `input 2720x2976` на ногах, ни одного `hold`, голова
   отслеживается, глаза сводятся. **H4 — камера на ногах не «шлемовая»: не понадобилась** (слежение работает и с `"StartCamera"`).
 - **Сбой при выходе (05.11):** «не наш» отброшено — перехват OpenXR Toolkit переживал его DLL (`…F780`); `.52` закрепляет
-  слои OpenXR (`exit-crash-openxr-layers`); итог — `edvr/docs/shutdown-freelibrary-race-2026-09-21.md`, `## Status`.
+  слои OpenXR (`exit-crash-openxr-layers`), облетан 05.11 — **ГОТОВО**; итог — `edvr/docs/shutdown-freelibrary-race-2026-09-21.md`, `## Status`.
 
 **Ключи** (секция `[experimental]` в `edvr.ini`; решение Димы 2026-10-20, заявка `native-vr-on-foot-default`, `.7`):
 - `native_vr_on_foot` — **включён по умолчанию, видимый** (`# ui: Native VR on foot`). Ставит байт

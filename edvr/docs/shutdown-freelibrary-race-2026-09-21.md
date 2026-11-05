@@ -2,8 +2,8 @@
 
 ## Status
 
-- **Состояние (2026-11-05, EDVRonFOOT): причина НАЙДЕНА, правка `.52` собрана, НЕ облетана**
-  (заявка `exit-crash-openxr-layers`). Гипотеза «выгрузка системного `d3d11.dll`» отброшена
+- **Состояние (2026-11-05, EDVRonFOOT): ИСПРАВЛЕНО, `.52` облетан** — 3 запуска, 0 падений
+  («Полёт `.52`» в конце; заявка `exit-crash-openxr-layers`). Гипотеза «выгрузка системного `d3d11.dll`» отброшена
   (`## Ruled out`). Старый блок Status (2026-09-25) целиком — в «Status до 2026-11-05» ниже.
 - **Причина:** неявный слой OpenXR **OpenXR Toolkit 1.3.2** (у Димы стоит, для Elite ничего
   не включено). При старте сессии он через Microsoft Detours правит код
@@ -19,7 +19,7 @@
   «Session destroyed» в ту же секунду. Сходится с третьим опытом ниже: без оверлея Steam
   `RSSetViewports` после закрытия сессии никто не зовёт — падения нет. Не видели своими
   глазами: байтов прыжка в `d3d11.dll` (код системных DLL в дамп не попадает).
-- **Масштаб до правки (05.11):** 114 дампов, 4,0 ГБ в
+- **Масштаб до правки (05.11):** 43 дампа в 114 папках (остальные папки пустые), 4,0 ГБ в
   `%LOCALAPPDATA%\Temp\Frontier Developments\EliteDangerous\CrashDumps`; 65 записей
   `UNHANDLED` в `edvr_breadcrumbs.txt`, последняя 05.11 00:39.
 - **Правка `.52`:** после удачного `xrCreateInstance` EDVR находит DLL слоёв (экспорт
@@ -29,10 +29,9 @@
   `openxr_layers,found=1,pinned=1,list=XR_APILAYER_MBUCCHIA_toolkit.dll:pinned`.
   Стенд `tools\openxr_layer_pin_test` (гейт `:rig_openxr_layer_pin_test`).
 - **Правка PR #40** (`device_module_reset,pinned=1`) остаётся: безвредна, но не лечила.
-- **Следующий полёт (`.52`):** 2–3 выхода из игры через меню, Toolkit и оверлей Steam
-  не трогать. Успех: строка `openxr_layers … :pinned` в каждой сессии, нет новых `UNHANDLED`
-  и новых папок в `CrashDumps`. Если падение осталось при `pinned=1` — гипотеза о Toolkit
-  опровергнута: разобрать новый дамп `exit_crash_dump.py`, записать сюда.
+- **Полёт `.52` (05.11):** строка `:pinned` в каждой сессии, закрытие чистое, новых
+  `UNHANDLED` и новых дампов нет (папки в `CrashDumps` появляются на каждый запуск, пустые).
+  Если падение вернётся при `pinned=1` — разобрать дамп `exit_crash_dump.py`, записать сюда.
 - **Скорее всего, то же у апстрима** (VirtualDesktopXR, второй bundle): неявный слой с
   перехватом D3D11 — самый частый случай OpenXR Toolkit.
 
@@ -527,3 +526,23 @@ analysis above and worth its own look before trusting the fix.
   EDHM-specific, it may be worth a second discriminating flight (Steam
   overlay on, EDHM out of the chain) purely to complete the arc, not
   because the fix's scope depends on the answer.
+
+## Полёт `.52` — 2026-11-05, OpenXR Toolkit и оверлей Steam на месте: падения нет
+
+Сборка `v0.19.1-edvronfoot.52` (`edvr_log.py --expect-build` совпал во всех логах). Три запуска игры из Steam,
+Toolkit 1.3.2 и оверлей Steam не трогали:
+
+- **20:59** (местное): игра открыла OpenXR и через 12 с закрыла его (шлем, видимо, не проснулся), а потом ещё ~37 с
+  рисовала кадры с выгруженным загрузчиком. До правки это падение через 31 мс после `host_loader_free`.
+- **21:02 → 21:08** и **21:08 → 21:24**: полёт, выход из игры через меню. Дима: «оба раза выход из игры штатный».
+
+В OpenXR-логе каждой сессии: `openxr_layers,found=1,pinned=1,list=XR_APILAYER_MBUCCHIA_toolkit.dll:pinned`; во всех
+трёх закрытие `shutdown_stage … ok=1` до `host_loader_free`, в двух полётах — до `host_gate_finish` и
+`module_shutdown_return,exception=0`. В `edvr_breadcrumbs.txt` три `gfx: process exit`, новых `UNHANDLED` нет
+(было 65, осталось 65). В `CrashDumps` три новые папки, все **пустые**: обработчик Frontier создаёт папку на каждый
+запуск и кладёт дамп только при падении (из 117 папок дампы лежат в 43, 74 пустые ещё с сентября). Дампов до полёта
+было 43, после — 43.
+
+Поправка к снимку «до»: «114 дампов» в Status были 114 папками; дампов в них 43.
+
+Вывод: гипотеза о Toolkit подтверждена, правка работает. Дугу можно закрывать.

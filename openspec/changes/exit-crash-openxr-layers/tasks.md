@@ -53,7 +53,7 @@
 
 ## 5. Полёт и итог
 
-- [ ] 5.1 Полёт Димы на `.52` (запуск из Steam как обычно; OpenXR Toolkit не трогать, оверлей Steam не выключать):
+- [x] 5.1 Полёт Димы на `.52` (запуск из Steam как обычно; OpenXR Toolkit не трогать, оверлей Steam не выключать):
   1. Запустить игру, дождаться картинки в шлеме, 1–2 минуты полетать или постоять.
   2. Выйти из игры через меню («Выход» → «Выйти из игры»).
   3. Ещё раз: запуск → минута в игре (можно выйти на ноги) → выход через меню.
@@ -61,7 +61,7 @@
   5. Сказать, как закрывалась игра: сразу, с задержкой, с окном ошибки.
 
   Проверка: Дима рассказал, как прошли выходы.
-- [ ] 5.2 Разбор: сначала `edvr_log.py --target steam --expect-build v0.19.1-edvronfoot.52` (и `--tag openxr`). По логу:
+- [x] 5.2 Разбор: сначала `edvr_log.py --target steam --expect-build v0.19.1-edvronfoot.52` (и `--tag openxr`). По логу:
   - в OpenXR-логе каждой сессии строка `openxr_layers,found=1,pinned=1,list=XR_APILAYER_MBUCCHIA_toolkit.dll:pinned`;
   - закрытие `shutdown_stage … ok=1` до `host_gate_finish`, `module_shutdown_return,exception=0`;
   - в `edvr_breadcrumbs.txt` после времени полёта нет новых `UNHANDLED`; в `CrashDumps` нет новых папок
