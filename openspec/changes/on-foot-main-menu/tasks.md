@@ -33,10 +33,10 @@
   `.52`, F8 → меню появилось, `Music: MainMenu`, `Status.json` поздно) и строка в `## Status`; ROADMAP — пункт про
   невидимое меню; `edvr/README_EDVRONFOOT.md` в разделе «Нативный VR на ногах» — абзац про главное меню и две строки
   лога. Проверка: `python tools\check_status_blocks.py` проходит, длина `Status` исследования не больше, чем до правки.
-- [ ] 3.2 Полная сборка по `edvr/AGENTS.md`: `build.bat` по абсолютному пути, `--jobs 8`. Проверка: «all gates
+- [x] 3.2 Полная сборка по `edvr/AGENTS.md`: `build.bat` по абсолютному пути, `--jobs 8`. Проверка: «all gates
   passed», `config contract ok: 131 keys` (как на `.52`). Коммит через `git commit -F`, тег `v0.19.1-edvronfoot.53`,
   `build.bat --dll-only` проходит.
-- [ ] 3.3 Установка при закрытой игре: `python tools\install_edvr.py --target steam --keep-backups 1000`, сначала
+- [x] 3.3 Установка при закрытой игре: `python tools\install_edvr.py --target steam --keep-backups 1000`, сначала
   `--dry-run`. Живой `edvr.ini` не трогать. Проверка: `--verify-only` ok, хеш `edvr.ini` до и после один и тот же.
 
 ## 4. Полёт и итог
