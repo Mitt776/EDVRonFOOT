@@ -466,7 +466,9 @@ inline void placeAnchor(const float anchor[12], float yawDeg, float downM, float
 }
 
 // Shown this frame, or why not. Order: the keys, then where the commander is, then the game's own composite, then the panels.
-enum class Reason : int { Showing = 0, KeyOff = 1, InTheShip = 2, GameComposites = 3, NoPanels = 4 };
+// MainMenu: the journal's main menu after gameplay (journalMainMenu). Status.json still says on foot there for ~35 s, and the game
+// lays its main menu as a 1730x973 head-locked mesh-360 draw, the trader menu's shape: withheld, it was invisible (.53, 05.11).
+enum class Reason : int { Showing = 0, KeyOff = 1, InTheShip = 2, GameComposites = 3, NoPanels = 4, MainMenu = 5 };
 inline const char* reasonText(Reason r) {
     switch (r) {
         case Reason::Showing: return "showing";
@@ -474,6 +476,7 @@ inline const char* reasonText(Reason r) {
         case Reason::InTheShip: return "in the ship";
         case Reason::GameComposites: return "the game composites its panels";
         case Reason::NoPanels: return "no panels: no HUD panel for 30 frames";
+        case Reason::MainMenu: return "main menu (journal Music: MainMenu): the game's menu is left to the game";
     }
     return "?";
 }
@@ -483,9 +486,11 @@ struct DecisionIn {
     Mode mode = Mode::Body;
     bool gameComposites = false;
     int panels = 0;
+    bool mainMenu = false;     // the journal's main menu after gameplay, until the next LoadGame
 };
 inline Reason decide(const DecisionIn& in) {
     if (in.mode == Mode::Off || !in.nativeOnFoot) return Reason::KeyOff;
+    if (in.mainMenu) return Reason::MainMenu;
     if (in.onFoot != 1) return Reason::InTheShip;
     if (in.gameComposites) return Reason::GameComposites;
     if (in.panels <= 0) return Reason::NoPanels;

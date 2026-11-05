@@ -55,6 +55,7 @@ uint32_t g_rtvW = 0, g_rtvH = 0, g_rtvFmt = 0;
 // The keys and the journal, from the frame thread to the door.
 std::atomic<int> g_mode{int(ofh::Mode::Body)};
 std::atomic<bool> g_nativeOnFoot{true};
+std::atomic<bool> g_mainMenu{false};  // journalMainMenu(), read at the frame boundary
 std::atomic<int> g_onFoot{-1};
 std::atomic<uint64_t> g_frameSeq{1};
 // .48: a HUD panel was drawn no more than kHoldFrames frames ago (the boundary's, from the frame that ended; "no" on stepping onto
@@ -300,8 +301,11 @@ void onFootHudFrameBoundary() {
     }
     const int onFoot = journalOnFootKnown() ? (journalOnFoot() ? 1 : 0) : -1;
     g_onFoot.store(onFoot, std::memory_order_relaxed);
+    // The main menu after gameplay is the game's: nothing withheld, no layer shown (ofh::Reason::MainMenu), until the next LoadGame.
+    const bool mainMenu = journalMainMenu();
+    g_mainMenu.store(mainMenu, std::memory_order_relaxed);
     const bool wants = ofh::Mode(g_mode.load(std::memory_order_relaxed)) != ofh::Mode::Off &&
-                       g_nativeOnFoot.load(std::memory_order_relaxed) && onFoot == 1;
+                       g_nativeOnFoot.load(std::memory_order_relaxed) && onFoot == 1 && !mainMenu;
     if (wants && !detail::g_onFootHudWants.load(std::memory_order_relaxed)) drawGateArm();
     detail::g_onFootHudWants.store(wants, std::memory_order_relaxed);
     if (!wants) detail::g_onFootMenuHeld.store(false, std::memory_order_relaxed);   // the door does not run its decision then: no stale menu
@@ -576,6 +580,7 @@ void decideLayers(ID3D11Device* device, ofh::Mode mode, float width) {
     ofh::DecisionIn base;
     base.onFoot = g_onFoot.load(std::memory_order_relaxed);
     base.nativeOnFoot = g_nativeOnFoot.load(std::memory_order_relaxed);
+    base.mainMenu = g_mainMenu.load(std::memory_order_relaxed);
     base.mode = mode;
     for (int k = 0; k < ofh::kLayers; ++k) {
         LayerState& L = g_layers[k];
@@ -600,7 +605,7 @@ void decideLayers(ID3D11Device* device, ofh::Mode mode, float width) {
         // .51: the info panel's keep -- held while the game's panel still holds its picture, gone when the game clears it
         ofh::Kept kept = ofh::Kept::None;
         if (layer == ofh::Layer::Info) {
-            const bool away = in.mode == ofh::Mode::Off || !in.nativeOnFoot || in.onFoot != 1 || in.gameComposites;
+            const bool away = in.mode == ofh::Mode::Off || !in.nativeOnFoot || in.mainMenu || in.onFoot != 1 || in.gameComposites;
             kept = infoKeepFrame(device, drew ? source : nullptr, drew, away);
         }
         const ofh::Reason reason = ofh::stepLayer(in, drew, L.hold, &step, kept);
