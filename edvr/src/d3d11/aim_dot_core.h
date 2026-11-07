@@ -240,6 +240,25 @@ inline void formatCentre(const CentreRead& r, char* out, size_t cap) {
                       "aim dot: centre other (a weapon's or a tool's dot, or nothing: kept; why=%s, lit=%u, bright=%u, box=%s, max=%u,%u,%u)",
                       whyName(r.why), r.lit, r.bright, box, r.maxR, r.maxG, r.maxB);
 }
+// The same read for the lines (.58): a line is written on any change of these, not only of the decision -- .57's flight left the
+// centre other for minutes and never said what it held after an empty read.
+inline bool sameSignature(const CentreRead& a, const CentreRead& b) {
+    return a.plain == b.plain && a.why == b.why && a.lit == b.lit && a.bright == b.bright && a.box == b.box && a.bx0 == b.bx0 &&
+           a.bx1 == b.bx1 && a.by0 == b.by0 && a.by1 == b.by1 && a.maxR == b.maxR && a.maxG == b.maxG && a.maxB == b.maxB;
+}
+// The centre as it is, every kCentreNowMs on foot, outside the decision lines' quota (.58): `aim dot: centre now plain|other (…)`,
+// the same signature, so a PAUSE mark finds what the centre held while a dot showed.
+constexpr uint64_t kCentreNowMs = 10000;
+inline void formatCentreNow(const CentreRead& r, char* out, size_t cap) {
+    char line[300];
+    formatCentre(r, line, sizeof(line));
+    const char* head = "aim dot: centre ";
+    const size_t n = std::strlen(head);
+    if (std::strncmp(line, head, n) == 0)
+        std::snprintf(out, cap, "aim dot: centre now %s", line + n);
+    else
+        std::snprintf(out, cap, "%s", line);
+}
 // The window's every pixel after an other line: kPatternH rows top down split by '/', kPatternW RRGGBB each split by spaces. ~950
 // characters; `cap` 1100 holds it (the log's line is 1200).
 constexpr size_t kPixelsLineCap = 1100;

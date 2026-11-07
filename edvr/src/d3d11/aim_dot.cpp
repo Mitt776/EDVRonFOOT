@@ -56,6 +56,8 @@ struct State {
     uint32_t rw = 0, rh = 0, rfmt = 0;
     int ringNext = 0;
     bool plain = false, plainSaid = false;
+    adh::CentreRead said;  // the read last said in a decision line (.58: a line on any change of it)
+    uint64_t nowAt = 0;    // when the last `centre now` line was written (GetTickCount64)
     uint32_t noPatternW = 0, noPatternH = 0;  // the size last said to have no pattern
     // This frame's.
     uint64_t frame = 0;
@@ -231,15 +233,29 @@ bool ringReady() {
     return true;
 }
 
-// The decision from one read: counted, a line on a change (kCentreLinesPerWindow a window, the rest counted as quiet). The line
-// carries the read's signature; an other line is followed by the window's pixels, inside the same quota (.56). Called while the copy
-// is mapped: `rgba`, `pitch` are its bytes.
+// The decision from one read: counted, a line on a change of the read's signature (.58; before it, of the decision only) --
+// kCentreLinesPerWindow a window, the rest counted as quiet. An other line is followed by the window's pixels, inside the same
+// quota (.56). Every kCentreNowMs a `centre now` line (and the pixels for other) outside the quota (.58). Called while the copy is
+// mapped: `rgba`, `pitch` are its bytes.
 void decide(const uint8_t* rgba, uint32_t pitch) {
     const adh::CentreRead read = adh::readCentre(rgba, pitch, g_s.w, g_s.h);
     const bool plain = read.plain;
     (plain ? g_cPlain : g_cOther).fetch_add(1, std::memory_order_relaxed);
-    if (g_s.plainSaid && plain == g_s.plain) return;
     g_s.plain = plain;
+    const uint64_t now = GetTickCount64();
+    if (!g_s.nowAt || now - g_s.nowAt >= adh::kCentreNowMs) {
+        g_s.nowAt = now;
+        char line[320];
+        adh::formatCentreNow(read, line, sizeof(line));
+        say(line);
+        if (!plain && rgba) {
+            char pixels[adh::kPixelsLineCap];
+            adh::formatCentrePixels(rgba, pitch, pixels, sizeof(pixels));
+            say(pixels);
+        }
+    }
+    if (g_s.plainSaid && adh::sameSignature(read, g_s.said)) return;
+    g_s.said = read;
     g_s.plainSaid = true;
     if (g_centreLines.fetch_add(1, std::memory_order_relaxed) >= adh::kCentreLinesPerWindow) {
         g_cQuiet.fetch_add(1, std::memory_order_relaxed);

@@ -6,7 +6,7 @@
 // too; .42's other vector counts and text or icons of 336 no); the plain dot by its shape, any colour (.57), on real centres (.42's
 // plain dots and .56's red plain dot yes; the weapon's dot and the tool's own red dot in the hand no) and made ones (blue, 40 dimmer
 // yes; a rim 60 brighter, an empty or dim centre, a dot at the window's edge and another atlas size no); and the text of every line,
-// the signature and the pixels line.
+// the signature and the pixels line; .58's signature compare (a line on any change of it) and the centre now line.
 #include "../../src/d3d11/aim_dot_core.h"
 #include "aim_dot_samples.h"
 #include <cstdio>
@@ -203,6 +203,31 @@ void partLines() {
         widen(kPlainDot, c, pitch);
         formatCentre(readCentre(c, pitch, 2768, 2383), line, sizeof(line));
         check(has(line, "why=atlas"), "centre other, another atlas");
+        // .58: a line on any change of the signature, and the centre now.
+        widen(kRed56, c, pitch);
+        const CentreRead red = readCentre(c, pitch, 2076, 1787), red2 = readCentre(c, pitch, 2076, 1787);
+        check(sameSignature(red, red2), "the same read twice: the same signature");
+        widen(kPlainDot, c, pitch);
+        const CentreRead teal = readCentre(c, pitch, 2076, 1787);
+        check(teal.plain == red.plain && !sameSignature(teal, red), "teal and red, both plain: the colour differs, so the signature");
+        widen(kTool43, c, pitch);
+        const CentreRead tool = readCentre(c, pitch, 2076, 1787);
+        std::memset(c, 0, sizeof(c));
+        const CentreRead empty = readCentre(c, pitch, 2076, 1787);
+        check(!tool.plain && !empty.plain && !sameSignature(tool, empty), "empty, then the tool's dot: both other, the signature differs");
+        CentreRead moved = teal;
+        moved.bx0 += 1;
+        check(!sameSignature(teal, moved), "the box moved: differs");
+        CentreRead more = tool;
+        more.lit += 1;
+        check(!sameSignature(tool, more), "one more lit pixel: differs");
+        formatCentreNow(teal, line, sizeof(line));
+        check(std::strcmp(line, "aim dot: centre now plain (the plain dot without a weapon: erased; lit=20, bright=17, box=x3..8,y3..7, "
+                                "max=173,255,250)") == 0,
+              "centre now, plain");
+        formatCentreNow(empty, line, sizeof(line));
+        check(has(line, "aim dot: centre now other (a weapon's or a tool's dot, or nothing: kept; why=empty, lit=0"), "centre now, other");
+        check(kCentreNowMs == 10000, "centre now every 10 s");
         char pixels[kPixelsLineCap];
         widen(kTool43, c, pitch);
         formatCentrePixels(c, pitch, pixels, sizeof(pixels));

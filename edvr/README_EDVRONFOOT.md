@@ -272,7 +272,8 @@ native_vr_on_foot_hud = body
   точки инструментов видны; `show` — точка всегда видна. Обычная точка узнаётся по форме, цвет не важен: после
   инструмента, оружия и кругового меню игра перекрашивает её в атласе (`.57`). В логе на смену решения: `aim dot:
   centre plain (…; lit=…, bright=…, box=…, max=R,G,B)` или `aim dot: centre other (…; why=empty|shape|atlas, …)` и за
-  ней `aim dot: centre pixels …` (все пиксели центра).
+  ней `aim dot: centre pixels …` (все пиксели центра) — на каждую смену подписи; раз в 10 с на ногах `aim dot:
+  centre now …` (`.58`).
 
 Что искать в логе: `head aim: hooked …` (хуки стоят) или `head aim: inert: …` (игра не той версии — прицел головой не
 работает); `head aim: key=on`; на ногах `head aim: player identified …`; `head aim: on` / `head aim: off (<причина>)`;

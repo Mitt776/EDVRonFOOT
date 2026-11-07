@@ -3105,7 +3105,8 @@ REM pure half: the key's values, rubbish and empty (hide); the atlas by its 1.16
 REM 1032..1044, y 456..467, .42's dot inside; 2768x2383 -> x 1377..1391, y 608..623), outward, inside a tiny atlas and never empty; the
 REM weapon cue (vector 336 or 642, each alone; .42's other vector counts and text or icons no); the plain dot by its shape, any colour (.57:
 REM .42's dots, .56's red plain dot, a blue and a dimmer one plain; the weapon's dot, the tool's red dot in the hand, a brighter rim,
-REM an empty centre, a dot at the window's edge and another atlas other); every line's text, the signature and the pixels line.
+REM an empty centre, a dot at the window's edge and another atlas other); every line's text, the signature and the pixels line;
+REM .58's signature compare (a line on any change of it) and the centre now line.
 if not exist "%OBJ%\aimdot" mkdir "%OBJ%\aimdot"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\aimdot"\ /Fe"%BUILD%\aim_dot_test.exe" ^
