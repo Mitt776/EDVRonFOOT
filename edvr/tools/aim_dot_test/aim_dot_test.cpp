@@ -3,9 +3,9 @@
 // Drives the pure half: the key's every value, rubbish and empty (both hide); the atlas by its 1.161 proportions; the centre in pixels
 // (2076x1787 -> x 1032..1044, y 456..467 with .42's dot x 1035..1041, y 459..464 inside; 2768x2383 -> x 1377..1391, y 608..623),
 // rounded outward, inside a tiny atlas and never empty; the weapon cue (vector 336 or 642 yes, each alone, the pistol's 168 and 546
-// too; .42's other vector counts and text or icons of 336 no); the plain dot by tint and size (.56) on real centres (.42's plain dots
-// yes, the weapon's dot by its size and a tool's red dot by its hue no) and made ones (brighter, near white, blue, haloed yes; a paler
-// red, an empty or dim centre, a dot at the window's edge, a block, one pixel and another atlas size no); and the text of every line,
+// too; .42's other vector counts and text or icons of 336 no); the plain dot by its shape, any colour (.57), on real centres (.42's
+// plain dots and .56's red plain dot yes; the weapon's dot and the tool's own red dot in the hand no) and made ones (blue, 40 dimmer
+// yes; a rim 60 brighter, an empty or dim centre, a dot at the window's edge and another atlas size no); and the text of every line,
 // the signature and the pixels line.
 #include "../../src/d3d11/aim_dot_core.h"
 #include "aim_dot_samples.h"
@@ -110,54 +110,32 @@ void partPattern() {
     check(r.box && r.bx0 == 3 && r.bx1 == 8 && r.by0 == 3 && r.by1 == 7, ".42's 01: the box x 3..8, y 3..7");
     check(r.maxR == 173 && r.maxG == 255 && r.maxB == 250, ".42's 01: the brightest is 173,255,250");
     check(read(kPlain42b).plain, ".42's 04: the plain dot at a door");
+    r = read(kRed56);
+    check(r.plain && r.maxR == 255 && r.maxG == 0 && r.maxB == 0, ".56's red plain dot (a weapon put away): plain, whatever its colour");
     r = read(kWeapon42);
-    check(!r.plain && r.why == Why::Size && r.bright == 27, ".42's 02: the weapon's dot is other, by its size (27 bright)");
+    check(!r.plain && r.why == Why::Shape, ".42's 02: the weapon's dot is other, by its shape");
     r = read(kTool43);
-    check(!r.plain && r.why == Why::Tint, ".43's 01: the tool's red dot is other, by its hue");
+    check(!r.plain && r.why == Why::Shape, ".43's 01: the tool's own red dot in the hand is other, by its shape");
 
-    // The day side: the same dot brighter (Dima, 05.11: the same colour, brighter).
-    tweak(kPlainDot, t, [](uint8_t* p, uint32_t, uint32_t) {
-        if (peakOf(p))
-            for (int k = 0; k < 3; ++k) p[k] = clampByte(p[k] + 60);
-    });
-    r = read(t);
-    check(r.plain, "brighter by 60 a channel: plain");
-    check(r.bright == 22, "brighter: the faint rim turns bright, 22 (inside 24)");
-    tweak(kPlainDot, t, [](uint8_t* p, uint32_t, uint32_t) {
-        if (p[0] == 173 && p[1] == 255 && p[2] == 250) {
-            p[0] = 240;
-            p[2] = 255;
-        }
-    });
-    check(read(t).plain, "near white 240,255,255 in the core: plain");
+    // Made ones.
     tweak(kPlainDot, t, [](uint8_t* p, uint32_t, uint32_t) {
         const int m = peakOf(p);
         p[0] = uint8_t(m * 2 / 255);
         p[1] = uint8_t(m * 163 / 255);
         p[2] = uint8_t(m);
     });
-    check(read(t).plain, "blue 2,163,255 (the pistol's colour at a ship): plain");
-    tweak(kPlainDot, t, [](uint8_t* p, uint32_t x, uint32_t y) {
-        if (!peakOf(p) && x >= 2 && x <= 9 && y >= 2 && y <= 8) p[0] = 0, p[1] = 40, p[2] = 40;
-    });
-    r = read(t);
-    check(r.plain && r.lit > 20 && r.bright == 17, "a halo of 40 around it: plain, more lit, the same bright");
-
-    // Others.
-    tweak(kTool43, t, [](uint8_t* p, uint32_t, uint32_t) {
+    check(read(t).plain, "blue 2,163,255 of the plain shape (the pistol's colour at a ship): plain");
+    tweak(kPlainDot, t, [](uint8_t* p, uint32_t, uint32_t) {
         if (peakOf(p))
-            for (int k = 1; k < 3; ++k) p[k] = clampByte(p[k] + 30);
+            for (int k = 0; k < 3; ++k) p[k] = clampByte(p[k] - 40);
+    });
+    check(read(t).plain, "dimmer by 40 a channel: within the tolerance, plain");
+    tweak(kPlainDot, t, [](uint8_t* p, uint32_t, uint32_t) {
+        if (peakOf(p) && peakOf(p) < 255)
+            for (int k = 0; k < 3; ++k) p[k] = clampByte(p[k] + 60);
     });
     r = read(t);
-    check(!r.plain && r.why == Why::Tint, "the tool's red dot, brighter and paler: other, hue");
-    tweak(kPlainDot, t, [](uint8_t* p, uint32_t, uint32_t) {
-        if (peakOf(p)) p[0] = clampByte(p[1] + 20);
-    });
-    check(read(t).why == Why::Tint, "red past G by 20: hue");
-    tweak(kPlainDot, t, [](uint8_t* p, uint32_t, uint32_t) {
-        if (peakOf(p)) p[0] = clampByte(p[1] + 8 < p[2] + 8 ? p[1] + 8 : p[2] + 8);
-    });
-    check(read(t).plain, "red equal to G and B plus the slack 8: still plain");
+    check(!r.plain && r.why == Why::Shape, "the rim brighter by 60: past the tolerance, shape");
     std::memset(t, 0, sizeof(t));
     r = read(t);
     check(!r.plain && r.why == Why::Empty && !r.box && r.lit == 0, "an empty centre: other, empty, no box");
@@ -170,15 +148,7 @@ void partPattern() {
         for (uint32_t x = 3; x < kPatternW; ++x)
             for (int k = 0; k < 3; ++k) t[(y * kPatternW + x - 3) * 3 + k] = kPlainDot[(y * kPatternW + x) * 3 + k];
     r = read(t);
-    check(!r.plain && r.why == Why::Edge && r.bx0 == 0, "the dot moved to the window's edge: other, edge");
-    tweak(kPlainDot, t, [](uint8_t* p, uint32_t x, uint32_t y) {
-        if (x >= 1 && x <= 10 && y >= 1 && y <= 9) p[0] = 100, p[1] = 200, p[2] = 200;
-    });
-    check(read(t).why == Why::Size, "a teal block of 90 bright pixels: size");
-    tweak(kPlainDot, t, [](uint8_t* p, uint32_t x, uint32_t y) {
-        if (!(x == 5 && y == 5)) p[0] = p[1] = p[2] = 0;
-    });
-    check(read(t).why == Why::Size, "one pixel: size");
+    check(!r.plain && r.why == Why::Shape && r.bx0 == 0, "the dot moved to the window's edge: other, shape");
 
     // The atlas.
     widen(kPlainDot, c, pitch);
@@ -219,9 +189,14 @@ void partLines() {
               "centre plain, with the signature");
         widen(kTool43, c, pitch);
         formatCentre(readCentre(c, pitch, 2076, 1787), line, sizeof(line));
-        check(has(line, "aim dot: centre other (a weapon's or a tool's dot, or nothing: kept; why=hue, lit=24, bright=22, box=x3..8,y2..7, "
+        check(has(line, "aim dot: centre other (a weapon's or a tool's dot, or nothing: kept; why=shape, lit=24, bright=22, box=x3..8,y2..7, "
                         "max=255,0,0)"),
-              "centre other, the tool: why=hue");
+              "centre other, the tool in the hand: why=shape");
+        widen(kRed56, c, pitch);
+        formatCentre(readCentre(c, pitch, 2076, 1787), line, sizeof(line));
+        check(std::strcmp(line, "aim dot: centre plain (the plain dot without a weapon: erased; lit=20, bright=17, box=x3..8,y3..7, "
+                                "max=255,0,0)") == 0,
+              "centre plain, the red plain dot: max=255,0,0");
         std::memset(c, 0, sizeof(c));
         formatCentre(readCentre(c, pitch, 2076, 1787), line, sizeof(line));
         check(has(line, "why=empty, lit=0, bright=0, box=none, max=0,0,0)"), "centre other, empty: box none");

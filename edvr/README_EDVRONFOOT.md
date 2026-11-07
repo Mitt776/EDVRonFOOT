@@ -269,10 +269,10 @@ native_vr_on_foot_hud = body
 - `native_vr_on_foot_aim_eye` — ведущий глаз при LT: `right` (по умолчанию), `left`, `off`. С LT картинка игры
   сдвигается так, что мушка встаёт перед выбранным глазом.
 - `native_vr_on_foot_aim_dot` — точка прицела без оружия: `hide` (по умолчанию) прячет обычную точку, прицел оружия и
-  точки инструментов видны; `show` — точка всегда видна. Обычная точка узнаётся по оттенку (бирюзовая или синяя) и
-  размеру, днём и ночью одинаково (`.56`). В логе на смену решения: `aim dot: centre plain (…; lit=…, bright=…, box=…,
-  max=R,G,B)` или `aim dot: centre other (…; why=empty|hue|edge|size, …)` и за ней `aim dot: centre pixels …` (все
-  пиксели центра).
+  точки инструментов видны; `show` — точка всегда видна. Обычная точка узнаётся по форме, цвет не важен: после
+  инструмента, оружия и кругового меню игра перекрашивает её в атласе (`.57`). В логе на смену решения: `aim dot:
+  centre plain (…; lit=…, bright=…, box=…, max=R,G,B)` или `aim dot: centre other (…; why=empty|shape|atlas, …)` и за
+  ней `aim dot: centre pixels …` (все пиксели центра).
 
 Что искать в логе: `head aim: hooked …` (хуки стоят) или `head aim: inert: …` (игра не той версии — прицел головой не
 работает); `head aim: key=on`; на ногах `head aim: player identified …`; `head aim: on` / `head aim: off (<причина>)`;

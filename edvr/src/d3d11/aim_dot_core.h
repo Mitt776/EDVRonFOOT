@@ -93,10 +93,10 @@ inline int weaponCue(bool vectorShader, uint32_t count) {
     return -1;
 }
 
-// The plain dot's picture at night (.44; since .56 the rig's sample only -- the decision is readCentre below). .42's snapshot 01
+// The plain dot's picture at night (.44; since .57 its brightness is the shape readCentre below holds a centre to). .42's snapshot 01
 // (2076x1787), R, G, B of the centre's 12x11 window, rows top down; .42's 04 is the same to the byte. .44 erased only a centre within
-// 48 a channel of it, which a day side's brighter dot failed (.56). The window and the atlas size stay: any other atlas size has no
-// window, so nothing is erased there (the dot shows).
+// 48 a channel of it; since .57 the same 48 holds the brightness of each pixel, whatever its colour. Any other atlas size has no
+// pattern, so nothing is erased there (the dot shows).
 constexpr uint32_t kPatternW = 12, kPatternH = 11, kPatternAtlasW = 2076, kPatternAtlasH = 1787;
 constexpr uint8_t kPlainDot[kPatternW * kPatternH * 3] = {
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -113,27 +113,23 @@ constexpr uint8_t kPlainDot[kPatternW * kPatternH * 3] = {
 };
 inline bool patternFor(uint32_t w, uint32_t h) { return w == kPatternAtlasW && h == kPatternAtlasH; }
 
-// The plain dot by its tint and size (.56, on-foot-aim-dot-daylight): kPlainDot above matched by the byte only at night -- on a
-// planet's day side the game draws the same dot brighter, 48 a channel did not hold, and the dot came back. kPlainDot stays as the
-// rig's sample. The centre is the plain dot when all hold:
-//  - not empty: some pixel's brightest channel is kCorePeak or more;
-//  - the tint: every lit pixel (brightest channel kLit or more) has G + kTintSlack >= R and B + kTintSlack >= R -- teal, blue or
-//    white, never red, orange or yellow (the tools' red dot, .43, is the plain dot's size: only its tint tells it apart);
-//  - the edge: no lit pixel on the window's outer rows or columns (the spot wholly inside);
-//  - the size: kBrightMin..kBrightMax bright pixels (kBright or more). The samples: the plain dot 17, the weapon's dot 27 (.42), the
-//    tool's red dot 22 (.43); the room up to 24 is for a brighter day halo.
-// Brightness enters only through those low thresholds, so a brighter dot is the same dot.
-constexpr int kLit = 24, kBright = 64, kCorePeak = 128, kTintSlack = 8;
-constexpr uint32_t kBrightMin = 8, kBrightMax = 24;
-enum class Why : int { None = 0, Atlas, Empty, Tint, Edge, Size };
+// The plain dot by its shape (.57, on-foot-aim-dot-daylight). After a weapon or a tool is put away, and after any item of the radial
+// menu, the game leaves the plain dot in the atlas in red: the same picture, its R equal to the plain dot's G to the byte (.56's
+// flight, 08.11; the headset shows it teal, so the atlas's colour is not the eye's). .44 (48 a channel) and .56 (its tint) both read
+// it as a tool's dot and kept it. Now the colour is not looked at: a pixel's brightness is its brightest channel, and the centre is
+// the plain dot when
+//  - not empty: some pixel's brightness is kCorePeak or more;
+//  - the shape: every one of the window's pixels is within kPatternTolerance of kPlainDot's brightness there.
+// The samples: the plain dot and its red copy 0 away; the weapon's dot (.42) 15 pixels past 48, up to 202; the tool's own red dot in
+// the hand (.43) 13 pixels, up to 174. The lit and bright counts are the signature only.
+constexpr int kLit = 24, kBright = 64, kCorePeak = 128, kPatternTolerance = 48;
+enum class Why : int { None = 0, Atlas, Empty, Shape };
 inline const char* whyName(Why w) {
     switch (w) {
         case Why::None: return "none";
         case Why::Atlas: return "atlas";
         case Why::Empty: return "empty";
-        case Why::Tint: return "hue";
-        case Why::Edge: return "edge";
-        case Why::Size: return "size";
+        case Why::Shape: return "shape";
     }
     return "?";
 }
@@ -147,17 +143,18 @@ struct CentreRead {
     uint32_t bx0 = 0, bx1 = 0, by0 = 0, by1 = 0;
     uint8_t maxR = 0, maxG = 0, maxB = 0;
 };
+inline int brightnessOf(const uint8_t* p) { return p[0] > p[1] ? (p[0] > p[2] ? p[0] : p[2]) : (p[1] > p[2] ? p[1] : p[2]); }
 // `rgba`: the centre's pixels, 4 bytes each (R, G, B, A as the atlas stores them), `pitch` bytes a row; `w`, `h`: the atlas's size.
 inline CentreRead readCentre(const uint8_t* rgba, uint32_t pitch, uint32_t w, uint32_t h) {
     CentreRead r;
     if (!rgba || !patternFor(w, h)) return r;
-    bool tintOk = true, edgeLit = false;
+    bool shapeOk = true;
     int peak = -1;
     for (uint32_t y = 0; y < kPatternH; ++y)
         for (uint32_t x = 0; x < kPatternW; ++x) {
             const uint8_t* p = rgba + size_t(y) * pitch + size_t(x) * 4;
-            const int R = p[0], G = p[1], B = p[2];
-            const int m = R > G ? (R > B ? R : B) : (G > B ? G : B);
+            const int m = brightnessOf(p), want = brightnessOf(kPlainDot + (y * kPatternW + x) * 3);
+            if (m - want > kPatternTolerance || want - m > kPatternTolerance) shapeOk = false;
             if (m > peak) {
                 peak = m;
                 r.maxR = p[0];
@@ -167,8 +164,6 @@ inline CentreRead readCentre(const uint8_t* rgba, uint32_t pitch, uint32_t w, ui
             if (m < kLit) continue;
             ++r.lit;
             if (m >= kBright) ++r.bright;
-            if (G + kTintSlack < R || B + kTintSlack < R) tintOk = false;
-            if (x == 0 || y == 0 || x + 1 == kPatternW || y + 1 == kPatternH) edgeLit = true;
             if (!r.box) {
                 r.box = true;
                 r.bx0 = r.bx1 = x;
@@ -182,12 +177,8 @@ inline CentreRead readCentre(const uint8_t* rgba, uint32_t pitch, uint32_t w, ui
         }
     if (peak < kCorePeak)
         r.why = Why::Empty;
-    else if (!tintOk)
-        r.why = Why::Tint;
-    else if (edgeLit)
-        r.why = Why::Edge;
-    else if (r.bright < kBrightMin || r.bright > kBrightMax)
-        r.why = Why::Size;
+    else if (!shapeOk)
+        r.why = Why::Shape;
     else {
         r.why = Why::None;
         r.plain = true;
@@ -234,7 +225,7 @@ inline void formatWeaponOn(uint32_t seen, char* out, size_t cap) {
 }
 inline void formatWeaponOff(char* out, size_t cap) { std::snprintf(out, cap, "aim dot: weapon off"); }
 // The decision with the read's signature (.56): lit and bright pixels, the spot's box in the window, the brightest colour; for other
-// the check that failed (empty, hue, edge, size).
+// the check that failed (empty, shape; atlas for another atlas size).
 inline void formatCentre(const CentreRead& r, char* out, size_t cap) {
     char box[48];
     if (r.box)
