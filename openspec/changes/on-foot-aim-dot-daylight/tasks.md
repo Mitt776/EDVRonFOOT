@@ -143,9 +143,9 @@
   `tools/aim_dot_probe_test`, гейт `:rig_aim_dot_probe_test`, вызовы в `on_foot_hud.cpp` (снимок до стирания) и
   `aimDotMark` в `device_hook.cpp`, ключ `experimental.native_vr_on_foot_dot = off` в шаблоне `edvr.ini`; каждое место
   с пометкой `TEMP .59`. Проверка: diff с `.44` только в комментариях.
-- [ ] 7.2 Сборка `.59` (`build.bat --jobs 8`, все гейты), коммит, тег, `--dll-only`, установка при закрытой игре.
+- [x] 7.2 Сборка `.59` (`build.bat --jobs 8`, все гейты), коммит, тег, `--dll-only`, установка при закрытой игре.
   Проверка: «all gates passed», `132 keys`, «vr payload and profile verified».
-- [ ] 7.3 Временная строка в живом `edvr.ini`: `[experimental] native_vr_on_foot_dot = census` с пометкой
+- [x] 7.3 Временная строка в живом `edvr.ini`: `[experimental] native_vr_on_foot_dot = census` с пометкой
   `TEMP 2026-11-08`. Проверка: `diff` с копией — одна строка и пометка.
 - [ ] 7.4 Полёт Димы: точки нет → `PAUSE`; после пункта кругового меню, точка в центре → `PAUSE`; экзобиолог, точка
   видна → `PAUSE`. Проверка: в `edvr_logs\aim_dot\` три папки со снимками.
