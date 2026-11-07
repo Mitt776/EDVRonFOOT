@@ -189,7 +189,24 @@ minutes after a flight finally reproduced the effect being chased.
 
 ## Git
 
-- Solo project: **branch, commit, merge to main, push.** No pull requests.
+- EDVRonFOOT (this fork) lives at `github.com/Mitt776/EDVRonFOOT`, public.
+  This replaces upstream EDVR's "solo project, no pull requests" rule.
+- **One OpenSpec change = one branch = one pull request.** Start a change
+  `foo` on a branch `change/foo` from `main`; commit there; open a PR into
+  `main` that links `openspec/changes/foo/` and carries the flight plan
+  (`.github/pull_request_template.md`). Order: change — branch — PR —
+  flight — archive the change in the same branch — merge — delete the
+  branch. Merge only after the flight passed and Dima said yes. No direct
+  commits to `main`, except small doc fixes.
+- **Commit email is the GitHub noreply address**
+  `187125319+Mitt776@users.noreply.github.com` (set in this repo's
+  `git config user.email`), never a personal address.
+- **A release is a tag `edvronfoot-vX.Y.Z` on `main`** after the merge
+  (`git describe` then puts "edvronfoot" into the log's version line):
+  full build, `package.bat X.Y.Z` (writes
+  `dist\EDVRonFOOT-X.Y.Z.zip`: the VR installer, README, notices; no flat
+  edition), then a GitHub release with that zip. Never publish a release
+  without Dima's yes.
 - **The task is not done until it is pushed.** After merging run
   `git push`, then `git log origin/main -1` and confirm the commit is
   actually there. A commit made and never pushed has been noticed from the

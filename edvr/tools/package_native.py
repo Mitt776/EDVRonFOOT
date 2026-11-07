@@ -6,12 +6,18 @@ packaged (d3d11.dll, openvr_api.dll, the installer: the FileVersion and
 ProductVersion strings of their VERSIONINFO, which build.bat sets from `git
 describe --tags --always --dirty`) is compared with the release version asked
 for. The rule: both strings must be exactly "v<version>" -- what git prints on
-a clean checkout of the tag v<version> -- or exactly "<version>". Anything
+a clean checkout of the tag v<version> --, exactly "edvronfoot-v<version>"
+(EDVRonFOOT's own release tags) or exactly "<version>". Anything
 that mentions "dirty" is refused first, as a build from a tree with
 uncommitted changes (the kind that has reached a field tester twice); a build
 a few commits past the tag ("v0.17.0-2-g650d8a9"), "unknown" (no git), another
 release's tag and a binary with no version stamp are refused as mismatches.
 --dry-run makes the same check and writes nothing.
+
+--release writes EDVRonFOOT's public release instead: one archive
+EDVRonFOOT-<version>.zip holding the self-contained VR installer (as
+EDVRonFOOT-installer.exe), a README and the license notices -- no loose DLLs
+and no flat edition. It runs every check the VR package runs first.
 """
 import argparse
 import hashlib
@@ -97,7 +103,7 @@ def version_stamp_problems(version, stamps):
     VERSIONINFO carries, or None for a binary that has no stamp. The rule is
     in the module docstring: exactly "v<version>" or "<version>", and "dirty"
     named for what it is before anything else."""
-    accepted = ("v" + version, version)
+    accepted = ("v" + version, "edvronfoot-v" + version, version)
     problems = []
     for name, stamp in stamps:
         if not stamp:
@@ -176,7 +182,7 @@ def _check_version_stamps(version, files):
     if problems:
         raise ValueError(
             "these binaries are not release %s:\n  %s\n  build.bat stamps them from `git describe "
-            "--tags --always --dirty`: check out the tag v%s with a clean tree, run build.bat, "
+            "--tags --always --dirty`: check out the tag edvronfoot-v%s with a clean tree, run build.bat, "
             "then package." % (version, "\n  ".join(problems), version))
     print("[edvr] version stamps: %s all read v%s" % (", ".join(name for name, _ in stamps), version))
 
@@ -249,13 +255,11 @@ def _validate_installer_resources(executable, files, profile="vr"):
         raise ValueError("installer embeds DLSS but its matching DLL and notice are missing from the package")
 
 
-def package(root, version, no_dlss=False, dry_run=False, profile="vr"):
-    version = _version(version); root = root.resolve()
-    prefix = "edvr-flat" if profile == "flat" else "edvr"
-    dist = root / "dist"; stage = dist / ("." + prefix + "-stage-" + version); final_stage = dist / (prefix + "-" + version)
-    archive = dist / (prefix + "-" + version + ".zip"); temporary_archive = dist / ("." + prefix + "-" + version + ".zip.tmp")
-    if not _inside(stage, dist) or not _inside(final_stage, dist) or not _inside(archive, dist):
-        raise ValueError("resolved staging destination escapes repository dist")
+def _validated_files(root, version, no_dlss, profile):
+    """Every check a package makes before it writes anything: the payload is
+    all there, every EDVR binary is stamped as this release, the native DLLs
+    export what they must, the bundled loader is the pinned one, and the
+    installer embeds exactly these files. Returns the payload list."""
     files = _files(root, no_dlss, profile)
     missing = [str(src) for src, _ in files if not src.is_file()]
     if missing:
@@ -275,6 +279,64 @@ def package(root, version, no_dlss=False, dry_run=False, profile="vr"):
         raise ValueError("bundled OpenXR loader validation failed: %s" % exc)
     installer = "edvr-flat-installer.exe" if profile == "flat" else "edvr-installer.exe"
     _validate_installer_resources(root / "build" / installer, files, profile)
+    return files
+
+
+# The public EDVRonFOOT release: what the archive carries, under which names.
+RELEASE_INSTALLER = "EDVRonFOOT-installer.exe"
+RELEASE_NOTICES = ("LICENSE.txt", "DXBC-HASH-LICENSE.txt", "NVIDIA-DLSS-LICENSE.txt",
+                   "FIDELITYFX-SDK-DX11-LICENSE.txt")
+
+
+def _release_files(root, files):
+    """The release archive's (source, name) list, built from the validated VR
+    payload: its installer renamed, its license notices, and the release README.
+    The DLLs are not loose here: the installer carries and checks them."""
+    by_name = {name: source for source, name in files}
+    result = [(by_name["edvr-installer.exe"], RELEASE_INSTALLER),
+              (root / "release" / "README-EDVRonFOOT.txt", "README.txt"),
+              (by_name["openvr/OPENXR-LOADER-LICENSE.txt"], "OPENXR-LOADER-LICENSE.txt")]
+    result += [(by_name[name], name) for name in RELEASE_NOTICES if name in by_name]
+    return result
+
+
+def release(root, version, no_dlss=False, dry_run=False):
+    """Write dist/EDVRonFOOT-<version>.zip (module docstring, --release)."""
+    version = _version(version); root = root.resolve()
+    dist = root / "dist"; archive = dist / ("EDVRonFOOT-" + version + ".zip")
+    temporary_archive = dist / (".EDVRonFOOT-" + version + ".zip.tmp")
+    if not _inside(archive, dist) or not _inside(temporary_archive, dist):
+        raise ValueError("resolved release destination escapes repository dist")
+    files = _release_files(root, _validated_files(root, version, no_dlss, "vr"))
+    missing = [str(src) for src, _ in files if not src.is_file()]
+    if missing:
+        raise ValueError("missing release file:\n  " + "\n  ".join(missing))
+    print("[edvr] release plan: %s" % archive)
+    for _, name in files: print("       %s" % name)
+    if dry_run:
+        print("[edvr] dry run: wrote nothing."); return 0
+    dist.mkdir(parents=True, exist_ok=True)
+    if temporary_archive.exists(): temporary_archive.unlink()
+    try:
+        with zipfile.ZipFile(temporary_archive, "w", compression=zipfile.ZIP_DEFLATED) as output:
+            for source, name in files:
+                output.write(source, name)
+    except Exception:
+        if temporary_archive.exists(): temporary_archive.unlink()
+        raise
+    os.replace(temporary_archive, archive)
+    print("[edvr] wrote %s (%d bytes)" % (archive, archive.stat().st_size)); return 0
+
+
+def package(root, version, no_dlss=False, dry_run=False, profile="vr"):
+    version = _version(version); root = root.resolve()
+    prefix = "edvr-flat" if profile == "flat" else "edvr"
+    dist = root / "dist"; stage = dist / ("." + prefix + "-stage-" + version); final_stage = dist / (prefix + "-" + version)
+    archive = dist / (prefix + "-" + version + ".zip"); temporary_archive = dist / ("." + prefix + "-" + version + ".zip.tmp")
+    if not _inside(stage, dist) or not _inside(final_stage, dist) or not _inside(archive, dist):
+        raise ValueError("resolved staging destination escapes repository dist")
+    files = _validated_files(root, version, no_dlss, profile)
+    installer = "edvr-flat-installer.exe" if profile == "flat" else "edvr-installer.exe"
     print("[edvr] %s package plan: %s" % (profile, archive))
     for _, name in files: print("       %s" % name)
     if dry_run:
@@ -329,6 +391,11 @@ def self_test():
                                             ("openvr/openvr_api.dll", stamp("1.2.3"))]) == []
     assert version_stamp_problems("1.2.3-rc.1", [("d3d11.dll", stamp("v1.2.3-rc.1"))]) == []
     assert version_stamp_problems("1.2.3", []) == []
+    # EDVRonFOOT's release tags: "edvronfoot-v<version>" is the release, a build
+    # past it or one of the old "v0.19.1-edvronfoot.N" tags is not.
+    assert version_stamp_problems("0.1.0", [("d3d11.dll", stamp("edvronfoot-v0.1.0"))]) == []
+    for wrong in ("edvronfoot-v0.1.0-3-g0123abc", "v0.19.1-edvronfoot.61", "edvronfoot-v0.1.1"):
+        refused("0.1.0", [("d3d11.dll", stamp(wrong))], "not release v0.1.0")
     text = refused("1.2.3", [("d3d11.dll", stamp("v1.2.2"))], "d3d11.dll is stamped v1.2.2",
                    "(FileVersion/ProductVersion)", "not release v1.2.3")
     assert "uncommitted" not in text
@@ -499,6 +566,43 @@ def self_test():
             assert not (root / "dist" / "edvr-3.0.0.zip").exists()
             assert package(root, "3.0.0", no_dlss=True) == 0 and (root / "dist" / "edvr-3.0.0.zip").is_file()
 
+            # The public EDVRonFOOT release: the same checks, then one archive with
+            # the installer under its release name, the README and the notices --
+            # no loose DLLs, no settings file, no flat edition.
+            (root / "release" / "README-EDVRonFOOT.txt").write_bytes(b"EDVRonFOOT release")
+            release_zip = root / "dist" / "EDVRonFOOT-3.0.0.zip"
+            stamps["override"] = {name: stamp("edvronfoot-v3.0.0")
+                                  for name in (graphics, runtime, "edvr-installer.exe")}
+            assert release(root, "3.0.0", dry_run=True) == 0 and not release_zip.exists()
+            assert release(root, "3.0.0") == 0
+            with zipfile.ZipFile(release_zip) as archive:
+                assert set(archive.namelist()) == {
+                    RELEASE_INSTALLER, "README.txt", "OPENXR-LOADER-LICENSE.txt", "LICENSE.txt",
+                    "DXBC-HASH-LICENSE.txt", "NVIDIA-DLSS-LICENSE.txt"}, archive.namelist()
+                assert archive.read(RELEASE_INSTALLER) == b"payload"
+                assert archive.read("README.txt") == b"EDVRonFOOT release"
+                assert archive.read("NVIDIA-DLSS-LICENSE.txt") == notice.read_bytes()
+            stamps["override"] = {}
+            for label, override, needle in (
+                    ("a dirty installer", {"edvr-installer.exe": stamp("edvronfoot-v3.0.1-dirty")}, "dirty"),
+                    ("a build past the tag", {graphics: stamp("edvronfoot-v3.0.1-2-g0123abc")},
+                     "d3d11.dll is stamped edvronfoot-v3.0.1-2-g0123abc")):
+                stamps["version"] = "3.0.1"; stamps["override"] = override
+                for dry_run in (True, False):
+                    try:
+                        release(root, "3.0.1", dry_run=dry_run)
+                        raise AssertionError("release with %s accepted" % label)
+                    except ValueError as error:
+                        assert needle in str(error), (label, str(error))
+                assert not (root / "dist" / "EDVRonFOOT-3.0.1.zip").exists(), "a refused release wrote: " + label
+            stamps["override"] = {}
+            (root / "release" / "README-EDVRonFOOT.txt").unlink()
+            try:
+                release(root, "3.0.1"); raise AssertionError("release without its README accepted")
+            except ValueError as error:
+                assert "README-EDVRonFOOT.txt" in str(error), str(error)
+            assert not (root / "dist" / "EDVRonFOOT-3.0.1.zip").exists()
+
             flat_descriptor = b"[install]\r\nschema = 1\r\nprofile = flat\r\n"
             (root / "build" / "edvr_profile_flat.ini").write_bytes(flat_descriptor)
             (root / "build" / "edvr-flat.ini").write_bytes(b"[fix]\r\ntemporal_aa = off\r\n")
@@ -578,9 +682,14 @@ def main(argv=None):
     parser.add_argument("--profile", choices=("vr", "flat"), default="vr")
     parser.add_argument("--check-installer", action="store_true",
                         help="verify the built installer's actual resources without executing it")
+    parser.add_argument("--release", action="store_true",
+                        help="write the public EDVRonFOOT-<version>.zip (VR installer, README, notices)")
     args = parser.parse_args(argv)
     if args.self_test: return self_test()
     if args.check_installer: return check_installer(args.root, args.profile)
+    if args.release:
+        if args.profile != "vr": parser.error("--release packages the VR edition only")
+        return release(args.root, args.version, args.no_dlss, args.dry_run)
     return package(args.root, args.version, args.no_dlss, args.dry_run, args.profile)
 
 

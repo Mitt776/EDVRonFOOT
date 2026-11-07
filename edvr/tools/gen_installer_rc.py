@@ -38,6 +38,11 @@ IDR_LOADER_NOTICE = 106
 IDR_PROFILE = 107
 RT_MANIFEST = 24
 
+# What Windows shows in a file's Properties > Details. EDVRonFOOT is a fork of
+# EDVR (characterecho-sean, MIT): the names say so, the copyright stays his.
+PRODUCT_NAME = 'EDVRonFOOT'
+PRODUCT_LINE = 'EDVRonFOOT - native VR on foot for Elite Dangerous, based on EDVR'
+
 
 def parse_version_tuple(describe):
     """Parse a `git describe` string into a numeric (major, minor, patch,
@@ -53,7 +58,8 @@ def parse_version_tuple(describe):
     becomes the all-zero version Windows shows for "no version". Every field
     is clamped to 0..65535, VERSIONINFO's numeric field width.
     """
-    m = re.match(r'^v?(\d+)\.(\d+)\.(\d+)(?:-.*)?$', describe or '')
+    # EDVRonFOOT's own release tags read 'edvronfoot-v0.1.0[-<n>-g<hash>]'.
+    m = re.match(r'^(?:edvronfoot-)?v?(\d+)\.(\d+)\.(\d+)(?:-.*)?$', describe or '')
     if not m:
         return (0, 0, 0, 0)
     major, minor, patch = (int(m.group(i)) for i in (1, 2, 3))
@@ -74,7 +80,7 @@ def origin_url_https():
     repo, or no `origin` remote falls back to the project's known home rather
     than failing a build over a Comments string.
     """
-    fallback = 'https://github.com/characterecho-sean/edvr-unofficial-patch'
+    fallback = 'https://github.com/Mitt776/EDVRonFOOT'
     try:
         url = subprocess.check_output(
             ['git', 'remote', 'get-url', 'origin'],
@@ -112,12 +118,12 @@ def versioninfo_lines(version, file_description, internal_name, original_filenam
         '    BEGIN',
         '        BLOCK "040904b0"',
         '        BEGIN',
-        '            VALUE "CompanyName", "EDVR (unofficial)"',
+        '            VALUE "CompanyName", "EDVRonFOOT (based on EDVR)"',
         '            VALUE "FileDescription", "%s"' % file_description,
         '            VALUE "FileVersion", "%s"' % version,
         '            VALUE "InternalName", "%s"' % internal_name,
         '            VALUE "OriginalFilename", "%s"' % original_filename,
-        '            VALUE "ProductName", "EDVR unofficial patch"',
+        '            VALUE "ProductName", "%s"' % PRODUCT_NAME,
         '            VALUE "ProductVersion", "%s"' % version,
         '            VALUE "LegalCopyright", "Copyright (c) 2026 characterecho-sean. MIT License."',
         '            VALUE "Comments", "%s"' % comments,
@@ -143,7 +149,7 @@ def write_version_rc(which, version, out, dry_run):
     if which == 'graphics':
         lines = versioninfo_lines(
             version,
-            file_description=('EDVR unofficial VR patch for Elite Dangerous: Direct3D 11 '
+            file_description=(PRODUCT_LINE + ': Direct3D 11 '
                               'proxy (forwards to the system d3d11.dll)'),
             internal_name='edvr_openxr_graphics',
             original_filename='d3d11.dll',
@@ -153,7 +159,7 @@ def write_version_rc(which, version, out, dry_run):
     else:
         lines = versioninfo_lines(
             version,
-            file_description=('EDVR unofficial VR patch for Elite Dangerous: OpenXR runtime '
+            file_description=(PRODUCT_LINE + ': OpenXR runtime '
                               'speaking the OpenVR ABI'),
             internal_name='edvr_openxr_runtime',
             original_filename='openvr_api.dll',
@@ -390,7 +396,8 @@ def main(argv=None):
     version = args.version
     lines += [''] + versioninfo_lines(
         version,
-        file_description='EDVR flat temporal qualification installer' if args.profile == 'flat' else 'EDVR installer',
+        file_description=('EDVR flat temporal qualification installer' if args.profile == 'flat'
+                          else PRODUCT_LINE + ': installer'),
         internal_name='edvr-flat-installer' if args.profile == 'flat' else 'edvr-installer',
         original_filename='edvr-flat-installer.exe' if args.profile == 'flat' else 'edvr-installer.exe',
         file_type='0x1L',
@@ -414,6 +421,12 @@ def self_test():
     assert parse_version_tuple('unknown') == (0, 0, 0, 0)
     assert parse_version_tuple('garbage') == (0, 0, 0, 0)
     assert parse_version_tuple('v1.2.3-70000-gabcdef1') == (1, 2, 3, 65535)  # clamped
+    # EDVRonFOOT's tags: the release itself, a build past it, the old fork tags.
+    assert parse_version_tuple('edvronfoot-v0.1.0') == (0, 1, 0, 0)
+    assert parse_version_tuple('edvronfoot-v0.1.0-3-g60d505e') == (0, 1, 0, 3)
+    assert parse_version_tuple('edvronfoot-v0.1.0-3-g60d505e-dirty') == (0, 1, 0, 3)
+    assert parse_version_tuple('v0.19.1-edvronfoot.61-5-g60d505e') == (0, 19, 1, 5)
+    assert parse_version_tuple('notedvronfoot-v0.1.0') == (0, 0, 0, 0)
 
     with tempfile.TemporaryDirectory(prefix='edvr-rc-test-') as scratch:
         root = os.path.join(scratch, 'root'); build = os.path.join(root, 'build')
@@ -475,6 +488,14 @@ def self_test():
             graphics_text = stream.read()
         assert 'OriginalFilename", "d3d11.dll"' in graphics_text
         assert 'FILEVERSION 0,17,0,16' in graphics_text
+        assert 'ProductName", "EDVRonFOOT"' in graphics_text
+        assert 'FileDescription", "EDVRonFOOT - native VR on foot' in graphics_text
+        assert 'based on EDVR' in graphics_text and 'characterecho-sean' in graphics_text
+        assert main(['--version-rc', 'graphics', '--version', 'edvronfoot-v0.1.0', '--out', rc_out]) == 0
+        with open(os.path.join(rc_out, 'version_graphics.rc'), 'r', encoding='utf-8') as stream:
+            graphics_text = stream.read()
+        assert 'FILEVERSION 0,1,0,0' in graphics_text
+        assert 'FileVersion", "edvronfoot-v0.1.0"' in graphics_text
 
         assert main(['--version-rc', 'runtime', '--version', 'v0.16.2', '--out', rc_out]) == 0
         with open(os.path.join(rc_out, 'version_runtime.rc'), 'r', encoding='utf-8') as stream:
