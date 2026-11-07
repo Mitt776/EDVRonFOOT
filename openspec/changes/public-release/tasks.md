@@ -8,12 +8,12 @@
   grep` по всем ревизиям); убедиться, что `user` нет в коде и бинарных файлах. Проверка: список мест показан Диме.
 - [x] 1.3 Ветка `master` → `main`; `git config user.email 187125319+Mitt776@users.noreply.github.com`. Проверка: `git
   branch` — `main`.
-- [ ] 1.4 `pip install git-filter-repo`; один проход: `--mailmap` (почта → noreply), `--invert-paths --path
+- [x] 1.4 `pip install git-filter-repo`; один проход: `--mailmap` (почта → noreply), `--invert-paths --path
   screenshots/`, `--replace-text` (`user` → `user`). Проверка: поиск 1.2 по новой истории пуст; `git fsck` чисто;
   коммитов столько же (минус пустые от удаления папки, если были); теги на месте.
-- [ ] 1.5 Поиск ключей и токенов по всем версиям файлов (типовые признаки: `ghp_`, `sk-`, `AKIA`, `-----BEGIN`,
+- [x] 1.5 Поиск ключей и токенов по всем версиям файлов (типовые признаки: `ghp_`, `sk-`, `AKIA`, `-----BEGIN`,
   `password=`). Проверка: найденное разобрано, настоящих ключей нет.
-- [ ] 1.6 Полная сборка `build.bat --jobs 8` на новой истории. Проверка: «all gates passed», `131 keys`.
+- [x] 1.6 Полная сборка `build.bat --jobs 8` на новой истории. Проверка: «all gates passed», `131 keys`.
 
 ## 2. Версия и установщик
 
