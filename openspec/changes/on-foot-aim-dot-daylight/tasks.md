@@ -74,7 +74,7 @@
   tools\check_status_blocks.py` (из `edvr\`) проходит.
 - [x] 4.4 Полная сборка `--jobs 8` по абсолютному пути. Проверка: «all gates passed», `config contract ok: 131 keys`.
   Коммит через `git commit -F`, тег `v0.19.1-edvronfoot.57`, `build.bat --dll-only` проходит.
-- [ ] 4.5 Установка при закрытой игре: `python tools\install_edvr.py --target steam --keep-backups 1000`, сначала
+- [x] 4.5 Установка при закрытой игре: `python tools\install_edvr.py --target steam --keep-backups 1000`, сначала
   `--dry-run`. Проверка: `--verify-only` ok, хеш `edvr.ini` до и после один и тот же.
 - [ ] 4.6 Полёт Димы на `.57` (F8 не трогать; `PAUSE` — метка в каждом пункте, когда видно результат):
   1. Без оружия после загрузки. Точки нет?
