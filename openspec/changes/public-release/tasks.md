@@ -2,11 +2,11 @@
 
 ## 1. Резервная копия и история (локально)
 
-- [ ] 1.1 Резервная копия: `git clone --mirror` в `D:\Project VSC\EDVRonFOOT-backup-<дата>.git` и архив рабочей папки
+- [x] 1.1 Резервная копия: `git clone --mirror` в `D:\Project VSC\EDVRonFOOT-backup-<дата>.git` и архив рабочей папки
   без `build/`. Проверка: `git -C <зеркало> log --oneline | wc -l` = числу коммитов, теги на месте.
-- [ ] 1.2 Найти, где встречаются личная почта, `user` и `screenshots/` по всей истории (`git log --all -p`, `git
+- [x] 1.2 Найти, где встречаются личная почта, `user` и `screenshots/` по всей истории (`git log --all -p`, `git
   grep` по всем ревизиям); убедиться, что `user` нет в коде и бинарных файлах. Проверка: список мест показан Диме.
-- [ ] 1.3 Ветка `master` → `main`; `git config user.email 187125319+Mitt776@users.noreply.github.com`. Проверка: `git
+- [x] 1.3 Ветка `master` → `main`; `git config user.email 187125319+Mitt776@users.noreply.github.com`. Проверка: `git
   branch` — `main`.
 - [ ] 1.4 `pip install git-filter-repo`; один проход: `--mailmap` (почта → noreply), `--invert-paths --path
   screenshots/`, `--replace-text` (`user` → `user`). Проверка: поиск 1.2 по новой истории пуст; `git fsck` чисто;
