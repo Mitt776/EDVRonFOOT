@@ -108,7 +108,7 @@
   Проверка: `PASS`; один раз испортить — падает, вернуть.
 - [x] 5.3 Документы: исследование — «Полёт `.57`» (итог выше) и «Диагностика `.58`» (строки), строка `## Status`;
   ROADMAP; README — строка `centre now`. Проверка: `python tools\check_status_blocks.py` (из `edvr\`).
-- [ ] 5.4 Полная сборка `--jobs 8`, коммит `git commit -F`, тег `v0.19.1-edvronfoot.58`, `--dll-only`; установка при
+- [x] 5.4 Полная сборка `--jobs 8`, коммит `git commit -F`, тег `v0.19.1-edvronfoot.58`, `--dll-only`; установка при
   закрытой игре (`--dry-run`, затем установка, `--verify-only`, хеш `edvr.ini` тот же). Проверка: «all gates passed»,
   `131 keys`, «vr payload and profile verified».
 - [ ] 5.5 Полёт Димы на `.58` по плану 4.6, но в каждом пункте **держать ~15 с** (чтобы попала строка `centre now`) и
