@@ -6,7 +6,9 @@
 // too; .42's other vector counts and text or icons of 336 no); the plain dot by its shape, any colour (.57), on real centres (.42's
 // plain dots and .56's red plain dot yes; the weapon's dot and the tool's own red dot in the hand no) and made ones (blue, 40 dimmer
 // yes; a rim 60 brighter, an empty or dim centre, a dot at the window's edge and another atlas size no); and the text of every line,
-// the signature and the pixels line; .58's signature compare (a line on any change of it) and the centre now line.
+// the signature and the pixels line; .58's signature compare (a line on any change of it) and the centre now line; .60's search along
+// the centre's rows (the dot at .59's x 1036, 1267, 1497 and at the strip's edges found; the weapon's and the tool's dots, an empty
+// strip, a marker's bright bar elsewhere not plain; the nearer of two plain dots; the read's at in the signature and its line).
 #include "../../src/d3d11/aim_dot_core.h"
 #include "aim_dot_samples.h"
 #include <cstdio>
@@ -112,6 +114,8 @@ void partPattern() {
     check(read(kPlain42b).plain, ".42's 04: the plain dot at a door");
     r = read(kRed56);
     check(r.plain && r.maxR == 255 && r.maxG == 0 && r.maxB == 0, ".56's red plain dot (a weapon put away): plain, whatever its colour");
+    check(read(kShift59a).plain, ".59's 02: the dot moved by the radial menu, a fraction of a pixel off: plain (its sum)");
+    check(read(kShift59b).plain, ".59's 03: moved again by the exobiologist's tool: plain");
     r = read(kWeapon42);
     check(!r.plain && r.why == Why::Shape, ".42's 02: the weapon's dot is other, by its shape");
     r = read(kTool43);
@@ -127,9 +131,15 @@ void partPattern() {
     check(read(t).plain, "blue 2,163,255 of the plain shape (the pistol's colour at a ship): plain");
     tweak(kPlainDot, t, [](uint8_t* p, uint32_t, uint32_t) {
         if (peakOf(p))
-            for (int k = 0; k < 3; ++k) p[k] = clampByte(p[k] - 40);
+            for (int k = 0; k < 3; ++k) p[k] = clampByte(p[k] - 15);
     });
-    check(read(t).plain, "dimmer by 40 a channel: within the tolerance, plain");
+    check(read(t).plain, "dimmer by 15 a channel: within the sum's 15%, plain");
+    tweak(kPlainDot, t, [](uint8_t* p, uint32_t, uint32_t) {
+        if (peakOf(p))
+            for (int k = 0; k < 3; ++k) p[k] = clampByte(p[k] - 60);
+    });
+    r = read(t);
+    check(!r.plain && r.why == Why::Shape, "dimmer by 60 a channel: past the sum's 15%, shape");
     tweak(kPlainDot, t, [](uint8_t* p, uint32_t, uint32_t) {
         if (peakOf(p) && peakOf(p) < 255)
             for (int k = 0; k < 3; ++k) p[k] = clampByte(p[k] + 60);
@@ -156,6 +166,98 @@ void partPattern() {
     check(!r.plain && r.why == Why::Atlas && !patternFor(2768, 2383), "another atlas size: other, atlas");
     r = readCentre(nullptr, pitch, 2076, 1787);
     check(!r.plain && r.why == Why::Atlas, "no pixels: other");
+}
+
+// .60: the centre's rows the atlas's whole width, a sample put at x (the window's left edge), 4 bytes a pixel, alpha 255.
+constexpr uint32_t kStripW = 2076, kStripPitch = kStripW * 4 + 16;
+uint8_t g_strip[kStripPitch * kPatternH];
+void stripClear() { std::memset(g_strip, 0, sizeof(g_strip)); }
+void stripPut(const uint8_t* rgb, uint32_t x0) {
+    for (uint32_t y = 0; y < kPatternH; ++y)
+        for (uint32_t x = 0; x < kPatternW; ++x) {
+            uint8_t* p = g_strip + size_t(y) * kStripPitch + size_t(x0 + x) * 4;
+            for (uint32_t c = 0; c < 3; ++c) p[c] = rgb[(y * kPatternW + x) * 3 + c];
+            p[3] = 255;
+        }
+}
+CentreRead stripRead() { return readRow(g_strip, kStripPitch, kStripW, 1032, 2076, 1787); }
+
+void partRow() {
+    const uint32_t cx = centreOf(2076, 1787).x0;
+    check(cx == 1032, "the centre window starts at x 1032");
+    // .59's snapshots: the dot's bright columns at 1036, 1267, 1497 -> windows at 1032, 1263, 1493.
+    const uint32_t at[] = {1032, 1263, 1493};
+    for (uint32_t a : at) {
+        stripClear();
+        stripPut(kPlainDot, a);
+        const CentreRead r = stripRead();
+        char what[120];
+        std::snprintf(what, sizeof(what), "the plain dot at x %u: found there, plain", a);
+        check(r.plain && r.at == a && r.lit == 20 && r.bright == 17, what);
+    }
+    stripClear();
+    stripPut(kRed56, 1493);
+    CentreRead r = stripRead();
+    check(r.plain && r.at == 1493 && r.maxR == 255, ".56's red plain dot moved right: found, plain");
+    stripClear();
+    stripPut(kPlainDot, 3);
+    r = stripRead();
+    check(r.plain && r.at == 3, "a plain dot near the strip's left edge: found");
+    stripClear();
+    stripPut(kPlainDot, kStripW - kPatternW);
+    r = stripRead();
+    check(r.plain && r.at == kStripW - kPatternW, "a plain dot at the strip's right edge: found");
+    stripClear();
+    stripPut(kTool43, 1263);
+    r = stripRead();
+    check(!r.plain && r.why == Why::Shape, "the tool's own red dot moved right: other, shape");
+    stripClear();
+    stripPut(kShift59a, 1263);
+    r = stripRead();
+    check(r.plain && r.at == 1263, ".59's 02 in its place: found at x 1263, plain");
+    stripClear();
+    stripPut(kShift59b, 1493);
+    r = stripRead();
+    check(r.plain && r.at == 1493, ".59's 03 in its place: found at x 1493, plain");
+    stripClear();
+    stripPut(kWeapon42, cx);
+    r = stripRead();
+    check(!r.plain && r.why == Why::Shape, "the weapon's dot in the centre: other, shape");
+    stripClear();
+    r = stripRead();
+    check(!r.plain && r.why == Why::Empty && r.at == cx, "an empty strip: other, empty, the centre's window");
+    stripClear();
+    for (uint32_t y = 2; y < 9; ++y)
+        for (uint32_t x = 400; x < 460; ++x) {
+            uint8_t* p = g_strip + size_t(y) * kStripPitch + size_t(x) * 4;
+            p[0] = 200;
+            p[1] = 200;
+            p[2] = 200;
+            p[3] = 255;
+        }
+    r = stripRead();
+    check(!r.plain && r.why == Why::Shape, "a marker's bright bar crossing the rows, no dot: other, shape");
+    stripPut(kPlainDot, 1263);
+    r = stripRead();
+    check(r.plain && r.at == 1263, "the bar and the plain dot: the dot found");
+    stripClear();
+    stripPut(kPlainDot, 1263);
+    stripPut(kPlainDot, 1493);
+    r = stripRead();
+    check(r.plain && r.at == 1263, "two plain dots: the nearer the centre");
+    stripClear();
+    stripPut(kPlainDot, 1263);
+    check(!readRow(g_strip, kStripPitch, kStripW, 1032, 2768, 2383).plain, "another atlas size: other");
+    check(!readRow(nullptr, kStripPitch, kStripW, 1032, 2076, 1787).plain, "no pixels: other");
+    check(!readRow(g_strip, kStripPitch, 8, 0, 2076, 1787).plain, "a strip narrower than the window: other");
+    const CentreRead a = stripRead();
+    stripClear();
+    stripPut(kPlainDot, 1493);
+    const CentreRead b = stripRead();
+    check(a.plain && b.plain && !sameSignature(a, b), "the same dot moved: the signature differs (at)");
+    char line[400];
+    formatCentre(b, line, sizeof(line));
+    check(has(line, "aim dot: centre plain (") && has(line, ", at=x1493)"), "the line says where: at=x1493");
 }
 
 void partLines() {
@@ -185,21 +287,21 @@ void partLines() {
         widen(kPlainDot, c, pitch);
         formatCentre(readCentre(c, pitch, 2076, 1787), line, sizeof(line));
         check(std::strcmp(line, "aim dot: centre plain (the plain dot without a weapon: erased; lit=20, bright=17, box=x3..8,y3..7, "
-                                "max=173,255,250)") == 0,
+                                "max=173,255,250, at=x0)") == 0,
               "centre plain, with the signature");
         widen(kTool43, c, pitch);
         formatCentre(readCentre(c, pitch, 2076, 1787), line, sizeof(line));
         check(has(line, "aim dot: centre other (a weapon's or a tool's dot, or nothing: kept; why=shape, lit=24, bright=22, box=x3..8,y2..7, "
-                        "max=255,0,0)"),
+                        "max=255,0,0, at=x0)"),
               "centre other, the tool in the hand: why=shape");
         widen(kRed56, c, pitch);
         formatCentre(readCentre(c, pitch, 2076, 1787), line, sizeof(line));
         check(std::strcmp(line, "aim dot: centre plain (the plain dot without a weapon: erased; lit=20, bright=17, box=x3..8,y3..7, "
-                                "max=255,0,0)") == 0,
+                                "max=255,0,0, at=x0)") == 0,
               "centre plain, the red plain dot: max=255,0,0");
         std::memset(c, 0, sizeof(c));
         formatCentre(readCentre(c, pitch, 2076, 1787), line, sizeof(line));
-        check(has(line, "why=empty, lit=0, bright=0, box=none, max=0,0,0)"), "centre other, empty: box none");
+        check(has(line, "why=empty, lit=0, bright=0, box=none, max=0,0,0, at=x0)"), "centre other, empty: box none");
         widen(kPlainDot, c, pitch);
         formatCentre(readCentre(c, pitch, 2768, 2383), line, sizeof(line));
         check(has(line, "why=atlas"), "centre other, another atlas");
@@ -223,7 +325,7 @@ void partLines() {
         check(!sameSignature(tool, more), "one more lit pixel: differs");
         formatCentreNow(teal, line, sizeof(line));
         check(std::strcmp(line, "aim dot: centre now plain (the plain dot without a weapon: erased; lit=20, bright=17, box=x3..8,y3..7, "
-                                "max=173,255,250)") == 0,
+                                "max=173,255,250, at=x0)") == 0,
               "centre now, plain");
         formatCentreNow(empty, line, sizeof(line));
         check(has(line, "aim dot: centre now other (a weapon's or a tool's dot, or nothing: kept; why=empty, lit=0"), "centre now, other");
@@ -278,6 +380,7 @@ int main(int argc, char** argv) {
     partCentre();
     partCue();
     partPattern();
+    partRow();
     partLines();
     std::printf("%s: aim_dot_test, %d checks, %d failed\n", g_failures ? "FAIL" : "PASS", g_checks, g_failures);
     return g_failures ? 1 : 0;

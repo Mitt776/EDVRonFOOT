@@ -12,8 +12,9 @@
 //                                 a frame counts the frame, a vector draw of a cue count marks the frame as one with a weapon, a draw
 //                                 after this frame's erase asks for another before the next read.
 //   aimDotHideBeforeEyeComposite  the game's composite into an eye, with what it reads in pixel slots 0-2: before the first that reads
-//                                 the atlas the ready read-backs decide and the centre is copied; then (and after a rewrite) it is
-//                                 erased, in a frame without the cue whose newest read was the plain dot (hide).
+//                                 the atlas the ready read-backs decide and the centre's rows are copied, the atlas's whole width
+//                                 (.60: the radial menu and the tools move the dot along them); then (and after a rewrite) the plain
+//                                 dot is erased where the newest read found it, in a frame without the cue (hide).
 //   aimDotHideFrameBoundary       the frame thread: the key, the frame's number, the weapon on/off lines, the 30-second summary.
 #include <atomic>
 #include <cstdint>

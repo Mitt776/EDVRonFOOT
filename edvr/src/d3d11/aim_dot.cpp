@@ -48,14 +48,16 @@ struct State {
     uint32_t saidW = 0, saidH = 0;
     ID3D11Texture2D* zero = nullptr;  // the centre's size of zeros, the atlas's format
     uint32_t zw = 0, zh = 0, zfmt = 0;
-    // The centre read back before the erase: a ring of staging copies, each with the frame it was taken in (0: free), read without
-    // waiting, the oldest first. `plain`: the newest read was the plain dot; until one is read it is not.
+    // The centre's rows read back before the erase, the atlas's whole width (.60: the dot moves along them): a ring of staging
+    // copies, each with the frame it was taken in (0: free), read without waiting, the oldest first. `plain`: the newest read found
+    // the plain dot, at `plainAt` (the window's left edge in the atlas); until one is read it is not.
     static constexpr int kRing = 3;
     ID3D11Texture2D* ring[kRing] = {};
     uint64_t ringFrame[kRing] = {};
     uint32_t rw = 0, rh = 0, rfmt = 0;
     int ringNext = 0;
     bool plain = false, plainSaid = false;
+    uint32_t plainAt = 0;
     adh::CentreRead said;  // the read last said in a decision line (.58: a line on any change of it)
     uint64_t nowAt = 0;    // when the last `centre now` line was written (GetTickCount64)
     uint32_t noPatternW = 0, noPatternH = 0;  // the size last said to have no pattern
@@ -79,6 +81,7 @@ struct State {
         for (uint64_t& f : ringFrame) f = 0;
         ringNext = 0;
         plain = false;
+        plainAt = 0;
         g_holding.store(false, std::memory_order_relaxed);
     }
 };
@@ -201,10 +204,10 @@ ID3D11Texture2D* zeroTexture(uint32_t w, uint32_t h) {
     g_s.zfmt = g_s.fmt;
     return g_s.zero;
 }
-// The ring's staging textures, the centre's size and the atlas's format; remade (and emptied) on a new size.
+// The ring's staging textures: the centre's rows the atlas's whole width (.60), the atlas's format; remade (and emptied) on a new size.
 bool ringReady() {
     const adh::Rect& r = g_s.centre;
-    if (g_s.ring[0] && g_s.rw == r.w() && g_s.rh == r.h() && g_s.rfmt == g_s.fmt) return true;
+    if (g_s.ring[0] && g_s.rw == g_s.w && g_s.rh == r.h() && g_s.rfmt == g_s.fmt) return true;
     for (int i = 0; i < State::kRing; ++i) {
         if (g_s.ring[i]) g_s.ring[i]->Release();
         g_s.ring[i] = nullptr;
@@ -215,7 +218,7 @@ bool ringReady() {
     g_s.atlas->GetDevice(&device);
     if (!device) return false;
     D3D11_TEXTURE2D_DESC d{};
-    d.Width = r.w();
+    d.Width = g_s.w;
     d.Height = r.h();
     d.MipLevels = 1;
     d.ArraySize = 1;
@@ -227,7 +230,7 @@ bool ringReady() {
     for (int i = 0; i < State::kRing && ok; ++i) ok = SUCCEEDED(device->CreateTexture2D(&d, nullptr, &g_s.ring[i])) && g_s.ring[i];
     device->Release();
     if (!ok) return false;
-    g_s.rw = r.w();
+    g_s.rw = g_s.w;
     g_s.rh = r.h();
     g_s.rfmt = g_s.fmt;
     return true;
@@ -236,12 +239,15 @@ bool ringReady() {
 // The decision from one read: counted, a line on a change of the read's signature (.58; before it, of the decision only) --
 // kCentreLinesPerWindow a window, the rest counted as quiet. An other line is followed by the window's pixels, inside the same
 // quota (.56). Every kCentreNowMs a `centre now` line (and the pixels for other) outside the quota (.58). Called while the copy is
-// mapped: `rgba`, `pitch` are its bytes.
-void decide(const uint8_t* rgba, uint32_t pitch) {
-    const adh::CentreRead read = adh::readCentre(rgba, pitch, g_s.w, g_s.h);
+// mapped: `rgba`, `pitch` are its bytes, the strip from the atlas's x 0 (.60: the plain dot is looked for along it; the pixels line is
+// the window the read names, `at`).
+void decide(const uint8_t* strip, uint32_t pitch) {
+    const adh::CentreRead read = adh::readRow(strip, pitch, g_s.rw, g_s.centre.x0, g_s.w, g_s.h);
+    const uint8_t* rgba = strip ? strip + size_t(read.at) * 4 : nullptr;
     const bool plain = read.plain;
     (plain ? g_cPlain : g_cOther).fetch_add(1, std::memory_order_relaxed);
     g_s.plain = plain;
+    g_s.plainAt = read.at;
     const uint64_t now = GetTickCount64();
     if (!g_s.nowAt || now - g_s.nowAt >= adh::kCentreNowMs) {
         g_s.nowAt = now;
@@ -311,7 +317,7 @@ bool readAndCopy(ID3D11DeviceContext* ctx) {
     const int slot = g_s.ringNext;
     if (g_s.ringFrame[slot]) g_cUnread.fetch_add(1, std::memory_order_relaxed);
     const adh::Rect& r = g_s.centre;
-    D3D11_BOX box{r.x0, r.y0, 0, r.x1, r.y1, 1};
+    D3D11_BOX box{0, r.y0, 0, g_s.w, r.y1, 1};
     ctx->CopySubresourceRegion(g_s.ring[slot], 0, 0, 0, 0, g_s.atlas, 0, &box);
     g_s.ringFrame[slot] = g_s.frame ? g_s.frame : 1;
     g_s.ringNext = (slot + 1) % State::kRing;
@@ -365,7 +371,8 @@ void aimDotHideBeforeEyeComposite(ID3D11DeviceContext* ctx, const void* const re
             standDown("a transparent texture for the centre could not be made");
             return;
         }
-        ctx->CopySubresourceRegion(g_s.atlas, 0, r.x0, r.y0, 0, g_s.zero, 0, nullptr);
+        if (g_s.plainAt + r.w() > g_s.w) return;  // a read from another size: never past the edge
+        ctx->CopySubresourceRegion(g_s.atlas, 0, g_s.plainAt, r.y0, 0, g_s.zero, 0, nullptr);  // where the read found it (.60)
         (g_s.erased ? g_cRewrites : g_cHidden).fetch_add(1, std::memory_order_relaxed);
         g_s.erased = true;
         g_s.rewrote = false;

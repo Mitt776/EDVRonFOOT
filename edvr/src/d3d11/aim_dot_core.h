@@ -119,10 +119,14 @@ inline bool patternFor(uint32_t w, uint32_t h) { return w == kPatternAtlasW && h
 // it as a tool's dot and kept it. Now the colour is not looked at: a pixel's brightness is its brightest channel, and the centre is
 // the plain dot when
 //  - not empty: some pixel's brightness is kCorePeak or more;
-//  - the shape: every one of the window's pixels is within kPatternTolerance of kPlainDot's brightness there.
-// The samples: the plain dot and its red copy 0 away; the weapon's dot (.42) 15 pixels past 48, up to 202; the tool's own red dot in
-// the hand (.43) 13 pixels, up to 174. The lit and bright counts are the signature only.
+//  - the shape (.60): the window's brightness adds up to kPlainSum within kSumPercent, the lit spot's box is kSpotMax or less each
+//    way and does not touch the window's edge. .57 held every pixel within kPatternTolerance of kPlainDot; but the dot moved by the
+//    radial menu or a tool (.59) lies a fraction of a pixel off and its edges blur 70-100 off the pattern, while its sum stays (3778,
+//    3786 against 3798). The tool's own red dot in the hand (.43) adds up to 5351 (+41%), the weapon's dot (.42) to 5956 (+57%).
+// kPatternTolerance stays for readRow: the window whose pixels lie closest to the pattern is the one read.
 constexpr int kLit = 24, kBright = 64, kCorePeak = 128, kPatternTolerance = 48;
+constexpr int kPlainSum = 3798, kSumPercent = 15;
+constexpr uint32_t kSpotMax = 7;
 enum class Why : int { None = 0, Atlas, Empty, Shape };
 inline const char* whyName(Why w) {
     switch (w) {
@@ -142,19 +146,19 @@ struct CentreRead {
     bool box = false;
     uint32_t bx0 = 0, bx1 = 0, by0 = 0, by1 = 0;
     uint8_t maxR = 0, maxG = 0, maxB = 0;
+    uint32_t at = 0;  // the window's left edge in the atlas (.60: the row's search; readCentre alone leaves it 0)
 };
 inline int brightnessOf(const uint8_t* p) { return p[0] > p[1] ? (p[0] > p[2] ? p[0] : p[2]) : (p[1] > p[2] ? p[1] : p[2]); }
 // `rgba`: the centre's pixels, 4 bytes each (R, G, B, A as the atlas stores them), `pitch` bytes a row; `w`, `h`: the atlas's size.
 inline CentreRead readCentre(const uint8_t* rgba, uint32_t pitch, uint32_t w, uint32_t h) {
     CentreRead r;
     if (!rgba || !patternFor(w, h)) return r;
-    bool shapeOk = true;
-    int peak = -1;
+    int peak = -1, sum = 0;
     for (uint32_t y = 0; y < kPatternH; ++y)
         for (uint32_t x = 0; x < kPatternW; ++x) {
             const uint8_t* p = rgba + size_t(y) * pitch + size_t(x) * 4;
-            const int m = brightnessOf(p), want = brightnessOf(kPlainDot + (y * kPatternW + x) * 3);
-            if (m - want > kPatternTolerance || want - m > kPatternTolerance) shapeOk = false;
+            const int m = brightnessOf(p);
+            sum += m;
             if (m > peak) {
                 peak = m;
                 r.maxR = p[0];
@@ -175,6 +179,9 @@ inline CentreRead readCentre(const uint8_t* rgba, uint32_t pitch, uint32_t w, ui
                 if (y > r.by1) r.by1 = y;
             }
         }
+    const int off = sum > kPlainSum ? sum - kPlainSum : kPlainSum - sum;
+    const bool shapeOk = off * 100 <= kPlainSum * kSumPercent && r.box && r.bx0 > 0 && r.by0 > 0 && r.bx1 + 1 < kPatternW &&
+                         r.by1 + 1 < kPatternH && r.bx1 - r.bx0 + 1 <= kSpotMax && r.by1 - r.by0 + 1 <= kSpotMax;
     if (peak < kCorePeak)
         r.why = Why::Empty;
     else if (!shapeOk)
@@ -183,6 +190,64 @@ inline CentreRead readCentre(const uint8_t* rgba, uint32_t pitch, uint32_t w, ui
         r.why = Why::None;
         r.plain = true;
     }
+    return r;
+}
+// The plain dot along its row (.60, on-foot-aim-dot-daylight). After an item of the radial menu or a tool (the exobiologist's), the
+// game lays the dot in the atlas further right on the same rows, ~230 px a time, and it stays there till the next time on foot (.59's
+// snapshots, 08.11: x 1036, 1267, 1497 of 2076); the eye still shows it in the middle. So the centre's rows are read the atlas's
+// whole width (a strip kPatternH high) and the plain dot is looked for along them: every window start within kPatternW of a column
+// whose brightest pixel is kCorePeak or more is tried, and the window whose pixels lie closest to kPlainDot's brightness (the largest
+// difference the smallest; a tie goes to the one nearer the centre) is read as readCentre reads the centre. Nothing bright in the
+// strip: the centre's window, empty. `rgba`, `pitch`: the strip, `stripW` pixels wide (the atlas's width), from the atlas's x 0;
+// `centreX0`: the centre window's left edge; `w`, `h`: the atlas's size. The read's `at` is the window's left edge, where the erase
+// goes.
+inline int windowDistance(const uint8_t* rgba, uint32_t pitch, uint32_t x0, int stopAt) {
+    int worst = 0;
+    for (uint32_t y = 0; y < kPatternH; ++y)
+        for (uint32_t x = 0; x < kPatternW; ++x) {
+            const int m = brightnessOf(rgba + size_t(y) * pitch + size_t(x0 + x) * 4);
+            const int want = brightnessOf(kPlainDot + (y * kPatternW + x) * 3);
+            const int d = m > want ? m - want : want - m;
+            if (d > worst) {
+                worst = d;
+                if (worst > stopAt) return worst;
+            }
+        }
+    return worst;
+}
+inline CentreRead readRow(const uint8_t* rgba, uint32_t pitch, uint32_t stripW, uint32_t centreX0, uint32_t w, uint32_t h) {
+    if (!rgba || !patternFor(w, h) || stripW < kPatternW || centreX0 > stripW - kPatternW) return readCentre(nullptr, pitch, w, h);
+    const uint32_t lastStart = stripW - kPatternW;
+    bool any = false;
+    uint32_t best = centreX0, tried = 0;  // `tried`: window starts below it are done
+    int bestD = 1 << 30;
+    const auto nearer = [&](uint32_t a, uint32_t b) {
+        const uint32_t da = a > centreX0 ? a - centreX0 : centreX0 - a, db = b > centreX0 ? b - centreX0 : centreX0 - b;
+        return da < db;
+    };
+    for (uint32_t x = 0; x < stripW; ++x) {
+        int peak = 0;
+        for (uint32_t y = 0; y < kPatternH && peak < kCorePeak; ++y) {
+            const int m = brightnessOf(rgba + size_t(y) * pitch + size_t(x) * 4);
+            if (m > peak) peak = m;
+        }
+        if (peak < kCorePeak) continue;
+        any = true;
+        uint32_t s0 = x >= kPatternW - 1 ? x - (kPatternW - 1) : 0;
+        if (s0 < tried) s0 = tried;
+        const uint32_t s1 = x < lastStart ? x : lastStart;
+        for (uint32_t s = s0; s <= s1; ++s) {
+            const int d = windowDistance(rgba, pitch, s, bestD);
+            if (d < bestD || (d == bestD && nearer(s, best))) {
+                bestD = d;
+                best = s;
+            }
+        }
+        if (s1 + 1 > tried) tried = s1 + 1;
+    }
+    if (!any) best = centreX0;
+    CentreRead r = readCentre(rgba + size_t(best) * 4, pitch, w, h);
+    r.at = best;
     return r;
 }
 // The decision's lines, on each change: at most kCentreLinesPerWindow a summary window, the rest counted.
@@ -233,18 +298,20 @@ inline void formatCentre(const CentreRead& r, char* out, size_t cap) {
     else
         std::snprintf(box, sizeof(box), "none");
     if (r.plain)
-        std::snprintf(out, cap, "aim dot: centre plain (the plain dot without a weapon: erased; lit=%u, bright=%u, box=%s, max=%u,%u,%u)",
-                      r.lit, r.bright, box, r.maxR, r.maxG, r.maxB);
+        std::snprintf(out, cap,
+                      "aim dot: centre plain (the plain dot without a weapon: erased; lit=%u, bright=%u, box=%s, max=%u,%u,%u, at=x%u)",
+                      r.lit, r.bright, box, r.maxR, r.maxG, r.maxB, r.at);
     else
         std::snprintf(out, cap,
-                      "aim dot: centre other (a weapon's or a tool's dot, or nothing: kept; why=%s, lit=%u, bright=%u, box=%s, max=%u,%u,%u)",
-                      whyName(r.why), r.lit, r.bright, box, r.maxR, r.maxG, r.maxB);
+                      "aim dot: centre other (a weapon's or a tool's dot, or nothing: kept; why=%s, lit=%u, bright=%u, box=%s, max=%u,%u,%u, "
+                      "at=x%u)",
+                      whyName(r.why), r.lit, r.bright, box, r.maxR, r.maxG, r.maxB, r.at);
 }
 // The same read for the lines (.58): a line is written on any change of these, not only of the decision -- .57's flight left the
 // centre other for minutes and never said what it held after an empty read.
 inline bool sameSignature(const CentreRead& a, const CentreRead& b) {
     return a.plain == b.plain && a.why == b.why && a.lit == b.lit && a.bright == b.bright && a.box == b.box && a.bx0 == b.bx0 &&
-           a.bx1 == b.bx1 && a.by0 == b.by0 && a.by1 == b.by1 && a.maxR == b.maxR && a.maxG == b.maxG && a.maxB == b.maxB;
+           a.bx1 == b.bx1 && a.by0 == b.by0 && a.by1 == b.by1 && a.maxR == b.maxR && a.maxG == b.maxG && a.maxB == b.maxB && a.at == b.at;
 }
 // The centre as it is, every kCentreNowMs on foot, outside the decision lines' quota (.58): `aim dot: centre now plain|other (…)`,
 // the same signature, so a PAUSE mark finds what the centre held while a dot showed.
