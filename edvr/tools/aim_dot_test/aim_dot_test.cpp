@@ -8,16 +8,25 @@
 // yes; a rim 60 brighter, an empty or dim centre, a dot at the window's edge and another atlas size no); and the text of every line,
 // the signature and the pixels line; .58's signature compare (a line on any change of it) and the centre now line; .60's search along
 // the centre's rows (the dot at .59's x 1036, 1267, 1497 and at the strip's edges found; the weapon's and the tool's dots, an empty
-// strip, a marker's bright bar elsewhere not plain; the nearer of two plain dots; the read's at in the signature and its line).
+// strip, a marker's bright bar elsewhere not plain; the nearer of two plain dots; the read's at in the signature and its line); .62's
+// pattern for any atlas size (2076x1787 .42's own, the area scaling at 1:1 to the byte; 1868x1608 -> 10x11, sum ~3075, spot 7;
+// 1245x1072 -> 7x8, ~1366, 5; 2768x2383 -> 14x15, ~6753, 10; none past 32 a side), .42's and .56's plain dots scaled onto each plain at
+// the centre and moved along the row, the weapon's and the tool's dots scaled other by shape, and the lines: pattern for, trial, the
+// 7x8 pixels line whole and the 14x15 one cut.
 #include "../../src/d3d11/aim_dot_core.h"
 #include "aim_dot_samples.h"
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 using namespace edvr;
 using namespace edvr::adh;
 
 namespace {
+const Pattern& P2076() {
+    static const Pattern p = patternOf(2076, 1787);
+    return p;
+}
 int g_checks = 0, g_failures = 0;
 void check(bool ok, const char* what) {
     ++g_checks;
@@ -101,7 +110,7 @@ void partPattern() {
     uint8_t t[kPatternW * kPatternH * 3];
     auto read = [&](const uint8_t* rgb) {
         widen(rgb, c, pitch);
-        return readCentre(c, pitch, 2076, 1787);
+        return readCentre(c, pitch, P2076());
     };
     check(centreOf(2076, 1787).w() == kPatternW && centreOf(2076, 1787).h() == kPatternH, "the window is the centre's size");
 
@@ -160,11 +169,11 @@ void partPattern() {
     r = read(t);
     check(!r.plain && r.why == Why::Shape && r.bx0 == 0, "the dot moved to the window's edge: other, shape");
 
-    // The atlas.
+    // No pattern, no pixels.
     widen(kPlainDot, c, pitch);
-    r = readCentre(c, pitch, 2768, 2383);
-    check(!r.plain && r.why == Why::Atlas && !patternFor(2768, 2383), "another atlas size: other, atlas");
-    r = readCentre(nullptr, pitch, 2076, 1787);
+    r = readCentre(c, pitch, patternOf(0, 0));
+    check(!r.plain && r.why == Why::Atlas, "no pattern: other, atlas");
+    r = readCentre(nullptr, pitch, P2076());
     check(!r.plain && r.why == Why::Atlas, "no pixels: other");
 }
 
@@ -180,7 +189,7 @@ void stripPut(const uint8_t* rgb, uint32_t x0) {
             p[3] = 255;
         }
 }
-CentreRead stripRead() { return readRow(g_strip, kStripPitch, kStripW, 1032, 2076, 1787); }
+CentreRead stripRead() { return readRow(g_strip, kStripPitch, kStripW, 1032, P2076()); }
 
 void partRow() {
     const uint32_t cx = centreOf(2076, 1787).x0;
@@ -247,9 +256,9 @@ void partRow() {
     check(r.plain && r.at == 1263, "two plain dots: the nearer the centre");
     stripClear();
     stripPut(kPlainDot, 1263);
-    check(!readRow(g_strip, kStripPitch, kStripW, 1032, 2768, 2383).plain, "another atlas size: other");
-    check(!readRow(nullptr, kStripPitch, kStripW, 1032, 2076, 1787).plain, "no pixels: other");
-    check(!readRow(g_strip, kStripPitch, 8, 0, 2076, 1787).plain, "a strip narrower than the window: other");
+    check(!readRow(g_strip, kStripPitch, kStripW, 1032, patternOf(0, 0)).plain, "no pattern: other");
+    check(!readRow(nullptr, kStripPitch, kStripW, 1032, P2076()).plain, "no pixels: other");
+    check(!readRow(g_strip, kStripPitch, 8, 0, P2076()).plain, "a strip narrower than the window: other");
     const CentreRead a = stripRead();
     stripClear();
     stripPut(kPlainDot, 1493);
@@ -258,6 +267,148 @@ void partRow() {
     char line[400];
     formatCentre(b, line, sizeof(line));
     check(has(line, "aim dot: centre plain (") && has(line, ", at=x1493)"), "the line says where: at=x1493");
+}
+
+// .62: the pattern for any atlas size, and .42's real samples scaled onto it by the same arithmetic, channel by channel.
+struct Scaled {
+    uint32_t w = 0, h = 0;
+    uint8_t rgb[kWindowMax * kWindowMax * 3] = {};
+};
+Scaled scaled(const uint8_t* rgb, uint32_t aw, uint32_t ah) {
+    Scaled s;
+    const Rect c = centreOf(aw, ah);
+    s.w = c.w();
+    s.h = c.h();
+    for (int k = 0; k < 3; ++k) scaleWindow(rgb + k, 3, aw, ah, s.rgb + k, 3);
+    return s;
+}
+// A strip of the atlas's width, `rows` high, 4 bytes a pixel; a window put at x0 with alpha 255.
+struct Strip {
+    uint32_t w = 0, h = 0, pitch = 0;
+    std::vector<uint8_t> px;
+    Strip(uint32_t aw, uint32_t rows) : w(aw), h(rows), pitch(aw * 4 + 16), px(size_t(aw * 4 + 16) * rows, 0) {}
+    void put(const Scaled& s, uint32_t x0) {
+        for (uint32_t y = 0; y < s.h && y < h; ++y)
+            for (uint32_t x = 0; x < s.w; ++x) {
+                uint8_t* p = px.data() + size_t(y) * pitch + size_t(x0 + x) * 4;
+                for (uint32_t k = 0; k < 3; ++k) p[k] = s.rgb[(y * s.w + x) * 3 + k];
+                p[3] = 255;
+            }
+    }
+};
+bool near(int a, int b, int by) { return (a > b ? a - b : b - a) <= by; }
+
+void partScaled() {
+    // 2076x1787: .42's own, and the scaling at 1:1 gives it back to the byte.
+    const Pattern& n = P2076();
+    check(n.valid && n.native && n.w == 12 && n.h == 11 && n.sum == 3798 && n.spotMax == 7 && n.scale == 1.0, "2076x1787: .42 as flown");
+    bool same = true;
+    uint8_t bright[kPatternW * kPatternH], back[kWindowMax * kWindowMax];
+    for (uint32_t i = 0; i < kPatternW * kPatternH; ++i) bright[i] = uint8_t(brightnessOf(kPlainDot + i * 3));
+    check(scaleWindow(bright, 1, 2076, 1787, back, 1), "scaling onto 2076x1787 works");
+    for (uint32_t i = 0; i < kPatternW * kPatternH; ++i) same = same && back[i] == bright[i] && n.px[i] == bright[i];
+    check(same, "the area scaling at 1:1 is .42's brightness to the byte");
+
+    struct Size {
+        uint32_t w, h, ww, wh, spot;
+        int sum;
+        const char* name;
+    } sizes[] = {{1868, 1608, 10, 11, 7, 3075, "1868x1608 (Oculus, HMD quality 0.75)"},
+                 {1245, 1072, 7, 8, 5, 1366, "1245x1072 (Oculus, HMD quality 0.5)"},
+                 {2768, 2383, 14, 15, 10, 6753, "2768x2383"}};
+    for (const Size& z : sizes) {
+        char what[240];
+        const Pattern p = patternOf(z.w, z.h);
+        const Rect c = centreOf(z.w, z.h);
+        std::snprintf(what, sizeof(what), "%s: window %ux%u, sum ~%d, spot %u, not native (got %ux%u, %d, %u)", z.name, z.ww, z.wh, z.sum,
+                      z.spot, p.w, p.h, p.sum, p.spotMax);
+        check(p.valid && !p.native && p.w == z.ww && p.h == z.wh && c.w() == p.w && c.h() == p.h && near(p.sum, z.sum, 5) &&
+                  p.spotMax == z.spot,
+              what);
+        int total = 0;
+        for (uint32_t i = 0; i < p.w * p.h; ++i) total += p.px[i];
+        std::snprintf(what, sizeof(what), "%s: the scaled pixels add up to the sum within 5%% (%d vs %d)", z.name, total, p.sum);
+        check(near(total, p.sum, p.sum / 20), what);
+
+        // Real samples scaled: plain ones plain, the weapon's and the tool's other by shape; in the centre window and along the row.
+        struct S {
+            const uint8_t* rgb;
+            bool plain;
+            const char* name;
+        } samples[] = {{kPlainDot, true, ".42's 01"}, {kPlain42b, true, ".42's 04"}, {kRed56, true, ".56's red plain dot"},
+                       {kWeapon42, false, ".42's weapon dot"}, {kTool43, false, ".43's tool dot"}};
+        for (const S& sm : samples) {
+            const Scaled sc = scaled(sm.rgb, z.w, z.h);
+            Strip st(z.w, p.h);
+            st.put(sc, c.x0);
+            const CentreRead one = readCentre(st.px.data() + size_t(c.x0) * 4, st.pitch, p);
+            const CentreRead row = readRow(st.px.data(), st.pitch, st.w, c.x0, p);
+            const bool ok = sm.plain ? (one.plain && row.plain && row.at == c.x0)
+                                     : (!one.plain && one.why == Why::Shape && !row.plain && row.why == Why::Shape);
+            std::snprintf(what, sizeof(what), "%s: %s scaled is %s (sum %d of %d, box x%u..%u y%u..%u, why %s, at=x%u)", z.name, sm.name,
+                          sm.plain ? "plain, at the centre" : "other, shape", one.sum, p.sum, one.bx0, one.bx1, one.by0, one.by1,
+                          whyName(one.why), row.at);
+            check(ok, what);
+        }
+        // The plain dot moved right along the row (.59's ~231 px of 2076, scaled): found there.
+        const Scaled sc = scaled(kPlainDot, z.w, z.h);
+        Strip st(z.w, p.h);
+        const uint32_t moved = c.x0 + uint32_t(231 * p.scale);
+        st.put(sc, moved);
+        const CentreRead row = readRow(st.px.data(), st.pitch, st.w, c.x0, p);
+        std::snprintf(what, sizeof(what), "%s: the scaled plain dot moved right: found at x%u", z.name, moved);
+        check(row.plain && row.at == moved, what);
+    }
+    const Pattern big = patternOf(8000, 6891);
+    check(!big.valid, "a centre larger than 32 a side: no pattern");
+
+    // The lines.
+    char line[400];
+    formatPattern(patternOf(1868, 1608), line, sizeof(line));
+    check(has(line, "aim dot: pattern for 1868x1608: scale 0.900 (window 10x11, sum 30") &&
+              has(line, ", spot <= 7; .42's dot scaled by area, trial"),
+          "pattern for 1868x1608");
+    formatPattern(P2076(), line, sizeof(line));
+    check(std::strcmp(line, "aim dot: pattern for 2076x1787: scale 1.000 (window 12x11, sum 3798, spot <= 7; .42's dot as flown, erased)") ==
+              0,
+          "pattern for 2076x1787");
+    formatPattern(big, line, sizeof(line));
+    check(has(line, "aim dot: pattern for 8000x6891: none"), "pattern for a size with none");
+    const Pattern p1245 = patternOf(1245, 1072);
+    const Rect c1245 = centreOf(1245, 1072);
+    Strip st(1245, p1245.h);
+    st.put(scaled(kPlainDot, 1245, 1072), c1245.x0);
+    const CentreRead rp = readRow(st.px.data(), st.pitch, st.w, c1245.x0, p1245);
+    formatCentre(rp, line, sizeof(line), true);
+    check(has(line, "aim dot: centre plain (trial, not erased: the plain dot without a weapon; lit="), "centre plain, trial");
+    formatCentreNow(rp, line, sizeof(line), true);
+    check(has(line, "aim dot: centre now plain (trial, not erased:"), "centre now plain, trial");
+    formatCentre(rp, line, sizeof(line));
+    check(has(line, "aim dot: centre plain (the plain dot without a weapon: erased;"), "centre plain, not trial: as in .60");
+    Strip st2(1245, p1245.h);
+    st2.put(scaled(kTool43, 1245, 1072), c1245.x0);
+    const CentreRead rt = readRow(st2.px.data(), st2.pitch, st2.w, c1245.x0, p1245);
+    formatCentre(rt, line, sizeof(line), true);
+    check(has(line, "aim dot: centre other (trial; a weapon's or a tool's dot, or nothing: kept; why=shape"), "centre other, trial");
+    char pixels[kPixelsLineCap];
+    formatCentrePixels(st.px.data() + size_t(rp.at) * 4, st.pitch, p1245.w, p1245.h, pixels, sizeof(pixels));
+    int rows = 1, cells = 0;
+    for (const char* q = pixels; *q; ++q) rows += (*q == '/');
+    for (const char* q = pixels + std::strlen("aim dot: centre pixels"); *q;) {
+        while (*q == ' ' || *q == '/') ++q;
+        int k = 0;
+        while (q[k] && q[k] != ' ') ++k;
+        cells += k == 6;
+        q += k;
+    }
+    check(rows == 8 && cells == 56 && !has(pixels, "..."), "pixels of the 7x8 window: 8 rows, 56 cells");
+    const Pattern p2768 = patternOf(2768, 2383);
+    const uint32_t x2768 = centreOf(2768, 2383).x0;
+    Strip st3(2768, p2768.h);
+    st3.put(scaled(kPlainDot, 2768, 2383), x2768);
+    formatCentrePixels(st3.px.data() + size_t(x2768) * 4, st3.pitch, p2768.w, p2768.h, pixels, sizeof(pixels));
+    const size_t len = std::strlen(pixels);
+    check(len < sizeof(pixels) - 1 && len > 4 && std::strcmp(pixels + len - 4, " ...") == 0, "pixels of the 14x15 window: cut, ends in ...");
 }
 
 void partLines() {
@@ -285,37 +436,37 @@ void partLines() {
         const uint32_t pitch = 64;
         uint8_t c[64 * 11];
         widen(kPlainDot, c, pitch);
-        formatCentre(readCentre(c, pitch, 2076, 1787), line, sizeof(line));
+        formatCentre(readCentre(c, pitch, P2076()), line, sizeof(line));
         check(std::strcmp(line, "aim dot: centre plain (the plain dot without a weapon: erased; lit=20, bright=17, box=x3..8,y3..7, "
                                 "max=173,255,250, at=x0)") == 0,
               "centre plain, with the signature");
         widen(kTool43, c, pitch);
-        formatCentre(readCentre(c, pitch, 2076, 1787), line, sizeof(line));
+        formatCentre(readCentre(c, pitch, P2076()), line, sizeof(line));
         check(has(line, "aim dot: centre other (a weapon's or a tool's dot, or nothing: kept; why=shape, lit=24, bright=22, box=x3..8,y2..7, "
                         "max=255,0,0, at=x0)"),
               "centre other, the tool in the hand: why=shape");
         widen(kRed56, c, pitch);
-        formatCentre(readCentre(c, pitch, 2076, 1787), line, sizeof(line));
+        formatCentre(readCentre(c, pitch, P2076()), line, sizeof(line));
         check(std::strcmp(line, "aim dot: centre plain (the plain dot without a weapon: erased; lit=20, bright=17, box=x3..8,y3..7, "
                                 "max=255,0,0, at=x0)") == 0,
               "centre plain, the red plain dot: max=255,0,0");
         std::memset(c, 0, sizeof(c));
-        formatCentre(readCentre(c, pitch, 2076, 1787), line, sizeof(line));
+        formatCentre(readCentre(c, pitch, P2076()), line, sizeof(line));
         check(has(line, "why=empty, lit=0, bright=0, box=none, max=0,0,0, at=x0)"), "centre other, empty: box none");
         widen(kPlainDot, c, pitch);
-        formatCentre(readCentre(c, pitch, 2768, 2383), line, sizeof(line));
-        check(has(line, "why=atlas"), "centre other, another atlas");
+        formatCentre(readCentre(c, pitch, patternOf(0, 0)), line, sizeof(line));
+        check(has(line, "why=atlas"), "centre other, no pattern");
         // .58: a line on any change of the signature, and the centre now.
         widen(kRed56, c, pitch);
-        const CentreRead red = readCentre(c, pitch, 2076, 1787), red2 = readCentre(c, pitch, 2076, 1787);
+        const CentreRead red = readCentre(c, pitch, P2076()), red2 = readCentre(c, pitch, P2076());
         check(sameSignature(red, red2), "the same read twice: the same signature");
         widen(kPlainDot, c, pitch);
-        const CentreRead teal = readCentre(c, pitch, 2076, 1787);
+        const CentreRead teal = readCentre(c, pitch, P2076());
         check(teal.plain == red.plain && !sameSignature(teal, red), "teal and red, both plain: the colour differs, so the signature");
         widen(kTool43, c, pitch);
-        const CentreRead tool = readCentre(c, pitch, 2076, 1787);
+        const CentreRead tool = readCentre(c, pitch, P2076());
         std::memset(c, 0, sizeof(c));
-        const CentreRead empty = readCentre(c, pitch, 2076, 1787);
+        const CentreRead empty = readCentre(c, pitch, P2076());
         check(!tool.plain && !empty.plain && !sameSignature(tool, empty), "empty, then the tool's dot: both other, the signature differs");
         CentreRead moved = teal;
         moved.bx0 += 1;
@@ -332,7 +483,7 @@ void partLines() {
         check(kCentreNowMs == 10000, "centre now every 10 s");
         char pixels[kPixelsLineCap];
         widen(kTool43, c, pitch);
-        formatCentrePixels(c, pitch, pixels, sizeof(pixels));
+        formatCentrePixels(c, pitch, kPatternW, kPatternH, pixels, sizeof(pixels));
         const char* head = "aim dot: centre pixels 000000 000000 000000 000000 000000 000000 000000 000000 000000 000000 000000 "
                            "000000 / 000000";
         check(std::strncmp(pixels, head, std::strlen(head)) == 0,
@@ -352,8 +503,6 @@ void partLines() {
         check(rows == int(kPatternH) && cells == int(kPatternW * kPatternH), "pixels: 11 rows, 132 cells");
         check(std::strlen(pixels) < sizeof(pixels) - 1, "pixels: the line fits, not cut");
     }
-    formatNoPattern(2768, 2383, line, sizeof(line));
-    check(has(line, "pattern is for a 2076x1787 atlas, this one is 2768x2383"), "no pattern");
     formatInert("why", line, sizeof(line));
     check(has(line, "aim dot: inert: why; the picture is as with show"), "inert");
     Summary s;
@@ -381,6 +530,7 @@ int main(int argc, char** argv) {
     partCue();
     partPattern();
     partRow();
+    partScaled();
     partLines();
     std::printf("%s: aim_dot_test, %d checks, %d failed\n", g_failures ? "FAIL" : "PASS", g_checks, g_failures);
     return g_failures ? 1 : 0;

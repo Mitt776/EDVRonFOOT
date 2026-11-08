@@ -2,29 +2,29 @@
 
 ## 1. Ветка и PR
 
-- [ ] 1.1 Ветка `change/on-foot-aim-dot-any-size` от свежего `main` (`git switch main; git pull; git switch -c …`),
+- [x] 1.1 Ветка `change/on-foot-aim-dot-any-size` от свежего `main` (`git switch main; git pull; git switch -c …`),
   первый коммит — заявка (`openspec/changes/on-foot-aim-dot-any-size/`), `git commit -F`, почта noreply. Push, PR в
   `main` по `.github/pull_request_template.md`: ссылка на заявку, план полёта шага 1. Проверка: `gh pr view` открыт;
   `git log -1 --format="%ae %ce"` — только noreply.
 
 ## 2. Шаг 1: образец под масштаб, решение на пробу (`.62`)
 
-- [ ] 2.1 `edvr/src/d3d11/aim_dot_core.h` (design, решения 1, 4): образец (окно, яркость пикселей, сумма, предел пятна),
+- [x] 2.1 `edvr/src/d3d11/aim_dot_core.h` (design, решения 1, 4): образец (окно, яркость пикселей, сумма, предел пятна),
   `patternOf(w, h)` — `.42` как есть при 2076x1787, иначе пересчёт под `centreOf(w, h)` по площади, сумма 3798·(w/2076)·(h/1787),
   предел ⌈7·w/2076⌉. `readCentre`/`readRow`/`windowDistance`/`formatCentrePixels` берут образец параметром.
   `patternFor` и `formatNoPattern` убрать, `formatPattern` (`aim dot: pattern for WxH: scale …`) добавить, в
   `formatCentre` — пометка `trial`. Шапку файла переписать. Перечитать по `edvr/AGENTS.md`. Проверка: стенд 2.3.
-- [ ] 2.2 `edvr/src/d3d11/aim_dot.cpp` (design, решение 2): образец на атлас (пересчёт в `noteSize`), копия и чтение на
+- [x] 2.2 `edvr/src/d3d11/aim_dot.cpp` (design, решение 2): образец на атлас (пересчёт в `noteSize`), копия и чтение на
   любом размере, стирание только при 2076x1787. На пробном размере — строка `pattern for` один раз на размер,
   решения с `trial`, строка пикселей и для «обычной» в прежнем лимите. Сводка — без изменений. Проверка: сборка 2.5;
   в коде не осталось `patternFor`.
-- [ ] 2.3 `edvr/tools/aim_dot_test`: все старые образцы на 2076x1787 дают те же решения и `at`, что в `.60`. Пересчёт:
+- [x] 2.3 `edvr/tools/aim_dot_test`: все старые образцы на 2076x1787 дают те же решения и `at`, что в `.60`. Пересчёт:
   1868x1608 → окно 10x11, сумма около 3075, предел 7; 1245x1072 → 7x8, около 1366, предел 5; 2768x2383 → 14x15,
   около 6753, предел 10. Узор `.42`, пересчитанный под 1868 и 1245, — «обычная», с `at` у центра. Точка оружия `.42` и
   инструмента `.43`, пересчитанные так же, — «другое» (`shape`). Строки `pattern for`, `trial`, пиксели окна 7x8.
   Шапка стенда и `REM` гейта `:rig_aim_dot_test` в `edvr/build.bat` (CRLF). Проверка: `PASS`; один раз испортить
   сумму — падает, вернуть.
-- [ ] 2.4 Документы: исследование `docs/research/native-vr-on-foot.md` — раздел «Точка при любом размере (`.62`)»
+- [x] 2.4 Документы: исследование `docs/research/native-vr-on-foot.md` — раздел «Точка при любом размере (`.62`)»
   (логи Oculus 08.11: 1868x1608, 1245x1072, `hidden=0`; пересчёт; пробный шаг), строка в `## Status`. ROADMAP — пункт.
   `edvr/README_EDVRONFOOT.md` — строки `pattern for` и `trial`. Комментарий ключа в `edvr/edvr.ini` (шаблон) — про
   2076x1787 переписать (на шаге 1: «на других размерах пока видна»), через Edit, CRLF как в файле. Проверка:
