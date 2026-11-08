@@ -12,8 +12,10 @@ WHAT YOU NEED
 -------------
 
 - A PC VR headset and an OpenXR runtime selected in Windows. The on-foot
-  features are tested with SteamVR as the OpenXR runtime (Quest 3); other
-  runtimes may work but are not tested on foot.
+  features are tested with Quest 3 over Link, with SteamVR and with Meta
+  Quest Link as the OpenXR runtime; other runtimes may work but are not
+  tested on foot. For a Quest over Link, Meta Quest Link directly is
+  noticeably faster: see the user guide on the GitHub page.
 - Elite Dangerous: Odyssey on the game build this release supports. The
   installer checks the build and refuses to install on one it does not know.
 
