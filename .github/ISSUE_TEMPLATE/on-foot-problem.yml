@@ -1,0 +1,71 @@
+name: Something is wrong in VR
+description: The game runs, but something on foot (or in the ship) looks or works wrong in the headset.
+title: "[vr] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The logs answer many of these on their own: EDVRonFOOT writes down what it switched on and what it saw.
+
+        **Play until the problem happens, quit the game, then** run `EDVRonFOOT-installer.exe` and press **Save logs**. It takes the most recent session, so starting the game again before saving replaces the session that had the problem.
+
+  - type: dropdown
+    id: where
+    attributes:
+      label: What is wrong
+      options:
+        - On foot - no stereo, flat screen, or the picture is wrong
+        - On foot - aiming, weapons or tools
+        - On foot - the HUD (health, oxygen, compass, sight)
+        - On foot - a panel or menu is missing or misplaced
+        - On foot - the aim point / a stray dot
+        - In the ship
+        - Performance (low frame rate, stutter)
+        - Something else, or I am not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: The zip from Save logs
+      description: |
+        Drag it in.
+
+        **What is in it:** EDVRonFOOT's own logs and settings and your Elite graphics settings. The logs contain your game folder path, and may name your key bindings file, which can include your commander name.
+      placeholder: Drag the zip here.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what happened instead
+      description: |
+        Where were you (station, settlement, planet surface), and what were you doing? Does it happen every time, or only sometimes? A screenshot or a short video is often worth more than a paragraph.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: EDVRonFOOT version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: headset
+    attributes:
+      label: Headset and OpenXR runtime
+      description: Which headset, and the OpenXR runtime selected in Windows (SteamVR, Meta/Oculus, Virtual Desktop, Pimax, Varjo...).
+      placeholder: Quest 3 via Steam Link, SteamVR as the OpenXR runtime
+    validations:
+      required: true
+
+  - type: textarea
+    id: other-mods
+    attributes:
+      label: Other mods and overlays (optional)
+      description: EDHM, ReShade, OpenXR Toolkit, overlays. Write "none" if there are none.

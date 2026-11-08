@@ -1,0 +1,70 @@
+name: Crash, or the game will not start
+description: The game closes by itself, freezes, or never reaches the menu with EDVRonFOOT installed.
+title: "[crash] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Sorry this is happening. First, so you can play in the meantime:
+
+        **Was Elite updated recently?** EDVRonFOOT is tied to one game build. After a game patch the game will not start with the old mod installed, often with no error window at all. Run `EDVRonFOOT-installer.exe` and choose **Uninstall** — the game is back to stock — and check [Releases](https://github.com/Mitt776/EDVRonFOOT/releases) for a version for the new build. If that is all it was, there is no need to open an issue.
+
+        **Otherwise, get the zip.** Close the game, run `EDVRonFOOT-installer.exe` and press **Save logs**. It writes one zip to your Desktop with the logs of the last session, your `edvr.ini` and the install record.
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: The zip from Save logs
+      description: |
+        Drag it in. It is the most useful part of the report.
+
+        **What is in it:** EDVRonFOOT's own logs and settings and your Elite graphics settings. The logs contain your game folder path, and may name your key bindings file, which can include your commander name.
+      placeholder: Drag the zip here.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: EDVRonFOOT version
+      description: The release you installed, from the zip name or the installer window.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happens
+    attributes:
+      label: What happens, and when
+      description: |
+        How far does it get — no window at all, the main menu, in the ship, on foot? Every time, or now and then? What were you doing when it happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: other-mods
+    attributes:
+      label: Other mods and overlays
+      description: |
+        EDHM, ReShade, 3Dmigoto, OpenXR Toolkit, overlays (Steam, Discord, RTSS). For DLL mods, say which file name each one is installed as. Write "none" if there are none.
+      placeholder: |
+        EDHM, installed as d3d11_edhm.dll
+        OpenXR Toolkit
+    validations:
+      required: true
+
+  - type: input
+    id: headset
+    attributes:
+      label: Headset and OpenXR runtime
+      description: Which headset, and the OpenXR runtime selected in Windows (SteamVR, Meta/Oculus, Virtual Desktop, Pimax, Varjo...). A Quest over Link is a different path from a Quest over Steam Link, so say which.
+      placeholder: Quest 3 via Steam Link, SteamVR as the OpenXR runtime
+    validations:
+      required: true
+
+  - type: textarea
+    id: anything-else
+    attributes:
+      label: Anything else (optional)
+      description: Graphics card and driver version, Windows version, an error window from the game — whatever did not fit above.

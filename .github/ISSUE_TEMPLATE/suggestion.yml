@@ -1,0 +1,45 @@
+name: A suggestion
+description: Something EDVRonFOOT could do, or do differently. For something broken, use one of the other templates — they ask for the logs.
+title: "[suggestion] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The most useful suggestion describes what you would **see or feel in the headset**, and how that differs from what the game does now. Have a quick look through the open issues first — the same idea may already have a thread.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What you would like
+      description: What it would look like in the headset, as plainly as you can put it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: now
+    attributes:
+      label: What it is like now
+      description: What the game (or EDVRonFOOT) does today.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where it applies
+      options:
+        - On foot
+        - In the ship
+        - Menus and loading
+        - Performance
+        - The installer or settings
+        - Somewhere else, or everywhere
+    validations:
+      required: false
+
+  - type: textarea
+    id: anything-else
+    attributes:
+      label: Anything else (optional)
+      description: A screenshot or a short video, your headset and OpenXR runtime if it matters.

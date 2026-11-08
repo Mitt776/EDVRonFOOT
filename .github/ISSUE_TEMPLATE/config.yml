@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: How to install, uninstall, and what EDVRonFOOT does
+    url: https://github.com/Mitt776/EDVRonFOOT#readme
+    about: The README covers requirements, the supported game build, install and uninstall. Worth a look before opening an issue.
+  - name: Download the latest release
+    url: https://github.com/Mitt776/EDVRonFOOT/releases
+    about: If Elite was just updated, check here for an EDVRonFOOT release for the new game build.
