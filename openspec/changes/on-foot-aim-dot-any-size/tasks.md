@@ -29,9 +29,9 @@
   `edvr/README_EDVRONFOOT.md` — строки `pattern for` и `trial`. Комментарий ключа в `edvr/edvr.ini` (шаблон) — про
   2076x1787 переписать (на шаге 1: «на других размерах пока видна»), через Edit, CRLF как в файле. Проверка:
   `python tools\check_status_blocks.py` (из `edvr\`) проходит.
-- [ ] 2.5 Полная сборка по `edvr/AGENTS.md`: `build.bat` по абсолютному пути, `--jobs 8`. Проверка: «all gates
+- [x] 2.5 Полная сборка по `edvr/AGENTS.md`: `build.bat` по абсолютному пути, `--jobs 8`. Проверка: «all gates
   passed», `config contract ok: 131 keys`. Коммит `git commit -F`, push в ветку; `build.bat --dll-only` проходит.
-- [ ] 2.6 Установка при закрытой игре: `python tools\install_edvr.py --target steam --keep-backups 1000`, сначала
+- [x] 2.6 Установка при закрытой игре: `python tools\install_edvr.py --target steam --keep-backups 1000`, сначала
   `--dry-run`. Живой `edvr.ini` не трогать. Проверка: `--verify-only` ok, хеш `edvr.ini` до и после один и тот же.
 
 ## 3. Полёт шага 1 и разбор
