@@ -201,6 +201,15 @@ minutes after a flight finally reproduced the effect being chased.
 - **Commit email is the GitHub noreply address**
   `187125319+Mitt776@users.noreply.github.com` (set in this repo's
   `git config user.email`), never a personal address.
+- **Merge a PR locally, not with `gh pr merge` or the web button**:
+  `git switch main; git pull; git merge --no-ff change/foo -m "Merge pull
+  request #N from Mitt776/change/foo"`, check
+  `git log -3 --format="%ae %ce"` shows only the noreply address, then
+  `git push` (GitHub marks the PR merged). On 2026-11-08 a GitHub-side
+  merge signed two merge commits with the account's personal email; main
+  was rewritten to remove them. The account now has "Keep my email
+  addresses private" and "Block command line pushes that expose my email"
+  on, but check anyway.
 - **A release is a tag `edvronfoot-vX.Y.Z` on `main`** after the merge
   (`git describe` then puts "edvronfoot" into the log's version line):
   full build, `package.bat X.Y.Z` (writes
