@@ -85,6 +85,22 @@ Settings tab.
    picture back to size.
 3. Turn on the **Frame-rate readout** and compare.
 
+### Quest over Link: the fastest setup
+
+Measured in a settlement conflict zone (Quest 3 over Link, 72 Hz, RTX 4080 SUPER): **18 fps** with SteamVR as the
+OpenXR runtime and ASW on, **22–24** with ASW off, **26–31** with Meta Quest Link directly and ASW off. Lowering the
+resolution did not help at all: in a big fight the game itself (the CPU) is the limit, and SteamVR in between and ASW
+only add waiting on top of it.
+
+1. **Meta Quest Link as the OpenXR runtime**: in the Meta Quest Link app on the PC, **Settings → General → OpenXR
+   Runtime → Set as active**. Launch the game from Steam as usual; SteamVR is not needed. (Back to SteamVR: SteamVR
+   settings → OpenXR → set SteamVR as the OpenXR runtime.) Do not use the game's own Oculus mode: EDVRonFOOT does not
+   support it.
+2. **ASW off**: `OculusDebugTool.exe` (in `...\Oculus\Support\oculus-diagnostics\`) → **Asynchronous Spacewarp →
+   Disabled**. When the game cannot hold 36 fps, ASW drops it straight to 18. ASW goes back to Auto when Link
+   restarts, so check it before you fly. Without ASW head turns are a little less smooth when the frame rate is low;
+   try both and keep what feels better.
+
 ## Ship and space
 
 On the **Fixes** page. The defaults fix things that look wrong in a headset; **stock** or **off** gives you the

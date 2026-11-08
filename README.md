@@ -25,8 +25,10 @@ Everything EDVR does in the ship stays as it is.
 ## What you need
 
 - Windows 10/11 and a PC VR headset.
-- An **OpenXR runtime** selected in Windows. Tested on foot with **SteamVR** as the OpenXR runtime (Quest 3). Other
-  runtimes may work but are not tested on foot.
+- An **OpenXR runtime** selected in Windows. Tested on foot with Quest 3 over Link, with **SteamVR** and with **Meta
+  Quest Link** (Oculus) as the OpenXR runtime. Other runtimes may work but are not tested on foot. For a Quest over
+  Link, Meta Quest Link directly is noticeably faster than SteamVR: see the
+  [user guide](GUIDE.md#quest-over-link-the-fastest-setup).
 - **Elite Dangerous: Odyssey, game build `2026.10.23.334925`.** Horizons is not supported.
 
 > **The mod is tied to one game build.** After a game patch the game build changes, and with the old mod installed
