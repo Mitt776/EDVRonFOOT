@@ -184,7 +184,9 @@ def _check_version_stamps(version, files):
             "these binaries are not release %s:\n  %s\n  build.bat stamps them from `git describe "
             "--tags --always --dirty`: check out the tag edvronfoot-v%s with a clean tree, run build.bat, "
             "then package." % (version, "\n  ".join(problems), version))
-    print("[edvr] version stamps: %s all read v%s" % (", ".join(name for name, _ in stamps), version))
+    read = sorted({str(stamp.get(key)) for _, stamp in stamps for key in STAMP_KEYS})
+    print("[edvr] version stamps: %s all read release %s (%s)" %
+          (", ".join(name for name, _ in stamps), version, ", ".join(read) or "no binaries"))
 
 
 def _embedded_resource(executable, resource_id, required=True):
