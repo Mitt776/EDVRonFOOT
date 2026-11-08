@@ -56,7 +56,12 @@ enum : int {
 const UINT kMsgFirstScan = WM_APP + 1;
 
 const wchar_t* kTipUrl = L"https://ko-fi.com/seancharacterecho";
-const wchar_t* kDiscordUrl = L"https://discord.gg/ynkdf6Gdua";
+// EDVRonFOOT has no Discord server yet: the link says so instead of opening
+// the original EDVR's server, whose people cannot answer for this fork.
+const wchar_t* kDiscordPending =
+    L"EDVRonFOOT does not have a Discord server yet -- it is in progress.\r\n\r\n"
+    L"For now, open an issue on GitHub and attach the zip from Save logs:\r\n"
+    L"https://github.com/Mitt776/EDVRonFOOT/issues";
 const wchar_t* kTipText = L"EDVR is free. If it saved you an evening, you can";
 
 // The client area and every control position below are in 96-dpi units, scaled
@@ -516,12 +521,12 @@ void paintWindow(HWND window) {
     ui::fillRect(dc, client, t.windowBg);
 
     RECT title{dp(kMargin), dp(18), dp(400), dp(50)};
-    ui::drawText(dc, L"EDVR", title, f.title, t.text, DT_LEFT | DT_SINGLELINE);
+    ui::drawText(dc, L"EDVRonFOOT", title, f.title, t.text, DT_LEFT | DT_SINGLELINE);
 
     const std::wstring subtitle = fromUtf8(payloadInfo().version) +
         (payloadInfo().profile == "flat"
              ? L"  \x00b7  experimental flat temporal build; zero-jitter testing"
-             : L"  \x00b7  unofficial patch for Elite Dangerous in VR");
+             : L"  \x00b7  native VR on foot for Elite Dangerous, based on EDVR");
     RECT sub{dp(kMargin), dp(52), dp(kClientWidth - kMargin), dp(70)};
     ui::drawText(dc, subtitle, sub, f.caption, t.subtext, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 
@@ -672,7 +677,7 @@ void browseForFolder() {
         MessageBoxW(g.window,
                     L"There is no EliteDangerous64.exe in that folder, or in a Products folder "
                     L"under it.\n\nPick the folder that holds EliteDangerous64.exe itself.",
-                    L"EDVR installer", MB_OK | MB_ICONWARNING);
+                    L"EDVRonFOOT installer", MB_OK | MB_ICONWARNING);
         return;
     }
     addInstall(game);
@@ -729,7 +734,7 @@ void runAction(AppArgs::Act action) {
                 fromUtf8(mirror.savedUtc) +
                 L".\n\nRestore them before installing? They are kept at\n" + mirror.dir +
                 L"\nprecisely so a game update wiping this folder cannot take them too.";
-            const int answer = MessageBoxW(g.window, text.c_str(), L"EDVR installer",
+            const int answer = MessageBoxW(g.window, text.c_str(), L"EDVRonFOOT installer",
                                            MB_YESNO | MB_ICONQUESTION);
             if (answer == IDYES) {
                 std::vector<std::string> notes;
@@ -740,7 +745,7 @@ void runAction(AppArgs::Act action) {
                     std::wstring why = L"Not all of your saved settings could be restored:\n\n";
                     for (const std::string& n : notes) why += L"\x2022 " + fromUtf8(n) + L"\n";
                     why += L"\nThe install carries on with what is in the folder now.";
-                    MessageBoxW(g.window, why.c_str(), L"EDVR installer", MB_OK | MB_ICONWARNING);
+                    MessageBoxW(g.window, why.c_str(), L"EDVRonFOOT installer", MB_OK | MB_ICONWARNING);
                 }
                 // Whatever did come back is what the plan is for.
                 g.survey = surveyTarget(g.survey.game);
@@ -786,7 +791,7 @@ void runAction(AppArgs::Act action) {
         // taken the foreground would be enough to modify a game folder. That
         // is not hypothetical: it happened twice during development, to a real
         // install, while windows were being opened for screenshots.
-        const int answer = MessageBoxW(g.window, confirmText(plan, verb).c_str(), L"EDVR installer",
+        const int answer = MessageBoxW(g.window, confirmText(plan, verb).c_str(), L"EDVRonFOOT installer",
                                        MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
         if (answer != IDYES) return;
     }
@@ -796,7 +801,7 @@ void runAction(AppArgs::Act action) {
             g.window,
             L"This game folder can only be written to by an administrator (it is usually under "
             L"Program Files).\n\nRestart the installer with administrator rights and carry on?",
-            L"EDVR installer", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
+            L"EDVRonFOOT installer", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
         if (answer != IDYES) return;
         AppArgs elevated = args;
         elevated.autorun = true;
@@ -859,8 +864,8 @@ void saveLogs() {
             text += "\r\n";
             for (const std::string& note : bundle.notes) text += "  " + note + "\r\n";
         }
-        text += "\r\nAttach it to a GitHub issue, or drop it on Discord. It holds EDVR's own "
-                "logs and settings and nothing else.\r\n";
+        text += "\r\nAttach it to an issue at github.com/Mitt776/EDVRonFOOT/issues. It holds "
+                "EDVR's own logs and settings and nothing else.\r\n";
     } else {
         text = bundle.error + "\r\n";
         for (const std::string& note : bundle.notes) text += "  " + note + "\r\n";
@@ -955,9 +960,9 @@ void createControls(HWND window) {
     g.tip = ui::makeButton(window, L"leave a tip", kIdKofi, ui::ButtonStyle::Link, f.caption);
     place(g.tip, kMargin, 657, 76, 20, Screen::Install, true);  // x fixed up in applyLayout
 
-    g.discord = ui::makeButton(window, L"Ask on Discord", kIdDiscord, ui::ButtonStyle::Link,
-                               f.caption);
-    place(g.discord, kClientWidth - kMargin - 110, 657, 110, 20, Screen::Install, true);
+    g.discord = ui::makeButton(window, L"Discord: coming soon", kIdDiscord,
+                               ui::ButtonStyle::Link, f.caption);
+    place(g.discord, kClientWidth - kMargin - 140, 657, 140, 20, Screen::Install, true);
 
     // Dark mode does not reach the native controls on its own. These two theme
     // names are what File Explorer uses for exactly this, and on a light theme
@@ -1060,7 +1065,8 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                     ShellExecuteW(window, L"open", kTipUrl, nullptr, nullptr, SW_SHOWNORMAL);
                     return 0;
                 case kIdDiscord:
-                    ShellExecuteW(window, L"open", kDiscordUrl, nullptr, nullptr, SW_SHOWNORMAL);
+                    MessageBoxW(window, kDiscordPending, L"EDVRonFOOT installer",
+                                MB_OK | MB_ICONINFORMATION);
                     return 0;
                 case kIdChkKeep:
                     ui::toggleCheckbox(reinterpret_cast<HWND>(lparam));
@@ -1220,7 +1226,7 @@ int runGui(HINSTANCE instance, const AppArgs& args) {
     cls.hIconSm = cls.hIcon;
     RegisterClassExW(&cls);
 
-    HWND window = CreateWindowExW(0, cls.lpszClassName, L"EDVR installer",
+    HWND window = CreateWindowExW(0, cls.lpszClassName, L"EDVRonFOOT installer",
                                   (WS_OVERLAPPEDWINDOW & ~(WS_THICKFRAME | WS_MAXIMIZEBOX)) |
                                       WS_CLIPCHILDREN,
                                   CW_USEDEFAULT, CW_USEDEFAULT, kClientWidth, kClientHeight,
