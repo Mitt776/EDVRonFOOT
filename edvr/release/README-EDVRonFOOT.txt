@@ -26,6 +26,9 @@ INSTALL
    "More info" and "Run anyway".
 3. Choose the game directory (the installer usually finds it) and Install.
    Your existing edvr.ini, if any, is kept.
+   Leave "Keep the settings I have changed" checked: unchecked, the
+   installer replaces edvr.ini with the defaults (your old file goes to
+   edvr_backup\ in the game folder).
 4. Start the game.
 
 UNINSTALL

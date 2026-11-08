@@ -41,6 +41,8 @@ Everything EDVR does in the ship stays as it is.
    The installer is not signed, so Windows SmartScreen may warn: choose **More info → Run anyway**.
 3. Pick the game directory (usually found automatically) and press **Install**. Your existing `edvr.ini`, if you
    have one, is kept.
+   **Leave "Keep the settings I have changed" checked.** Unchecked, the installer replaces `edvr.ini` with the
+   defaults (your old file goes to `edvr_backup\` in the game folder).
 4. Start the game. In the headset, **F8** opens the EDVR menu.
 
 ## Uninstall
