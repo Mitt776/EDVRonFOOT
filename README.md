@@ -2,7 +2,7 @@
 
 **Native stereo VR on foot for Elite Dangerous: Odyssey.**
 
-[Русская версия](README.ru.md) · [Download (Releases)](https://github.com/Mitt776/EDVRonFOOT/releases)
+[Русская версия](README.ru.md) · [Download (Releases)](https://github.com/Mitt776/EDVRonFOOT/releases) · [User guide and settings](GUIDE.md)
 
 EDVRonFOOT is a fork of [EDVR](https://github.com/characterecho-sean/edvr-unofficial-patch) by characterecho-sean
 (MIT). EDVR gives Elite Dangerous a native OpenXR VR path and many VR fixes in the ship. Out of the box the game
@@ -43,7 +43,7 @@ Everything EDVR does in the ship stays as it is.
    have one, is kept.
    **Leave "Keep the settings I have changed" checked.** Unchecked, the installer replaces `edvr.ini` with the
    defaults (your old file goes to `edvr_backup\` in the game folder).
-4. Start the game. In the headset, **F8** opens the EDVR menu.
+4. Start the game. In the headset, **F8** opens the settings menu; the [user guide](GUIDE.md) explains it.
 
 ## Uninstall
 
