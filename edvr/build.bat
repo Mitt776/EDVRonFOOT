@@ -3108,7 +3108,11 @@ REM .42's dots, .56's red plain dot, a blue and a dimmer one plain; the weapon's
 REM an empty centre, a dot at the window's edge and another atlas other); every line's text, the signature and the pixels line;
 REM .58's signature compare (a line on any change of it) and the centre now line; .60: the plain dot by its brightness's sum
 REM (.59's two dots moved a fraction of a pixel plain), and looked for along the centre's rows (found at .59's x 1032, 1263, 1493 and
-REM at the strip's edges; the tool's and the weapon's dots, an empty strip and a marker's bar other; the nearer of two).
+REM at the strip's edges; the tool's and the weapon's dots, an empty strip and a marker's bar other; the nearer of two). .62: the pattern
+REM for any atlas size (2076x1787 .42's own; 1868x1608 10x11, 1245x1072 7x8, 2768x2383 14x15, scaled by area), the real samples scaled
+REM onto each (plain dots plain, the weapon's and the tool's other), the pattern for line, the pixels line of any window; .62's real
+REM windows of 1868 and 1245. .63: the learning (five dot-like reads at the centre, not a weapon's, not right of the centre; the tool's
+REM dot refused by the 25% guard; never at 2076x1787; reset learns again) and the learned and refused lines.
 if not exist "%OBJ%\aimdot" mkdir "%OBJ%\aimdot"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\aimdot"\ /Fe"%BUILD%\aim_dot_test.exe" ^

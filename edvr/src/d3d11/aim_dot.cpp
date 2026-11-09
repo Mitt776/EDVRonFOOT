@@ -45,7 +45,10 @@ struct State {
     ID3D11Texture2D* atlas = nullptr;  // a reference, with hide
     uint32_t w = 0, h = 0, fmt = 0;
     adh::Rect centre;
+    adh::Pattern pattern;  // the plain dot's for this size (.62): .42's at 2076x1787, scaled elsewhere
+    adh::Learner learner;  // .63: the plain dot learned on foot (not at 2076x1787); forgotten off foot and on a new size
     uint32_t saidW = 0, saidH = 0;
+    uint32_t patternSaidW = 0, patternSaidH = 0;  // the size last given a `pattern for` line
     ID3D11Texture2D* zero = nullptr;  // the centre's size of zeros, the atlas's format
     uint32_t zw = 0, zh = 0, zfmt = 0;
     // The centre's rows read back before the erase, the atlas's whole width (.60: the dot moves along them): a ring of staging
@@ -54,13 +57,13 @@ struct State {
     static constexpr int kRing = 3;
     ID3D11Texture2D* ring[kRing] = {};
     uint64_t ringFrame[kRing] = {};
+    uint32_t ringCue[kRing] = {};  // .63: the weapon cue of the frame each copy was taken in (the learning skips those)
     uint32_t rw = 0, rh = 0, rfmt = 0;
     int ringNext = 0;
     bool plain = false, plainSaid = false;
     uint32_t plainAt = 0;
     adh::CentreRead said;  // the read last said in a decision line (.58: a line on any change of it)
     uint64_t nowAt = 0;    // when the last `centre now` line was written (GetTickCount64)
-    uint32_t noPatternW = 0, noPatternH = 0;  // the size last said to have no pattern
     // This frame's.
     uint64_t frame = 0;
     bool atlasDrawn = false, erased = false, rewrote = false, copied = false;
@@ -82,6 +85,8 @@ struct State {
         ringNext = 0;
         plain = false;
         plainAt = 0;
+        learner.reset();
+        for (uint32_t& c : ringCue) c = 0;
         g_holding.store(false, std::memory_order_relaxed);
     }
 };
@@ -128,6 +133,10 @@ void noteSize(uint32_t w, uint32_t h, uint32_t fmt) {
     g_s.h = h;
     g_s.fmt = fmt;
     g_s.centre = adh::centreOf(w, h);
+    if (g_s.pattern.atlasW != w || g_s.pattern.atlasH != h) {
+        g_s.pattern = adh::patternOf(w, h);
+        g_s.learner.reset();  // a new size: learned again
+    }
     g_atlasW.store(w, std::memory_order_relaxed);
     g_atlasH.store(h, std::memory_order_relaxed);
     char line[300];
@@ -140,6 +149,12 @@ void noteSize(uint32_t w, uint32_t h, uint32_t fmt) {
     }
     g_s.saidW = w;
     g_s.saidH = h;
+    if (g_s.patternSaidW != w || g_s.patternSaidH != h) {
+        g_s.patternSaidW = w;
+        g_s.patternSaidH = h;
+        adh::formatPattern(g_s.pattern, line, sizeof(line));
+        say(line);
+    }
 }
 
 // The atlas behind the bound target, with a reference (hide): its format checked.
@@ -240,11 +255,26 @@ bool ringReady() {
 // kCentreLinesPerWindow a window, the rest counted as quiet. An other line is followed by the window's pixels, inside the same
 // quota (.56). Every kCentreNowMs a `centre now` line (and the pixels for other) outside the quota (.58). Called while the copy is
 // mapped: `rgba`, `pitch` are its bytes, the strip from the atlas's x 0 (.60: the plain dot is looked for along it; the pixels line is
-// the window the read names, `at`).
-void decide(const uint8_t* strip, uint32_t pitch) {
-    const adh::CentreRead read = adh::readRow(strip, pitch, g_s.rw, g_s.centre.x0, g_s.w, g_s.h);
+// the window the read names, `at`); `weapon`: the cue of the frame the copy was taken in. Until the plain dot is learned (.63, not at
+// 2076x1787) the read goes by the scaled pattern and feeds the learning; one line when it learns or first refuses.
+void decide(const uint8_t* strip, uint32_t pitch, bool weapon) {
+    const bool learning = !g_s.learner.learned;
+    const adh::Pattern& pat = adh::activePattern(g_s.learner, g_s.pattern);
+    const adh::CentreRead read = adh::readRow(strip, pitch, g_s.rw, g_s.centre.x0, pat);
     const uint8_t* rgba = strip ? strip + size_t(read.at) * 4 : nullptr;
+    if (learning) {
+        const adh::Learn step = adh::learnFrom(g_s.learner, g_s.pattern, read, rgba, pitch, g_s.centre.x0, weapon);
+        if (step == adh::Learn::Learned || (step == adh::Learn::Refused && g_s.learner.refusals == 1)) {
+            char line[300];
+            if (step == adh::Learn::Learned)
+                adh::formatLearned(g_s.pattern, g_s.learner, read.at, line, sizeof(line));
+            else
+                adh::formatLearnRefused(g_s.pattern, read.sum, read.at, line, sizeof(line));
+            say(line);
+        }
+    }
     const bool plain = read.plain;
+    const bool pixels = rgba && !plain;
     (plain ? g_cPlain : g_cOther).fetch_add(1, std::memory_order_relaxed);
     g_s.plain = plain;
     g_s.plainAt = read.at;
@@ -254,10 +284,10 @@ void decide(const uint8_t* strip, uint32_t pitch) {
         char line[320];
         adh::formatCentreNow(read, line, sizeof(line));
         say(line);
-        if (!plain && rgba) {
-            char pixels[adh::kPixelsLineCap];
-            adh::formatCentrePixels(rgba, pitch, pixels, sizeof(pixels));
-            say(pixels);
+        if (pixels) {
+            char text[adh::kPixelsLineCap];
+            adh::formatCentrePixels(rgba, pitch, pat.w, pat.h, text, sizeof(text));
+            say(text);
         }
     }
     if (g_s.plainSaid && adh::sameSignature(read, g_s.said)) return;
@@ -270,23 +300,17 @@ void decide(const uint8_t* strip, uint32_t pitch) {
     char line[300];
     adh::formatCentre(read, line, sizeof(line));
     say(line);
-    if (plain || !rgba) return;
-    char pixels[adh::kPixelsLineCap];
-    adh::formatCentrePixels(rgba, pitch, pixels, sizeof(pixels));
-    say(pixels);
+    if (!pixels) return;
+    char text[adh::kPixelsLineCap];
+    adh::formatCentrePixels(rgba, pitch, pat.w, pat.h, text, sizeof(text));
+    say(text);
 }
 
 // The ring's ready copies, the oldest first, without waiting: the newest read decides. Then this frame's centre into the next slot
-// (a slot still unread is overwritten: counted as unread). False: the module stood down.
+// (a slot still unread is overwritten: counted as unread). Any atlas size (.62); a size with no pattern (its `pattern for` line said
+// none) is neither read nor copied, and the dot shows. False: the module stood down.
 bool readAndCopy(ID3D11DeviceContext* ctx) {
-    if (!adh::patternFor(g_s.w, g_s.h)) {
-        if (g_s.noPatternW != g_s.w || g_s.noPatternH != g_s.h) {
-            g_s.noPatternW = g_s.w;
-            g_s.noPatternH = g_s.h;
-            char line[300];
-            adh::formatNoPattern(g_s.w, g_s.h, line, sizeof(line));
-            say(line);
-        }
+    if (!g_s.pattern.valid) {
         g_s.plain = false;
         return true;
     }
@@ -310,7 +334,7 @@ bool readAndCopy(ID3D11DeviceContext* ctx) {
             standDown("the centre's copy could not be read");
             return false;
         }
-        decide(static_cast<const uint8_t*>(m.pData), m.RowPitch);
+        decide(static_cast<const uint8_t*>(m.pData), m.RowPitch, g_s.ringCue[oldest] != 0);
         ctx->Unmap(g_s.ring[oldest], 0);
         g_s.ringFrame[oldest] = 0;
     }
@@ -320,6 +344,7 @@ bool readAndCopy(ID3D11DeviceContext* ctx) {
     D3D11_BOX box{0, r.y0, 0, g_s.w, r.y1, 1};
     ctx->CopySubresourceRegion(g_s.ring[slot], 0, 0, 0, 0, g_s.atlas, 0, &box);
     g_s.ringFrame[slot] = g_s.frame ? g_s.frame : 1;
+    g_s.ringCue[slot] = g_s.cue;
     g_s.ringNext = (slot + 1) % State::kRing;
     return true;
 }
@@ -364,7 +389,7 @@ void aimDotHideBeforeEyeComposite(ID3D11DeviceContext* ctx, const void* const re
             g_s.copied = true;
             if (!readAndCopy(ctx)) return;
         }
-        // A weapon in this frame, not the plain dot by the newest read, or erased and not drawn into since: kept.
+        // A weapon in this frame, not the plain dot by the newest read, or erased and not drawn into since: kept. Any atlas size (.63).
         if (g_s.cue || !g_s.plain || (g_s.erased && !g_s.rewrote)) return;
         const adh::Rect& r = g_s.centre;
         if (!zeroTexture(r.w(), r.h())) {
