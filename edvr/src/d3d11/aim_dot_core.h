@@ -5,8 +5,9 @@
 // weapon cue, the plain dot's pattern for any atlas size (.62), the reading of the centre's rows, and the text of every line.
 //
 // ANY SIZE (.62, on-foot-aim-dot-any-size). The atlas scales with the runtime and HMD quality (2076x1787 SteamVR 0.75, 1868x1608 Oculus
-// 0.75, 1245x1072 Oculus 0.5), always 1.161 wide to high. .42's pattern is scaled by area onto each size's centre window; on any size
-// but 2076x1787 the decision is a trial: read and said, not erased, until a flight gives the real pictures.
+// 0.75, 1245x1072 Oculus 0.5), always 1.161 wide to high. .42's pattern is scaled by area onto each size's centre window (.62 flew it
+// on trial: read, not erased); since .63 the plain dot is erased at any size, and on any size but 2076x1787 the module learns the
+// plain dot from the centre in the first reads on foot (Learner below), the scaled pattern its guard.
 //
 // WHAT .42 FOUND. The atlas of the interface's small things is a canvas in screen coordinates: the aim dot, the weapon's crosshair and
 // the jetpack's fuel arc all lie in its centre cell, so the cell cannot be erased whole. Without a weapon the dot is ~6x5 px in the
@@ -236,6 +237,8 @@ struct CentreRead {
     uint8_t maxR = 0, maxG = 0, maxB = 0;
     uint32_t at = 0;  // the window's left edge in the atlas (.60: the row's search; readCentre alone leaves it 0)
     int sum = 0;      // the window's brightness added up (.62: for the rig and the learning; not in the signature or the lines)
+    bool spotOk = false;  // .63: something kCorePeak or brighter, the spot within the pattern's limit and off the window's edge (the
+                          // shape without the sum: what the learning takes)
 };
 // `rgba`: the centre's pixels, 4 bytes each (R, G, B, A as the atlas stores them), `pitch` bytes a row; `pat`: the atlas's pattern
 // (its window, sum and spot; no pattern reads as atlas).
@@ -270,8 +273,9 @@ inline CentreRead readCentre(const uint8_t* rgba, uint32_t pitch, const Pattern&
         }
     r.sum = sum;
     const int off = sum > pat.sum ? sum - pat.sum : pat.sum - sum;
-    const bool shapeOk = off * 100 <= pat.sum * kSumPercent && r.box && r.bx0 > 0 && r.by0 > 0 && r.bx1 + 1 < pat.w &&
-                         r.by1 + 1 < pat.h && r.bx1 - r.bx0 + 1 <= pat.spotMax && r.by1 - r.by0 + 1 <= pat.spotMax;
+    r.spotOk = peak >= kCorePeak && r.box && r.bx0 > 0 && r.by0 > 0 && r.bx1 + 1 < pat.w && r.by1 + 1 < pat.h &&
+               r.bx1 - r.bx0 + 1 <= pat.spotMax && r.by1 - r.by0 + 1 <= pat.spotMax;
+    const bool shapeOk = off * 100 <= pat.sum * kSumPercent && r.spotOk;
     if (peak < kCorePeak)
         r.why = Why::Empty;
     else if (!shapeOk)
@@ -341,6 +345,49 @@ inline CentreRead readRow(const uint8_t* rgba, uint32_t pitch, uint32_t stripW, 
     r.at = best;
     return r;
 }
+// The learned pattern (.63, on-foot-aim-dot-any-size, design 3 and 5). Only on a size that is not 2076x1787: right after stepping out
+// the game lays the plain dot in the centre (.59: the shift is reset). kLearnReads reads in a row with no weapon cue, the read's window
+// at the centre's left edge (+-1) and dot-like (spotOk: bright, the spot within the limit, off the window's edge -- the sum is not
+// asked) make the last window the pattern: its brightness, its sum; the window and the spot limit stay the scaled pattern's. The
+// scaled pattern guards it: a sum more than kLearnGuardPercent off the scaled sum is refused (.62's flight: the real dot at 1245x1072
+// is +13%, the tool's dot in the hand +44..+50%), the count starts again, and the scaled pattern goes on. Learned once a time on foot;
+// the glue forgets it off foot and on a new size. Any other read breaks the row.
+constexpr int kLearnReads = 5, kLearnGuardPercent = 25;
+enum class Learn : int { None = 0, Learned, Refused };
+struct Learner {
+    int run = 0, refusals = 0;
+    bool learned = false;
+    Pattern pat;  // valid once learned
+    void reset() { *this = Learner{}; }
+};
+// The pattern the reads go by: the learned one once there is one, else the scaled (or .42's own).
+inline const Pattern& activePattern(const Learner& l, const Pattern& scaled) { return l.learned ? l.pat : scaled; }
+// One read by `scaled` (as the glue read it before anything was learned): `window` the read's window (`at`), `pitch` its rows,
+// `weapon` the cue of the frame copied. Learned: l.pat holds the pattern.
+inline Learn learnFrom(Learner& l, const Pattern& scaled, const CentreRead& read, const uint8_t* window, uint32_t pitch,
+                       uint32_t centreX0, bool weapon) {
+    if (!scaled.valid || scaled.native || l.learned) return Learn::None;
+    const uint32_t d = read.at > centreX0 ? read.at - centreX0 : centreX0 - read.at;
+    if (weapon || !window || !read.spotOk || d > 1) {
+        l.run = 0;
+        return Learn::None;
+    }
+    if (++l.run < kLearnReads) return Learn::None;
+    l.run = 0;
+    const int off = read.sum > scaled.sum ? read.sum - scaled.sum : scaled.sum - read.sum;
+    if (off * 100 > scaled.sum * kLearnGuardPercent) {
+        ++l.refusals;
+        return Learn::Refused;
+    }
+    Pattern p = scaled;
+    for (uint32_t y = 0; y < p.h; ++y)
+        for (uint32_t x = 0; x < p.w; ++x) p.px[y * p.w + x] = uint8_t(brightnessOf(window + size_t(y) * pitch + size_t(x) * 4));
+    p.sum = read.sum;
+    l.pat = p;
+    l.learned = true;
+    return Learn::Learned;
+}
+
 // The decision's lines, on each change: at most kCentreLinesPerWindow a summary window, the rest counted.
 constexpr int kCentreLinesPerWindow = 20;
 
@@ -381,9 +428,8 @@ inline void formatWeaponOn(uint32_t seen, char* out, size_t cap) {
 }
 inline void formatWeaponOff(char* out, size_t cap) { std::snprintf(out, cap, "aim dot: weapon off"); }
 // The decision with the read's signature (.56): lit and bright pixels, the spot's box in the window, the brightest colour; for other
-// the check that failed (empty, shape; atlas: no pattern or no pixels). `trial` (.62): an atlas size the module reads but does not erase
-// on yet, so the dot shows by design: the line says so.
-inline void formatCentre(const CentreRead& r, char* out, size_t cap, bool trial = false) {
+// the check that failed (empty, shape; atlas: no pattern or no pixels). (.62's trial mark went in .63: every size erases.)
+inline void formatCentre(const CentreRead& r, char* out, size_t cap) {
     char box[48];
     if (r.box)
         std::snprintf(box, sizeof(box), "x%u..%u,y%u..%u", r.bx0, r.bx1, r.by0, r.by1);
@@ -391,13 +437,13 @@ inline void formatCentre(const CentreRead& r, char* out, size_t cap, bool trial 
         std::snprintf(box, sizeof(box), "none");
     if (r.plain)
         std::snprintf(out, cap,
-                      "aim dot: centre plain (%s; lit=%u, bright=%u, box=%s, max=%u,%u,%u, at=x%u)",
-                      trial ? "trial, not erased: the plain dot without a weapon" : "the plain dot without a weapon: erased", r.lit, r.bright, box, r.maxR, r.maxG, r.maxB, r.at);
+                      "aim dot: centre plain (the plain dot without a weapon: erased; lit=%u, bright=%u, box=%s, max=%u,%u,%u, at=x%u)",
+                      r.lit, r.bright, box, r.maxR, r.maxG, r.maxB, r.at);
     else
         std::snprintf(out, cap,
-                      "aim dot: centre other (%sa weapon's or a tool's dot, or nothing: kept; why=%s, lit=%u, bright=%u, box=%s, max=%u,%u,%u, "
+                      "aim dot: centre other (a weapon's or a tool's dot, or nothing: kept; why=%s, lit=%u, bright=%u, box=%s, max=%u,%u,%u, "
                       "at=x%u)",
-                      trial ? "trial; " : "", whyName(r.why), r.lit, r.bright, box, r.maxR, r.maxG, r.maxB, r.at);
+                      whyName(r.why), r.lit, r.bright, box, r.maxR, r.maxG, r.maxB, r.at);
 }
 // The same read for the lines (.58): a line is written on any change of these, not only of the decision -- .57's flight left the
 // centre other for minutes and never said what it held after an empty read.
@@ -408,9 +454,9 @@ inline bool sameSignature(const CentreRead& a, const CentreRead& b) {
 // The centre as it is, every kCentreNowMs on foot, outside the decision lines' quota (.58): `aim dot: centre now plain|other (…)`,
 // the same signature, so a PAUSE mark finds what the centre held while a dot showed.
 constexpr uint64_t kCentreNowMs = 10000;
-inline void formatCentreNow(const CentreRead& r, char* out, size_t cap, bool trial = false) {
+inline void formatCentreNow(const CentreRead& r, char* out, size_t cap) {
     char line[300];
-    formatCentre(r, line, sizeof(line), trial);
+    formatCentre(r, line, sizeof(line));
     const char* head = "aim dot: centre ";
     const size_t n = std::strlen(head);
     if (std::strncmp(line, head, n) == 0)
@@ -418,7 +464,7 @@ inline void formatCentreNow(const CentreRead& r, char* out, size_t cap, bool tri
     else
         std::snprintf(out, cap, "%s", line);
 }
-// The window's every pixel after an other line (and, .62, after a plain one on a trial size): `winH` rows top down split by '/', `winW`
+// The window's every pixel after an other line: `winH` rows top down split by '/', `winW`
 // RRGGBB each split by spaces. 12x11 is ~950 characters and `cap` 1100 holds it (the log's line is 1200); a larger window (2768's
 // 14x15) is cut where the next pixel would not fit, and ends in " ..." .
 constexpr size_t kPixelsLineCap = 1100;
@@ -447,7 +493,17 @@ inline void formatPattern(const Pattern& p, char* out, size_t cap) {
     else
         std::snprintf(out, cap, "aim dot: pattern for %ux%u: scale %.3f (window %ux%u, sum %d, spot <= %u; %s)", p.atlasW, p.atlasH, p.scale,
                       p.w, p.h, p.sum, p.spotMax,
-                      p.native ? ".42's dot as flown, erased" : ".42's dot scaled by area, trial: read, not erased");
+                      p.native ? ".42's dot as flown" : ".42's dot scaled by area; learned from the centre on foot");
+}
+// .63: the learning's lines, `scaled` the guard.
+inline void formatLearned(const Pattern& scaled, const Learner& l, uint32_t at, char* out, size_t cap) {
+    std::snprintf(out, cap, "aim dot: learned the plain dot for %ux%u (sum %d, scaled %d, at=x%u)", scaled.atlasW, scaled.atlasH, l.pat.sum,
+                  scaled.sum, at);
+}
+inline void formatLearnRefused(const Pattern& scaled, int sum, uint32_t at, char* out, size_t cap) {
+    std::snprintf(out, cap,
+                  "aim dot: learn refused for %ux%u (sum %d, scaled %d, at=x%u: more than %d%% off; the scaled pattern goes on)",
+                  scaled.atlasW, scaled.atlasH, sum, scaled.sum, at, kLearnGuardPercent);
 }
 inline void formatInert(const char* why, char* out, size_t cap) {
     std::snprintf(out, cap, "aim dot: inert: %s; the picture is as with show until the key changes", why);

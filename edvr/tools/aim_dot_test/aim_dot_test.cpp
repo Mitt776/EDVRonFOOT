@@ -11,10 +11,14 @@
 // strip, a marker's bright bar elsewhere not plain; the nearer of two plain dots; the read's at in the signature and its line); .62's
 // pattern for any atlas size (2076x1787 .42's own, the area scaling at 1:1 to the byte; 1868x1608 -> 10x11, sum ~3075, spot 7;
 // 1245x1072 -> 7x8, ~1366, 5; 2768x2383 -> 14x15, ~6753, 10; none past 32 a side), .42's and .56's plain dots scaled onto each plain at
-// the centre and moved along the row, the weapon's and the tool's dots scaled other by shape, and the lines: pattern for, trial, the
-// 7x8 pixels line whole and the 14x15 one cut.
+// the centre and moved along the row, the weapon's and the tool's dots scaled other by shape, .62's flight's real windows (plain
+// 1868 and 1245 plain, the tool's dots other), and the lines: pattern for, the 7x8 pixels line whole and the 14x15 one cut; .63's
+// learning (five dot-like reads at the centre learn, four or a break do not, nor a weapon's frames or a dot right of the centre; the
+// real plain dots learned and read plain by the learned pattern, moved too; the tool's dot refused by the 25% guard; never at
+// 2076x1787; reset learns again) and its lines.
 #include "../../src/d3d11/aim_dot_core.h"
 #include "aim_dot_samples.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -368,7 +372,7 @@ void partScaled() {
         uint32_t aw, ah;
         bool plain;
         const char* name;
-    } reals[] = {{kPlain1868, 1868, 1608, true, "1868x1608: .62's real plain dot (sum 3074 of 3075)"},
+    } reals[] = {{kPlain1868, 1868, 1608, true, "1868x1608: .62's real plain dot (sum 3071 of 3075)"},
                  {kPlain1245, 1245, 1072, true, "1245x1072: .62's real plain dot (sum 1548 of 1366, +13%)"},
                  {kTool1868, 1868, 1608, false, "1868x1608: .62's real tool dot in the hand (4434, +44%)"},
                  {kTool1245, 1245, 1072, false, "1245x1072: .62's real tool dot in the hand (2056, +50%)"}};
@@ -389,10 +393,10 @@ void partScaled() {
     char line[400];
     formatPattern(patternOf(1868, 1608), line, sizeof(line));
     check(has(line, "aim dot: pattern for 1868x1608: scale 0.900 (window 10x11, sum 30") &&
-              has(line, ", spot <= 7; .42's dot scaled by area, trial"),
+              has(line, ", spot <= 7; .42's dot scaled by area; learned from the centre on foot)"),
           "pattern for 1868x1608");
     formatPattern(P2076(), line, sizeof(line));
-    check(std::strcmp(line, "aim dot: pattern for 2076x1787: scale 1.000 (window 12x11, sum 3798, spot <= 7; .42's dot as flown, erased)") ==
+    check(std::strcmp(line, "aim dot: pattern for 2076x1787: scale 1.000 (window 12x11, sum 3798, spot <= 7; .42's dot as flown)") ==
               0,
           "pattern for 2076x1787");
     formatPattern(big, line, sizeof(line));
@@ -402,17 +406,14 @@ void partScaled() {
     Strip st(1245, p1245.h);
     st.put(scaled(kPlainDot, 1245, 1072), c1245.x0);
     const CentreRead rp = readRow(st.px.data(), st.pitch, st.w, c1245.x0, p1245);
-    formatCentre(rp, line, sizeof(line), true);
-    check(has(line, "aim dot: centre plain (trial, not erased: the plain dot without a weapon; lit="), "centre plain, trial");
-    formatCentreNow(rp, line, sizeof(line), true);
-    check(has(line, "aim dot: centre now plain (trial, not erased:"), "centre now plain, trial");
     formatCentre(rp, line, sizeof(line));
-    check(has(line, "aim dot: centre plain (the plain dot without a weapon: erased;"), "centre plain, not trial: as in .60");
+    check(has(line, "aim dot: centre plain (the plain dot without a weapon: erased; lit=") && !has(line, "trial"),
+          "centre plain at 1245x1072: erased, no trial (.63)");
     Strip st2(1245, p1245.h);
     st2.put(scaled(kTool43, 1245, 1072), c1245.x0);
     const CentreRead rt = readRow(st2.px.data(), st2.pitch, st2.w, c1245.x0, p1245);
-    formatCentre(rt, line, sizeof(line), true);
-    check(has(line, "aim dot: centre other (trial; a weapon's or a tool's dot, or nothing: kept; why=shape"), "centre other, trial");
+    formatCentre(rt, line, sizeof(line));
+    check(has(line, "aim dot: centre other (a weapon's or a tool's dot, or nothing: kept; why=shape"), "centre other at 1245x1072");
     char pixels[kPixelsLineCap];
     formatCentrePixels(st.px.data() + size_t(rp.at) * 4, st.pitch, p1245.w, p1245.h, pixels, sizeof(pixels));
     int rows = 1, cells = 0;
@@ -432,6 +433,138 @@ void partScaled() {
     formatCentrePixels(st3.px.data() + size_t(x2768) * 4, st3.pitch, p2768.w, p2768.h, pixels, sizeof(pixels));
     const size_t len = std::strlen(pixels);
     check(len < sizeof(pixels) - 1 && len > 4 && std::strcmp(pixels + len - 4, " ...") == 0, "pixels of the 14x15 window: cut, ends in ...");
+}
+
+// .63: the learning, as the glue drives it -- each read by the active pattern (the scaled till learned), then learnFrom.
+struct Feed {
+    const Pattern scaledP;
+    Rect c;
+    Learner l;
+    Strip st;
+    Feed(uint32_t aw, uint32_t ah) : scaledP(patternOf(aw, ah)), c(centreOf(aw, ah)), st(aw, patternOf(aw, ah).h) {}
+    void show(const uint8_t* rgb, uint32_t x0) {  // the strip holds just this window (rgb of the scaled window's size)
+        std::fill(st.px.begin(), st.px.end(), uint8_t(0));
+        Scaled sc;
+        sc.w = scaledP.w;
+        sc.h = scaledP.h;
+        std::memcpy(sc.rgb, rgb, size_t(sc.w) * sc.h * 3);
+        st.put(sc, x0);
+    }
+    Learn read(bool weapon, CentreRead* out = nullptr) {
+        const CentreRead r = readRow(st.px.data(), st.pitch, st.w, c.x0, activePattern(l, scaledP));
+        if (out) *out = r;
+        if (l.learned) return Learn::None;
+        return learnFrom(l, scaledP, r, st.px.data() + size_t(r.at) * 4, st.pitch, c.x0, weapon);
+    }
+};
+
+void partLearn() {
+    char what[200];
+    for (int k = 0; k < 2; ++k) {
+        const uint32_t aw = k ? 1245 : 1868, ah = k ? 1072 : 1608;
+        const uint8_t* plain = k ? kPlain1245 : kPlain1868;
+        const uint8_t* tool = k ? kTool1245 : kTool1868;
+        const int realSum = k ? 1548 : 3071;
+        // Five dot-like reads at the centre: learned on the fifth.
+        Feed f(aw, ah);
+        f.show(plain, f.c.x0);
+        Learn got = Learn::None;
+        for (int i = 0; i < 4; ++i) got = f.read(false);
+        std::snprintf(what, sizeof(what), "%ux%u: four reads at the centre: not yet", aw, ah);
+        check(got == Learn::None && !f.l.learned, what);
+        got = f.read(false);
+        std::snprintf(what, sizeof(what), "%ux%u: the fifth: learned, its sum the real one (%d)", aw, ah, f.l.pat.sum);
+        check(got == Learn::Learned && f.l.learned && f.l.pat.sum == realSum && f.l.pat.w == f.scaledP.w && f.l.pat.h == f.scaledP.h &&
+                  f.l.pat.spotMax == f.scaledP.spotMax,
+              what);
+        CentreRead r;
+        f.read(false, &r);
+        std::snprintf(what, sizeof(what), "%ux%u: read by the learned pattern: plain at the centre", aw, ah);
+        check(r.plain && r.at == f.c.x0, what);
+        const uint32_t moved = f.c.x0 + uint32_t(230 * f.scaledP.scale);
+        f.show(plain, moved);
+        f.read(false, &r);
+        std::snprintf(what, sizeof(what), "%ux%u: the learned dot moved right: found there, plain", aw, ah);
+        check(r.plain && r.at == moved, what);
+        f.show(tool, f.c.x0);
+        f.read(false, &r);
+        std::snprintf(what, sizeof(what), "%ux%u: the tool's dot by the learned pattern: other", aw, ah);
+        check(!r.plain && r.why == Why::Shape, what);
+        char line[300];
+        formatLearned(f.scaledP, f.l, f.c.x0, line, sizeof(line));
+        std::snprintf(what, sizeof(what), "aim dot: learned the plain dot for %ux%u (sum %d, scaled %d, at=x%u)", aw, ah, realSum,
+                      f.scaledP.sum, f.c.x0);
+        check(std::strcmp(line, what) == 0, "the learned line");
+
+        // Four, then a break (an empty centre), then four: none; the fifth after the break learns.
+        Feed g(aw, ah);
+        g.show(plain, g.c.x0);
+        for (int i = 0; i < 4; ++i) g.read(false);
+        g.show(plain, 0);
+        std::fill(g.st.px.begin(), g.st.px.end(), uint8_t(0));
+        g.read(false);
+        g.show(plain, g.c.x0);
+        for (int i = 0; i < 4; ++i) g.read(false);
+        std::snprintf(what, sizeof(what), "%ux%u: four, a break, four: not learned", aw, ah);
+        check(!g.l.learned, what);
+        check(g.read(false) == Learn::Learned, "the fifth in a row after the break: learned");
+
+        // A weapon's frames do not count.
+        Feed h(aw, ah);
+        h.show(plain, h.c.x0);
+        for (int i = 0; i < 10; ++i) h.read(i % 2 == 0);
+        std::snprintf(what, sizeof(what), "%ux%u: every other frame a weapon's: not learned", aw, ah);
+        check(!h.l.learned, what);
+        for (int i = 0; i < 5; ++i) h.read(true);
+        check(!h.l.learned, "only a weapon's frames: not learned");
+
+        // A dot right of the centre (moved by the menu): not learned, though read plain by the scaled pattern.
+        Feed m(aw, ah);
+        m.show(plain, m.c.x0 + uint32_t(230 * m.scaledP.scale));
+        for (int i = 0; i < 8; ++i) m.read(false, &r);
+        std::snprintf(what, sizeof(what), "%ux%u: the dot right of the centre: plain by the scaled, not learned", aw, ah);
+        check(r.plain && !m.l.learned, what);
+        // One pixel off the centre's edge still counts.
+        Feed o(aw, ah);
+        o.show(plain, o.c.x0 + 1);
+        Learn last = Learn::None;
+        for (int i = 0; i < 5; ++i) last = o.read(false);
+        check(last == Learn::Learned, "the dot one pixel right of the centre's edge: learned");
+
+        // The guard: the tool's dot in the hand five times at the centre (no weapon cue for tools): refused, nothing learned.
+        Feed t(aw, ah);
+        t.show(tool, t.c.x0);
+        for (int i = 0; i < 4; ++i) t.read(false);
+        got = t.read(false);
+        std::snprintf(what, sizeof(what), "%ux%u: the tool's dot five times at the centre: refused by the 25%% guard", aw, ah);
+        check(got == Learn::Refused && !t.l.learned && t.l.refusals == 1, what);
+        for (int i = 0; i < 5; ++i) t.read(false);
+        check(t.l.refusals == 2 && !t.l.learned, "refused again five reads on (the glue says only the first)");
+        formatLearnRefused(t.scaledP, 4434, t.c.x0, line, sizeof(line));
+        check(has(line, "aim dot: learn refused for ") && has(line, "more than 25% off; the scaled pattern goes on"), "the refused line");
+        // Then the plain dot: learned after all.
+        t.show(plain, t.c.x0);
+        for (int i = 0; i < 5; ++i) got = t.read(false);
+        check(got == Learn::Learned && t.l.learned, "after a refusal the plain dot is learned");
+
+        // Reset (off foot, a new size): learned again.
+        f.l.reset();
+        check(!f.l.learned && f.l.run == 0 && f.l.refusals == 0, "reset forgets the learned pattern");
+        f.show(plain, f.c.x0);
+        for (int i = 0; i < 5; ++i) got = f.read(false);
+        check(got == Learn::Learned, "after a reset: learned again");
+    }
+    // 2076x1787: .42's own, never learned.
+    Learner l;
+    const Pattern& n = P2076();
+    stripClear();
+    stripPut(kPlainDot, 1032);
+    for (int i = 0; i < 10; ++i) {
+        const CentreRead r = readRow(g_strip, kStripPitch, kStripW, 1032, activePattern(l, n));
+        learnFrom(l, n, r, g_strip + size_t(r.at) * 4, kStripPitch, 1032, false);
+    }
+    check(!l.learned && &activePattern(l, n) == &n, "2076x1787: never learned, .42's pattern stays");
+    check(kLearnReads == 5 && kLearnGuardPercent == 25, "five reads, a 25% guard");
 }
 
 void partLines() {
@@ -554,6 +687,7 @@ int main(int argc, char** argv) {
     partPattern();
     partRow();
     partScaled();
+    partLearn();
     partLines();
     std::printf("%s: aim_dot_test, %d checks, %d failed\n", g_failures ? "FAIL" : "PASS", g_checks, g_failures);
     return g_failures ? 1 : 0;

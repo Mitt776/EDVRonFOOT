@@ -284,9 +284,10 @@ native_vr_on_foot_hud = body
   centre plain (…; lit=…, bright=…, box=…, max=R,G,B, at=x…)` (`at` — где найдена) или `aim dot: centre other (…; why=empty|shape|atlas, …)` и за
   ней `aim dot: centre pixels …` (все пиксели центра) — на каждую смену подписи; раз в 10 с на ногах `aim dot:
   centre now …` (`.58`). На каждый новый размер атласа — `aim dot: pattern for WxH: scale S (window WxH, sum N,
-  spot <= K; …)`: образец точки для этого размера (`.62`). На размере не 2076x1787 решение пока на пробу: `aim dot:
-  centre plain (trial, not erased: …)` / `centre other (trial; …)` — точка там ещё видна, и строка пикселей пишется
-  и для обычной точки.
+  spot <= K; …)`: образец точки для этого размера (`.62`). С `.63` точка стирается при любом размере. На размере не 2076x1787 модуль в
+  первые чтения на ногах запоминает настоящую точку из центра: `aim dot: learned the plain dot for WxH (sum N, scaled
+  N0, at=x…)`; если в центре оказалось что-то слишком непохожее по яркости (например, точка инструмента), — `aim dot:
+  learn refused for WxH (…)`, и поиск идёт по пересчитанному образцу. Выученное забывается вне ног и при смене размера.
 
 Что искать в логе: `head aim: hooked …` (хуки стоят) или `head aim: inert: …` (игра не той версии — прицел головой не
 работает); `head aim: key=on`; на ногах `head aim: player identified …`; `head aim: on` / `head aim: off (<причина>)`;
