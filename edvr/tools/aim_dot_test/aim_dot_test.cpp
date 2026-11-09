@@ -362,6 +362,29 @@ void partScaled() {
     const Pattern big = patternOf(8000, 6891);
     check(!big.valid, "a centre larger than 32 a side: no pattern");
 
+    // .62's flight: the real windows of 1868x1608 and 1245x1072, put at the centre, read by the scaled pattern.
+    struct Real {
+        const uint8_t* rgb;
+        uint32_t aw, ah;
+        bool plain;
+        const char* name;
+    } reals[] = {{kPlain1868, 1868, 1608, true, "1868x1608: .62's real plain dot (sum 3074 of 3075)"},
+                 {kPlain1245, 1245, 1072, true, "1245x1072: .62's real plain dot (sum 1548 of 1366, +13%)"},
+                 {kTool1868, 1868, 1608, false, "1868x1608: .62's real tool dot in the hand (4434, +44%)"},
+                 {kTool1245, 1245, 1072, false, "1245x1072: .62's real tool dot in the hand (2056, +50%)"}};
+    for (const Real& rl : reals) {
+        const Pattern p = patternOf(rl.aw, rl.ah);
+        const Rect c = centreOf(rl.aw, rl.ah);
+        Scaled sc;
+        sc.w = p.w;
+        sc.h = p.h;
+        std::memcpy(sc.rgb, rl.rgb, size_t(p.w) * p.h * 3);
+        Strip st(rl.aw, p.h);
+        st.put(sc, c.x0);
+        const CentreRead r = readRow(st.px.data(), st.pitch, st.w, c.x0, p);
+        check(rl.plain ? (r.plain && r.at == c.x0) : (!r.plain && r.why == Why::Shape), rl.name);
+    }
+
     // The lines.
     char line[400];
     formatPattern(patternOf(1868, 1608), line, sizeof(line));
