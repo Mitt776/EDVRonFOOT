@@ -7,11 +7,11 @@ the journal below; the current timing and overlay qualification is linked separa
 and the ruled-out list: "Status detail", straight after this block.*
 
 - **Current code state (2026-10-08; dated notes in Status detail):**
-  - Explorer Cam page (2026-10-08): Eye height / forward / sideways and
-    Head-follow smoothing, live, for everyone. BUILT, NOT FLOWN.
+  - On foot page (2026-11-09): five on-foot rows, for everyone. BUILT, NOT FLOWN.
+  - Explorer Cam page (2026-10-08): eye trims, head-follow smoothing. BUILT, NOT FLOWN.
   - Hotkeys page (2026-10-08): key, pad or HOTAS rebinding of the menu, Explorer
     Cam, exposure and history keys. FLOWN OK ("worked great"). Sections
-    "Hotkeys page" and "Explorer Cam page" below.
+    "Hotkeys page", "Explorer Cam page" and "On foot page" below.
   - Performance page: one `UI quality` row (`fix.ui_quality`, off / 100% /
     125%; default 100) drives the cockpit panels' size and the UI layer;
     BUILT, NOT FLOWN as of its 2026-09-23 entry. Gone: the `HUD quality` row,
@@ -205,6 +205,18 @@ while placed in Explorer Cam. R resets a row to the shipped value. The `ui:`
 line's `step`, `unit`, `signed` and `zero` tokens shape a number row; the
 absolute fallback eye keys stay `ui: hidden` (no row). The Explorer Cam KEY is
 on the Hotkeys page only.
+
+### On foot page (2026-11-09)
+
+BUILT, NOT FLOWN (EDVRonFOOT, change `on-foot-settings-page`). A page after
+Explorer Cam, for everyone: Native VR on foot, On-foot interface, On-foot
+aiming eye, On-foot head aim, On-foot aim dot, in the ini's order, live. The
+keys stay `experimental.native_vr_on_foot*`; the `| menu on_foot` token on
+their `ui:` lines is the generator's one exception to "a menu token belongs to
+[fix]/[menu]" (`SECTION_PAGES`): the rows are Fix tier on page `on_foot`, are
+not on the Experimental page, and the installer's window shows them under
+"Native VR on foot (EDVRonFOOT)". Any other page on an [experimental] key is a
+build error.
 
 ## The ask
 

@@ -2,28 +2,28 @@
 
 ## 1. Генератор и пометки
 
-- [ ] 1.1 `edvr/tools/gen_settings_schema.py`: добавить `on_foot` в `MENU_PAGES`. Разрешить токен `menu on_foot` у
+- [x] 1.1 `edvr/tools/gen_settings_schema.py`: добавить `on_foot` в `MENU_PAGES`. Разрешить токен `menu on_foot` у
   `[experimental]`-ключа: строка tier Fix на странице `on_foot`, не в перечне Experimental, попадает в `kSettings`.
   Любой другой `menu` у `[experimental]` — ошибка, как сейчас. Проверка: `python tools\gen_settings_schema.py
   --self-test` проходит.
-- [ ] 1.2 Там же три новых случая самопроверки (design, решение 4). Проверка: каждый случай, если его сломать
+- [x] 1.2 Там же три новых случая самопроверки (design, решение 4). Проверка: каждый случай, если его сломать
   нарочно, валит `--self-test`; после возврата всё проходит.
-- [ ] 1.3 `edvr/edvr.ini` (шаблон): `| menu on_foot` в строках `# ui:` пяти ключей `native_vr_on_foot*` (правка
+- [x] 1.3 `edvr/edvr.ini` (шаблон): `| menu on_foot` в строках `# ui:` пяти ключей `native_vr_on_foot*` (правка
   инструментом Edit, без regex). Проверка: в сгенерированном `build\gen\` пять строк `"on_foot"` и пять записей
   `experimental` в `kSettings`.
 
 ## 2. Меню F8
 
-- [ ] 2.1 `edvr/src/d3d11/menu.cpp`, `buildPages()`: страница On foot после Explorer Cam. Записать в
+- [x] 2.1 `edvr/src/d3d11/menu.cpp`, `buildPages()`: страница On foot после Explorer Cam. Записать в
   `edvr/docs/settings-menu.md`, что такая страница есть. Проверка: полный `build.bat --jobs 8` по абсолютному пути
   зелёный, есть `build\full_build_receipt.json`.
 
 ## 3. Документы
 
-- [ ] 3.1 `GUIDE.md` и `GUIDE.ru.md`: вместо раздела про Developer mode — «F8 → страница On foot» и раздел
+- [x] 3.1 `GUIDE.md` и `GUIDE.ru.md`: вместо раздела про Developer mode — «F8 → страница On foot» и раздел
   «Native VR on foot (EDVRonFOOT)» в установщике; ссылки «On the Experimental page» поправить. Проверка: grep
   `Experimental` в обоих файлах больше не ведёт игрока к настройкам на ногах.
-- [ ] 3.2 `edvr/README_EDVRONFOOT.md` — то же, если там упомянута страница Experimental. `ROADMAP.md`: хвост
+- [x] 3.2 `edvr/README_EDVRONFOOT.md` — то же, если там упомянута страница Experimental. `ROADMAP.md`: хвост
   «Настройки на ногах спрятаны» — ГОТОВО со ссылкой на заявку. Проверка: grep.
 
 ## 4. Сборка, установка, полёт

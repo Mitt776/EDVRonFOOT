@@ -93,8 +93,9 @@ HUD игры: с этим же ключом EDVR ставит свой пеши�
 адрес не там, где игре можно писать, EDVR ничего не трогает и пишет в лог причину. Тогда на ногах кинотеатр (для байта)
 или без прицела и подсказок игры (для числа).
 
-В шлеме ключ меняется в меню EDVR: F8 → страница Performance → внизу «Developer mode» = on. После этого появится
-страница Experimental, на ней строка «Native VR on foot».
+В шлеме ключ меняется в меню EDVR: F8 → страница On foot, строка «Native VR on foot» (с заявки
+`on-foot-settings-page`, без режима разработчика). В установщике — вкладка Settings, раздел «Native VR on foot
+(EDVRonFOOT)».
 
 Включено по умолчанию: строки в `edvr.ini` может и не быть. Выключить — в `edvr.ini` **в папке игры**
 (`C:\Steam\steamapps\common\Elite Dangerous\Products\elite-dangerous-odyssey-64\edvr.ini`), секция `[experimental]`:
@@ -175,8 +176,7 @@ places its menu itself)`.
 Ширина листа — всегда 85° дуги (ключ `native_vr_on_foot_hud_size` удалён в `.46`; если строка осталась в `edvr.ini`,
 EDVR её не читает). Высота подстраивается сама по пропорциям картинки игры.
 
-Как переключить в шлеме: F8 → страница Performance → внизу «Developer mode» = on → страница Experimental, строка
-«On-foot interface». Меняется на лету. Или в `edvr.ini` в папке игры, секция `[experimental]`:
+Как переключить в шлеме: F8 → страница On foot, строка «On-foot interface». Меняется на лету. Или в `edvr.ini` в папке игры, секция `[experimental]`:
 
 ```
 native_vr_on_foot_hud = body
@@ -268,7 +268,7 @@ native_vr_on_foot_hud = body
 
 ## Прицеливание на ногах (с `.33`, прицел головой с `.37`, по умолчанию включён с `.46`)
 
-Все три ключа — в `[experimental]`, живые, в F8 на странице Experimental. Работают только на ногах, с
+Все три ключа — в `[experimental]`, живые, в F8 на странице On foot. Работают только на ногах, с
 `native_vr_on_foot` и на версии игры 2026.10.23.334925; в корабле и в кинотеатре ничего не меняют.
 
 - `native_vr_on_foot_head_aim` — прицел головой: `on` (по умолчанию) — ствол и точка прицела идут туда, куда смотрит
