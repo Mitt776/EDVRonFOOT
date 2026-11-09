@@ -67,7 +67,7 @@
 - [x] 4.4 Документы: исследование — «Стирание при любом размере (`.63`)», `## Status`; ROADMAP; README — строки
   `learned`/`learn refused`, без `trial`; комментарий ключа в шаблоне `edvr.ini` — «при любой HMD Quality». Проверка:
   `check_status_blocks.py` проходит.
-- [ ] 4.5 Полная сборка `--jobs 8`, коммит, push, `--dll-only`; установка при закрытой игре (`--dry-run`, установка,
+- [x] 4.5 Полная сборка `--jobs 8`, коммит, push, `--dll-only`; установка при закрытой игре (`--dry-run`, установка,
   `--verify-only`, хеш `edvr.ini` тот же). Проверка: «all gates passed», `131 keys`, «vr payload and profile verified».
 
 ## 5. Полёт шага 2 и итог
