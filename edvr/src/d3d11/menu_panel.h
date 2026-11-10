@@ -51,7 +51,7 @@ struct MenuGeometry;
 // last, in the same treat. `aspect` is the sheet's height over its width; `g`
 // places it (shift 0 for a sheet that is all card). The native frustum must
 // be set, as for the menu.
-constexpr int kMenuSheetLayers = 9;  // the HUD, four menus, the trader's menu, the two shops, the info panel
+constexpr int kMenuSheetLayers = 10;  // the HUD, four menus, the trader's menu, the two shops, the info panel, the battle statistics
 void* menuPanelCompositeSheet(int layer, ID3D11Texture2D* src, int eye, const float* bounds,
                               const float xf[12], ID3D11ShaderResourceView* sheet,
                               float aspect, const MenuGeometry& g);

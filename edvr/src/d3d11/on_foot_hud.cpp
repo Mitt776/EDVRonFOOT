@@ -128,7 +128,7 @@ ID3D11Texture2D* boundTexture() {
 void rankInto(const Frame& from, Frame& to) {
     to.tally = from.tally;
     to.withheldTex = from.withheldTex;
-    ofh::orderPanels(to.tally.panels, to.tally.count);
+    ofh::orderPanels(to.tally.panels, to.tally.count, g_hudWidth);
     for (int i = 0; i < to.tally.count; ++i) {
         to.tex[i] = nullptr;
         for (int j = 0; j < from.tally.count; ++j)
@@ -321,7 +321,8 @@ void onFootHudFrameBoundary() {
     rankInto(g_cur, ranked);
     g_last.release();
     g_last = ranked;
-    const int hud = ofh::findHud(g_last.tally.panels, g_last.tally.count);
+    // Not the battle statistics by the last HUD's width (conflict-zone-panels): else the measure would become theirs.
+    const int hud = ofh::findHud(g_last.tally.panels, g_last.tally.count, g_hudWidth);
     if (hud >= 0) g_hudWidth = g_last.tally.panels[hud].w;
     // .48: frames since the last HUD panel, kHoldFrames for none; "no" while not on foot, so a loading right at stepping out is not
     // taken for a menu.
@@ -425,7 +426,8 @@ bool copyInto(LayerState& L, ID3D11Device* device, ID3D11Texture2D* tex) {
 // game's panel texture, read back every kKeepPeriodMs through a ring of three staging copies (never waiting). While it holds a
 // picture the info sheet is held without a missed frame; two empty reads in a row -- the game cleared it, the menu closed -- and the
 // sheet goes at once. Anything that goes wrong (no texture, no staging copy, a failed read) gives the keep up: the plain 30-frame
-// hold, as before .51. The door's alone, under g_mutex.
+// hold, as before .51. The door's alone, under g_mutex. conflict-zone-panels: one per layer that keeps (ofh::keepsPicture -- the info
+// panel, the second dialog panel, the battle statistics), each with its own reference and its own ring.
 struct InfoKeep {
     ofh::PanelKeep keep;
     ID3D11Texture2D* tex = nullptr;  // the game's panel, with a reference of ours
@@ -456,20 +458,20 @@ struct InfoKeep {
         keep.reset();
     }
 };
-InfoKeep g_keep;
+InfoKeep g_keeps[ofh::kLayers];  // used only by the layers ofh::keepsPicture names
 
-void keepGiveUp(const char* why) {
-    if (!g_keep.failSaid) {
-        g_keep.failSaid = true;
-        Log::get().note("on-foot hud: the info panel's keep gives up (%s); a static menu goes after 30 frames as before. Said once.", why);
+void keepGiveUp(InfoKeep& K, ofh::Layer layer, const char* why) {
+    if (!K.failSaid) {
+        K.failSaid = true;
+        Log::get().note("on-foot hud: %s's keep gives up (%s); a static menu goes after 30 frames as before. Said once.",
+                        ofh::specOf(layer).name, why);
     }
-    g_keep.releaseAll();
+    K.releaseAll();
 }
 
-// One frame of the info layer, before its hold steps. `fresh`: the panel's texture when the game drew it this frame; `away`: not
+// One frame of a keeping layer, before its hold steps. `fresh`: the panel's texture when the game drew it this frame; `away`: not
 // shown on foot in stereo (the key off, in the ship, the game's own composite). Returns the keep's verdict for the hold.
-ofh::Kept infoKeepFrame(ID3D11Device* device, ID3D11Texture2D* fresh, bool drew, bool away) {
-    InfoKeep& K = g_keep;
+ofh::Kept keepFrame(InfoKeep& K, ofh::Layer layer, ID3D11Device* device, ID3D11Texture2D* fresh, bool drew, bool away) {
     if (away) {
         if (K.tex || K.keep.armed) K.releaseAll();
         return ofh::Kept::None;
@@ -560,7 +562,7 @@ ofh::Kept infoKeepFrame(ID3D11Device* device, ID3D11Texture2D* fresh, bool drew,
         ctx->Release();
     });
     if (failed) {
-        keepGiveUp(why);
+        keepGiveUp(K, layer, why);
         return ofh::Kept::None;
     }
     return K.keep.verdict();
@@ -602,11 +604,12 @@ void decideLayers(ID3D11Device* device, ofh::Mode mode, float width) {
         in.gameComposites = ((composites >> k) & 1u) != 0;
         ofh::HoldStep step = ofh::HoldStep::Expired;
         const bool drew = layer == ofh::Layer::Trader ? source != nullptr : use != nullptr;
-        // .51: the info panel's keep -- held while the game's panel still holds its picture, gone when the game clears it
+        // .51: the info panel's keep -- held while the game's panel still holds its picture, gone when the game clears it;
+        // conflict-zone-panels: the second dialog panel's and the battle statistics' too
         ofh::Kept kept = ofh::Kept::None;
-        if (layer == ofh::Layer::Info) {
+        if (ofh::keepsPicture(layer)) {
             const bool away = in.mode == ofh::Mode::Off || !in.nativeOnFoot || in.mainMenu || in.onFoot != 1 || in.gameComposites;
-            kept = infoKeepFrame(device, drew ? source : nullptr, drew, away);
+            kept = keepFrame(g_keeps[k], layer, device, drew ? source : nullptr, drew, away);
         }
         const ofh::Reason reason = ofh::stepLayer(in, drew, L.hold, &step, kept);
         uint64_t& shown = layer == ofh::Layer::Hud ? g_summary.shown : g_summary.menus[k].shown;
