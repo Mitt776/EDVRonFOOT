@@ -1470,6 +1470,17 @@ void buildPages() {
         s.pages.push_back(p);
     }
     {
+        // On foot (2026-11-09, on-foot-settings-page): the five EDVRonFOOT keys, for everyone.
+        // They stay experimental.native_vr_on_foot* in edvr.ini; their `menu on_foot` token
+        // makes them Fix-tier rows here and keeps them off the Experimental page. No group
+        // headings: the page is the group.
+        Page p;
+        p.name = "On foot";
+        addSettingRows(p, MenuTier::Fix, "on_foot", false);
+        firstSelectable(p);
+        s.pages.push_back(p);
+    }
+    {
         // The hotkeys: the rows the generator made from [hotkey]'s annotations. A
         // `# ui:` row is here always, a `# dev:` row only with developer mode on
         // (hotkeyPageRows says which, and a rig pins it). No group headings: the

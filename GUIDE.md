@@ -12,7 +12,7 @@ them in three ways; all three write the same file:
 
 1. **The in-headset menu: press F8 in the game.** The easiest way, with the headset on.
 2. **The installer's Settings tab**: run `EDVRonFOOT-installer.exe` and open **Settings**. It shows the main
-   settings (not the on-foot ones, see below) with a search box.
+   settings, the on-foot ones under **Native VR on foot (EDVRonFOOT)**, with a search box.
 3. **By hand**: open `edvr.ini` in Notepad. Every setting has a comment above it saying what it does.
 
 Most settings take effect **within a second, while the game runs**. A few need a **game restart**; the menu marks
@@ -39,20 +39,20 @@ the keyboard; your HOTAS, gamepad and mouse still fly the ship. Rest on a row fo
 explains the setting.
 
 Pages: **Fixes** (ship, space, intro), **Performance** (anti-aliasing, sharpness, resolution, frame-rate readout),
-**Explorer Cam**, **Hotkeys**, **Monitor** (frame rate and frame times) and **Status**.
+**Explorer Cam**, **On foot** (the settings of EDVRonFOOT, see below), **Hotkeys**, **Monitor** (frame rate and
+frame times) and **Status**.
 
-### To reach the on-foot settings: Developer mode
+### Developer mode
 
-The on-foot settings of EDVRonFOOT are still on the **Experimental** page, and that page is hidden by default. To
-show it: **F8 → Tab to the Performance page → Developer mode → on**. The **Advanced**, **Experimental** and
-**Instruments** pages appear. The on-foot rows are on **Experimental**.
-
-On the Advanced and Instruments pages, change something only when the log or a developer asks you to.
+**F8 → Tab to the Performance page → Developer mode → on** shows three more pages: **Advanced**, **Experimental**
+and **Instruments**. You do not need them for the on-foot settings. On the Advanced and Instruments pages, change
+something only when the log or a developer asks you to.
 
 ## On foot (EDVRonFOOT)
 
-These are the mod's own settings. The defaults are what we fly with; you normally do not need to change anything.
-All of them are live: they change the next second.
+These are the mod's own settings: **F8 → On foot page**, or the installer's Settings tab, section **Native VR on
+foot (EDVRonFOOT)**. The defaults are what we fly with; you normally do not need to change anything. All of them are
+live: they change the next second.
 
 | In the menu (`edvr.ini` key) | Values | What it does |
 |---|---|---|

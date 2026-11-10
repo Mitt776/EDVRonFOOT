@@ -163,6 +163,29 @@ HOTKEY_PAGE = 'hotkeys'
 # would reach for while wearing the headset. Both are Fix tier: neither is a
 # developer instrument, and neither is hidden behind menu.developer.
 MENU_ROW_SECTIONS = ('fix', 'menu')
+# The one exception, by page (2026-11-09, on-foot-settings-page): the five
+# on-foot keys stay `experimental.native_vr_on_foot*` -- players' files and ~20
+# reads in the DLL carry that name -- yet are what EDVRonFOOT is for, so they
+# are rows for everyone. A `| menu on_foot` token on an [experimental] key makes
+# it a Fix-tier row on the On foot page, takes it off the developer tier's
+# Experimental page, and puts it in the installer's window. Any other page on an
+# [experimental] key is still a build error.
+SECTION_PAGES = {'experimental': ('on_foot',)}
+
+
+def player_row(s):
+    """A row every player sees: a [fix]/[menu] key with a menu token, or a key
+    whose section lends it the one page SECTION_PAGES allows."""
+    if not s.menuPage:
+        return False
+    return (s.section in MENU_ROW_SECTIONS
+            or s.menuPage in SECTION_PAGES.get(s.section, ()))
+
+
+def in_window(s):
+    """A key the installer's window shows: [fix], or a promoted player row."""
+    return s.section in EXPOSED_SECTIONS or (
+        s.section in SECTION_PAGES and player_row(s))
 # Settings that were taken off every menu on purpose, and must stay off.
 #
 # The three field-of-view trims were [fix] rows on the Performance page until
@@ -185,7 +208,8 @@ DEV_RE = re.compile(r'^dev\s*:\s*(.*)$', re.I)
 # The sections the menu's developer tier lists in full.
 DEV_SECTIONS = ('advanced', 'experimental')
 # Pages a `menu <page>` token can name. 'explorer_cam' is the Explorer Cam page (2026-10-08): the eye trims and the follow smoothing, for everyone.
-MENU_PAGES = ('fixes', 'performance', 'explorer_cam')
+# 'on_foot' is the On foot page (2026-11-09): the five on-foot keys (SECTION_PAGES).
+MENU_PAGES = ('fixes', 'performance', 'explorer_cam', 'on_foot')
 # A heading in edvr.ini: a rule, the title, a rule. The heading a person
 # reads in the file is the heading the window shows, so there is no second
 # list of group names to keep in step with this one.
@@ -891,7 +915,7 @@ def run(root, out, check):
         return 1
 
     unknown = [s for s in settings
-               if s.annotated and not s.hidden and s.section in EXPOSED_SECTIONS
+               if s.annotated and not s.hidden and in_window(s)
                and '%s.%s' % (s.section, s.key) not in code]
     if unknown:
         for s in unknown:
@@ -900,7 +924,7 @@ def run(root, out, check):
         return 1
 
     exposed = [s for s in settings
-               if s.annotated and not s.hidden and s.section in EXPOSED_SECTIONS]
+               if s.annotated and not s.hidden and in_window(s)]
 
     # A whole-number setting bounded 0 to 1 has two states, and a text box is
     # the wrong way to offer two states. Either it should be read with getBool
@@ -949,21 +973,26 @@ def run(root, out, check):
     # shown as a badge, never silently read as live.
     menuRows = []
     menuFix = [s for s in settings
-               if s.menuPage and not s.hidden and s.section in MENU_ROW_SECTIONS
+               if player_row(s) and not s.hidden
                and '%s.%s' % (s.section, s.key) in code]
     for s in menuFix:
         menuRows.append((s, s.menuPage, 'Fix'))
-    strayToken = [s for s in settings
-                  if s.menuPage and s.section not in MENU_ROW_SECTIONS]
+    strayToken = [s for s in settings if s.menuPage and not player_row(s)]
     if strayToken:
         print('gen_settings_schema: ERROR: a `| menu` token belongs to a [%s] setting; '
-              'elsewhere the section decides the page.' % ']/['.join(MENU_ROW_SECTIONS))
+              'elsewhere the section decides the page (the one exception: %s).'
+              % (']/['.join(MENU_ROW_SECTIONS),
+                 ', '.join('[%s] menu %s' % (sec, '/'.join(pages))
+                           for sec, pages in sorted(SECTION_PAGES.items()))))
         for s in strayToken:
-            print('  edvr.ini:%d  %s.%s' % (s.line, s.section, s.key))
+            print('  edvr.ini:%d  %s.%s  (menu %s)' % (s.line, s.section, s.key, s.menuPage))
         return 1
     devSilent = []
     for s in settings:
         if s.section not in DEV_SECTIONS or s.devHidden:
+            continue
+        if player_row(s):
+            # Already a row for everyone on its own page; one setting, one row.
             continue
         dotted = '%s.%s' % (s.section, s.key)
         if dotted not in code:
@@ -1438,6 +1467,32 @@ def self_test():
     name = 'dev-tier-hidden'
     wrote = case(name, other % '# dev: hidden\n', other_reads, 0)
     expect_not_in(name, wrote, 'some_probe')
+
+    # The On foot page (SECTION_PAGES, 2026-11-09): an [experimental] key with
+    # `| menu on_foot` is a Fix-tier row on that page and in the installer's
+    # window, and not a row on the Experimental page as well; the same key with
+    # no token stays an Experimental row and stays out of the window; any other
+    # page on an [experimental] key is refused, naming the key.
+    on_foot_reads = {'a.cpp': 'const std::string v = cfg.getString("experimental.walk_hud", "body");\n'}
+    on_foot = ('[experimental]\n'
+               '# Where the sheet hangs. Live.\n'
+               '# ui: Walk interface | choices visor, body, off%s\n'
+               'walk_hud = body\n')
+    name = 'on-foot-page'
+    wrote = case(name, on_foot % ' | menu on_foot', on_foot_reads, 0)
+    expect_in(name, wrote, 'MenuTier::Fix, "on_foot"')
+    expect_not_in(name, wrote, 'MenuTier::Experimental')
+    expect_in(name, wrote, 'SettingKind::Choice')
+    expect_in(name, wrote, '{"experimental", "walk_hud", "Walk interface",')
+    name = 'on-foot-no-token'
+    wrote = case(name, on_foot % '', on_foot_reads, 0)
+    expect_in(name, wrote, 'MenuTier::Experimental, "experimental"')
+    expect_not_in(name, wrote, 'on_foot')
+    expect_not_in(name, wrote, 'SettingKind::')
+    name = 'on-foot-other-page'
+    said = case(name, on_foot % ' | menu fixes', on_foot_reads, 1)
+    expect_in(name, said, 'a `| menu` token belongs to')
+    expect_in(name, said, 'edvr.ini:4  experimental.walk_hud  (menu fixes)')
 
     # `# retired-default: X` is the installer merge's annotation, not prose.
     # Both shapes the tree has had: a block that ends in one (camera_index_track,
