@@ -28,10 +28,10 @@
 
 ## 4. Сборка, установка, полёт
 
-- [ ] 4.1 Коммит в ветке `change/on-foot-settings-page`, PR в `main`. Затем `build.bat --dll-only`,
+- [x] 4.1 Коммит в ветке `change/on-foot-settings-page`, PR в `main`. Затем `build.bat --dll-only`,
   `python tools\install_edvr.py --target steam --dry-run`, потом без `--dry-run`, потом `--verify-only`.
   Проверка: verify проходит, версия в логе совпадает с коммитом (`edvr_log.py --expect-build HEAD`).
-- [ ] 4.2 Полёт Димы (как проверить руками):
+- [x] 4.2 Полёт Димы (как проверить руками):
   1. **До установки** в установщике или в `edvr.ini` поставить On-foot aiming eye = `left`. После установки с «Keep
      the settings I have changed» в установщике должен остаться `left`, а раздел «Native VR on foot (EDVRonFOOT)» —
      показывать все пять настроек.
