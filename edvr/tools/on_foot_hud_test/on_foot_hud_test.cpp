@@ -26,8 +26,10 @@
 // both centred at the eyes, as wide as the answers' pixels give; the summary names them bio and arms. A shop is as wide as its share of
 // the HUD panel's width (this frame's, else the last seen): 922x576 with 13 draws at the ship's ramp (.31) is none.
 #include "../../src/d3d11/on_foot_hud_core.h"
+#include <array>
 #include <cmath>
 #include <cstdio>
+#include <initializer_list>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -46,6 +48,11 @@ void check(bool ok, const char* what) {
 }
 bool has(const char* text, const char* needle) { return std::strstr(text, needle) != nullptr; }
 bool near(float a, float b) { return std::fabs(a - b) < 1e-5f; }
+// conflict-zone-panels: the HUD (1.665) and the battle statistics (1.661) are one shape within the rule's 0.01; the share of the HUD's
+// width tells them apart (findHud, findLayers; partStats). The shape-only counts below skip the twin of the layer a size belongs to.
+bool shapeTwin(Layer a, Layer b) {
+    return (a == Layer::Hud && b == Layer::Stats) || (a == Layer::Stats && b == Layer::Hud);
+}
 
 // Three distinct identities, as the glue's resource pointers would be.
 int g_res[3];
@@ -196,7 +203,8 @@ void partLayers() {
     const uint32_t sizes[][2] = {{2412, 1449}, {1029, 949}, {1410, 245}, {1410, 749}};  // in Layer's order
     for (int i = 0; i < 4; ++i) {
         int layers = 0;
-        for (int k = 0; k < kLayers; ++k) layers += isLayerShape(Layer(k), sizes[i][0], sizes[i][1]) ? 1 : 0;
+        for (int k = 0; k < kLayers; ++k)
+            layers += !shapeTwin(Layer(k), Layer(i)) && isLayerShape(Layer(k), sizes[i][0], sizes[i][1]) ? 1 : 0;
         check(layers == 1 && isLayerShape(Layer(i), sizes[i][0], sizes[i][1]), "each menu size is its own layer only");
     }
     const uint32_t strangers[][2] = {{2768, 2383}, {2162, 1922}, {961, 961}, {1321, 1081}, {1600, 1400}, {2000, 1636},
@@ -214,7 +222,8 @@ void partLayers() {
     const uint32_t q75Mission[2] = {1057, 571};
     for (int i = 0; i < 3; ++i) {
         int layers = 0;
-        for (int k = 0; k < kLayers; ++k) layers += isLayerShape(Layer(k), q75[i][0], q75[i][1]) ? 1 : 0;
+        for (int k = 0; k < kLayers; ++k)
+            layers += !shapeTwin(Layer(k), Layer(i)) && isLayerShape(Layer(k), q75[i][0], q75[i][1]) ? 1 : 0;
         check(layers == 1 && isLayerShape(Layer(i), q75[i][0], q75[i][1]), "HMD quality 0.75: each size is its own layer only");
     }
     {
@@ -231,7 +240,8 @@ void partLayers() {
     } bases[] = {{Layer::Hud, 2412, 1449},     {Layer::Hud, 3564, 2140},     {Layer::Lift, 1029, 949},     {Layer::Lift, 1521, 1402},
                  {Layer::Answers, 1410, 245},  {Layer::Answers, 2083, 362},  {Layer::Dialog, 1410, 749},   {Layer::Dialog, 2083, 1107},
                  {Layer::Mission, 1410, 761},  {Layer::Trader, 2307, 1297},  {Layer::Trader, 3408, 1917},
-                 {Layer::Biologist, 1399, 961}, {Layer::Arms, 1410, 878},    {Layer::Arms, 1761, 1096},  {Layer::Info, 1584, 938}};
+                 {Layer::Biologist, 1399, 961}, {Layer::Arms, 1410, 878},    {Layer::Arms, 1761, 1096},  {Layer::Info, 1584, 938},
+                 {Layer::Stats, 1403, 845},    {Layer::Stats, 947, 570}};
     int scaledWrong = 0;
     for (const auto& b : bases)
         for (int q = 50; q <= 100; ++q)
@@ -239,7 +249,7 @@ void partLayers() {
                 const double f = q / 100.0, add = nearest ? 0.5 : 0.0;
                 const uint32_t w = uint32_t(std::floor(b.w * f + add)), h = uint32_t(std::floor(b.h * f + add));
                 for (int k = 0; k < kLayers; ++k)
-                    if (isLayerShape(Layer(k), w, h) != (Layer(k) == b.l)) ++scaledWrong;
+                    if (!shapeTwin(Layer(k), b.l) && isLayerShape(Layer(k), w, h) != (Layer(k) == b.l)) ++scaledWrong;
             }
     check(scaledWrong == 0, "every layer at HMD quality 0.50..1.00: its own layer, and no other");
     // The panels at 0.75 that are no layer (.29's and .30's new-panel lines, with their draws there; 1230x769 the landing's, .24 on,
@@ -1032,6 +1042,135 @@ void partInfoKeep() {
     formatSummary(sum, nullptr, 0, 0, 0, seen, line, sizeof(line));
     check(has(line, "menus=[info shown=800 held=790]") && !has(line, "kept"), ".51 the summary: no kept field without them");
 }
+// conflict-zone-panels (the flight of 10.11): the battle statistics 947x570 beside the HUD 1628x977 -- its own layer, never the HUD;
+// the second dialog panel (the recruiter's, 952x506) and the statistics held by their picture; the summary's kept for both.
+void partStats() {
+    auto frame = [](std::initializer_list<std::array<uint32_t, 3>> panels) {
+        FrameTally t;
+        int i = 0;
+        for (const auto& p : panels) {
+            for (uint32_t d = 0; d < p[2]; ++d) t.note(&g_res[i], p[0], p[1], kFormatTypeless);
+            ++i;
+        }
+        return t;
+    };
+    int out[kLayers];
+    // 1.1: the statistics by shape and the HUD's share, at 0.675 (the flight's 1628) and at 1.0.
+    check(isLayerShape(Layer::Stats, 947, 570) && isLayerShape(Layer::Stats, 1403, 845), "stats: 947x570 and 1403x845 are its shape");
+    FrameTally both = frame({{1628, 977, 30}, {947, 570, 24}});
+    findLayers(both.panels, both.count, out, 0);
+    check(out[int(Layer::Hud)] == 0 && out[int(Layer::Stats)] == 1, "stats beside the HUD 1628x977: the HUD is the HUD, 947x570 the statistics");
+    findLayers(both.panels, both.count, out, 1628);
+    check(out[int(Layer::Hud)] == 0 && out[int(Layer::Stats)] == 1, "the same with the last HUD 1628 remembered");
+    FrameTally full = frame({{2412, 1449, 30}, {1403, 845, 24}});
+    findLayers(full.panels, full.count, out, 2412);
+    check(out[int(Layer::Hud)] == 0 && out[int(Layer::Stats)] == 1, "stats 1403x845 beside the HUD 2412x1449: each its own");
+    int others = 0;
+    for (int k = 0; k < kLayers; ++k)
+        if (k != int(Layer::Hud) && k != int(Layer::Stats)) others += out[k] >= 0 ? 1 : 0;
+    check(others == 0, "stats and the HUD: no other layer");
+    // The neighbours stay theirs: 922x576 no layer, the info panel the info panel, never the statistics.
+    const struct {
+        uint32_t w, h, draws, hud;
+        int layer;
+    } neighbours[] = {{922, 576, 13, 1809, -1}, {922, 576, 1, 1628, -1}, {1584, 938, 25, 2412, int(Layer::Info)},
+                      {1188, 703, 25, 1809, int(Layer::Info)}};
+    for (const auto& n : neighbours) {
+        FrameTally f = frame({{n.w, n.h, n.draws}});
+        findLayers(f.panels, f.count, out, n.hud);
+        int any = 0;
+        for (int k = 0; k < kLayers; ++k) any += out[k] >= 0 ? 1 : 0;
+        check(out[int(Layer::Stats)] == -1 && (n.layer < 0 ? any == 0 : out[n.layer] == 0 && any == 1),
+              "922x576, 1584x938, 1188x703: as before, never the statistics");
+    }
+    // Every quality 0.50..1.00, both roundings: the statistics beside the HUD of that quality are found; the HUD is never they.
+    int statsMissed = 0, hudTaken = 0;
+    for (int q = 50; q <= 100; ++q)
+        for (int nearest = 0; nearest < 2; ++nearest) {
+            const double fq = q / 100.0, add = nearest ? 0.5 : 0.0;
+            const uint32_t hw = uint32_t(std::floor(2412 * fq + add)), hh = uint32_t(std::floor(1449 * fq + add));
+            const Panel stats{&g_res[0], uint32_t(std::floor(1403 * fq + add)), uint32_t(std::floor(845 * fq + add)), kFormatTypeless, 24};
+            const Panel hud{&g_res[1], hw, hh, kFormatTypeless, 30};
+            if (findLayer(Layer::Stats, &stats, 1, hw) != 0) ++statsMissed;
+            if (findLayer(Layer::Stats, &hud, 1, hw) != -1 || isStatsPanel(hw, hh, hw)) ++hudTaken;
+        }
+    check(statsMissed == 0, "stats at HMD quality 0.50..1.00 beside the HUD of that quality: found");
+    check(hudTaken == 0, "the HUD at HMD quality 0.50..1.00 is never the statistics");
+    // 1.2: the HUD does not take the statistics.
+    FrameTally alone = frame({{947, 570, 24}});
+    findLayers(alone.panels, alone.count, out, 1628);
+    check(out[int(Layer::Hud)] == -1 && out[int(Layer::Stats)] == 0, "stats alone, the last HUD 1628: no HUD, the statistics");
+    check(findHud(alone.panels, alone.count, 1628) == -1, "findHud: the statistics by the last HUD's width are not the HUD");
+    findLayers(alone.panels, alone.count, out, 0);
+    check(out[int(Layer::Hud)] == 0 && out[int(Layer::Stats)] == -1, "stats alone before any HUD was seen: as before (the HUD shape)");
+    check(findHud(both.panels, both.count, 0) == 0 && findHud(both.panels, both.count, 1628) == 0, "findHud: the real HUD beside them");
+    orderPanels(alone.panels, alone.count, 1628);
+    check(alone.panels[0].w == 947, "orderPanels with the statistics alone: nothing moved");
+
+    // Their sheet: centred at the eyes, at the answers' density, the menus' curve, last over all.
+    const Place answers = placeOf(Layer::Answers, 85), st = placeOf(Layer::Stats, 85);
+    check(std::fabs(st.widthDeg - answers.widthDeg * 1403.0f / 1410.0f) < 0.1f && std::fabs(st.widthDeg - 58.4f) < 0.5f,
+          "stats: about 58 deg, by their pixels at the answers' density (Dima, 11.11)");
+    check(std::fabs(st.yawDeg) < 0.01f && std::fabs(st.downM) < 0.002f && near(st.curve, kMenuCurve), "stats: straight ahead, at the eyes");
+    const float sb = specOf(Layer::Stats).y1 - specOf(Layer::Stats).y0;
+    check(std::fabs((specOf(Layer::Stats).x1 - specOf(Layer::Stats).x0) * 3408.0f / sb / 1917.0f - 947.0f / 570.0f) < 0.005f,
+          "stats: as high as their proportions give");
+    check(int(Layer::Stats) == kLayers - 1 && specOf(Layer::Stats).minDraws == 1 && specOf(Layer::Stats).widthAtHud == 1403,
+          "stats: the last layer, one draw, 1403 at 2412");
+    char line[600];
+    const Panel shown{&g_res[0], 947, 570, kFormatTypeless, 24};
+    formatMenuShowing(Layer::Stats, shown, st, Mode::Body, line, sizeof(line));
+    check(has(line, "on-foot hud: showing the battle statistics (947x570"), "stats: the showing line");
+
+    // 2.1: the keep -- the info panel, the second dialog panel and the statistics; no other.
+    int keeping = 0;
+    for (int k = 0; k < kLayers; ++k) keeping += keepsPicture(Layer(k)) ? 1 : 0;
+    check(keeping == 3 && keepsPicture(Layer::Info) && keepsPicture(Layer::Dialog) && keepsPicture(Layer::Stats),
+          "the keep: info, dialog and stats only");
+    // The recruiter's second panel: drawn 3 frames, then not drawn but pictured -- shown far past 30 frames; cleared: gone at once.
+    DecisionIn in;
+    in.onFoot = 1;
+    Hold dialog;
+    HoldStep step = HoldStep::Expired;
+    bool on = true;
+    for (int i = 0; i < 3; ++i) on = on && stepLayer(in, true, dialog, &step) == Reason::Showing;
+    for (uint32_t i = 0; i < kHoldFrames * 10; ++i) on = on && stepLayer(in, false, dialog, &step, Kept::Pictured) == Reason::Showing;
+    check(on && step == HoldStep::Held, "the recruiter's panel: pictured, shown 300 frames without a draw");
+    check(stepLayer(in, false, dialog, &step, Kept::Cleared) == Reason::NoPanels && step == HoldStep::Expired,
+          "the recruiter's panel cleared: gone that frame");
+    Hold unread;  // a panel that could not be read: 30 frames, as before
+    stepLayer(in, true, unread, &step);
+    Reason r = Reason::Showing;
+    for (uint32_t i = 0; i < kHoldFrames; ++i) r = stepLayer(in, false, unread, &step);
+    check(r == Reason::NoPanels, "the second panel unread: 30 frames, as before");
+    formatMenuKept(Layer::Dialog, line, sizeof(line));
+    check(has(line, "on-foot hud: the second dialog panel is kept"), "the dialog's kept line");
+    formatMenuStopped(Layer::Dialog, Reason::NoPanels, line, sizeof(line), true);
+    check(std::strcmp(line, "on-foot hud: the second dialog panel stopped (closed: the game cleared the panel)") == 0,
+          "the dialog closed by clearing");
+    formatMenuStopped(Layer::Stats, Reason::NoPanels, line, sizeof(line));
+    check(std::strcmp(line, "on-foot hud: the battle statistics stopped (closed: not drawn for 30 frames)") == 0, "the statistics closed");
+
+    // 2.2: the summary's kept for the dialog and the statistics; every menu at once still closes its bracket.
+    Summary sum;
+    sum.frames = 900;
+    sum.menus[int(Layer::Dialog)].shown = 300;
+    sum.menus[int(Layer::Dialog)].held = 297;
+    sum.menus[int(Layer::Dialog)].kept = 296;
+    sum.menus[int(Layer::Stats)].shown = 800;
+    sum.menus[int(Layer::Stats)].held = 790;
+    sum.menus[int(Layer::Stats)].kept = 780;
+    SeenSizes seen;
+    char big[1200];
+    formatSummary(sum, nullptr, 0, 0, 0, seen, big, sizeof(big));
+    check(has(big, "menus=[dialog shown=300 held=297 kept=296, stats shown=800 held=790 kept=780]"), "the summary: dialog and stats kept");
+    sum.menus[int(Layer::Stats)].kept = 0;
+    formatSummary(sum, nullptr, 0, 0, 0, seen, big, sizeof(big));
+    check(has(big, "stats shown=800 held=790]"), "the summary: stats drawn every frame, no kept");
+    for (int k = 1; k < kLayers; ++k) sum.menus[k] = LayerCount{123456, 123456, 123456};
+    formatSummary(sum, nullptr, 0, 0, 0, seen, big, sizeof(big));
+    check(has(big, "stats shown=123456 held=123456 kept=123456]"), "the summary: all nine menus, the bracket closed");
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1058,6 +1197,7 @@ int main(int argc, char** argv) {
     partLatch();
     partLines();
     partInfoKeep();  // .51
+    partStats();     // conflict-zone-panels
     std::printf("%s: on_foot_hud_test, %d checks, %d failed\n", g_failures ? "FAIL" : "PASS", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

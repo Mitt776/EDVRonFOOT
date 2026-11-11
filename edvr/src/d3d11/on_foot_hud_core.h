@@ -90,8 +90,13 @@ constexpr float kMenuCurve = 0.4f;
 // choice: centred at the eyes, as wide as their pixels at the answers' density (1410 px = 0.66 of the frame), as high as their
 // proportions give. The info panel (.47, the walks of 03.11) -- the taxi, the ship's loadout and the info items of the TAB wheel, one
 // panel of the game's with whatever it holds -- the same way: centred, at the answers' density, last over all.
-enum class Layer : int { Hud = 0, Lift = 1, Answers = 2, Dialog = 3, Mission = 4, Trader = 5, Biologist = 6, Arms = 7, Info = 8 };
-constexpr int kLayers = 9;
+// conflict-zone-panels (the flight of 10.11): the battle statistics on I after a conflict zone's battle, 947x570 beside the HUD's
+// 1628x977 -- 1.661, inside the HUD's 1.665 +- 0.01, so the shape alone took it for a second HUD panel and the larger won. Its own
+// layer, told from the HUD by its share of the HUD's width (1403 at 2412); centred like the info panel, over all.
+enum class Layer : int {
+    Hud = 0, Lift = 1, Answers = 2, Dialog = 3, Mission = 4, Trader = 5, Biologist = 6, Arms = 7, Info = 8, Stats = 9
+};
+constexpr int kLayers = 10;
 struct LayerSpec {
     double aspect;
     float x0, x1, y0, y1;
@@ -122,6 +127,9 @@ constexpr LayerSpec kLayerSpecs[kLayers] = {
     // the info panel: stereo 1584x938, 1188x703 at 0.75 (1.689, not the HUD's 1.665); 0.66 * 1584 / 1410 = 0.7414 wide, 0.7805 high;
     // one draw is enough (an info item of the wheel came with 4), the HUD's share guards the shape
     {1584.0 / 938.0, 0.1293f, 0.8707f, 0.1097f, 0.8903f, kMenuCurve, "the info panel", "info", 1, 1584},
+    // the battle statistics: stereo 947x570 at HUD 1628 (1403 at 2412); 0.66 * 1403 / 1410 = 0.6567 wide, 0.7027 high; the HUD's
+    // shape, so the HUD's share is what tells it (isStatsPanel)
+    {947.0 / 570.0, 0.1716f, 0.8284f, 0.1487f, 0.8513f, kMenuCurve, "the battle statistics", "stats", 1, 1403},
 };
 inline const LayerSpec& specOf(Layer l) { return kLayerSpecs[int(l)]; }
 inline bool isLayerShape(Layer l, uint32_t w, uint32_t h) {
@@ -148,10 +156,25 @@ inline int findLayer(Layer l, const Panel* p, int n, uint32_t hudW = 0) {
             best = i;
     return best;
 }
+// Is the panel the battle statistics' by its shape and its share of a HUD panel `hudW` wide (0: never)?
+inline bool isStatsPanel(uint32_t w, uint32_t h, uint32_t hudW) {
+    return hudW && isLayerShape(Layer::Stats, w, h) && fitsHud(Layer::Stats, w, hudW);
+}
+// The HUD panel: the largest of the HUD's shape that is not the battle statistics by the last HUD panel's width (lastHudW, 0 while
+// none was seen -- then any, as before conflict-zone-panels). With the HUD in the frame the larger wins anyway; without it (the game
+// may stop the HUD while the statistics are open) the statistics would otherwise become an 85-degree HUD sheet.
+inline int findHud(const Panel* p, int n, uint32_t lastHudW = 0) {
+    int best = -1;
+    for (int i = 0; i < n; ++i)
+        if (isLayerShape(Layer::Hud, p[i].w, p[i].h) && !isStatsPanel(p[i].w, p[i].h, lastHudW) &&
+            (best < 0 || uint64_t(p[i].w) * p[i].h > uint64_t(p[best].w) * p[best].h))
+            best = i;
+    return best;
+}
 // Every layer's panel in the frame, -1 for none. The HUD first: its width this frame, else the last one seen (lastHudW, 0 for none),
 // is the measure of the shops' (fitsHud) -- the game stops drawing the HUD panel while a shop is open.
 inline void findLayers(const Panel* p, int n, int out[kLayers], uint32_t lastHudW) {
-    out[int(Layer::Hud)] = findLayer(Layer::Hud, p, n);
+    out[int(Layer::Hud)] = findHud(p, n, lastHudW);
     const uint32_t hudW = out[int(Layer::Hud)] >= 0 ? p[out[int(Layer::Hud)]].w : lastHudW;
     for (int k = 1; k < kLayers; ++k) out[k] = findLayer(Layer(k), p, n, hudW);
 }
@@ -184,7 +207,6 @@ inline bool isHeadLockedMenuDraw(uint64_t vs, uint32_t indices, bool eye, uint32
 // The HUD panel is the one with the HUD's proportions, 1.665 (cinema 3564x2140, stereo 2412x1449, 1809x1086 at HMD quality 0.75: one
 // shape for all, found by the layers' rule; the draw count does jump on a station).
 inline bool isHudShape(uint32_t w, uint32_t h) { return isLayerShape(Layer::Hud, w, h); }
-inline int findHud(const Panel* p, int n) { return findLayer(Layer::Hud, p, n); }
 
 // Most interface draws first; equal counts, the larger area first; equal both, the order they were met (stable).
 inline void rankPanels(Panel* p, int n) {
@@ -212,9 +234,9 @@ inline uint32_t readsPanels(const void* const* read, int n, const void* const no
 }
 
 // The summary's order: the HUD panel first (when the frame has one), then the others by draw count.
-inline void orderPanels(Panel* p, int n) {
+inline void orderPanels(Panel* p, int n, uint32_t lastHudW = 0) {
     rankPanels(p, n);
-    const int h = findHud(p, n);
+    const int h = findHud(p, n, lastHudW);
     if (h > 0) {
         const Panel x = p[h];
         for (int i = h; i > 0; --i) p[i] = p[i - 1];
@@ -321,6 +343,9 @@ inline bool panelHasPicture(const uint8_t* data, uint32_t pitch, uint32_t w, uin
     }
     return false;
 }
+// conflict-zone-panels: the layers with a keep -- the info panel (.51), the second dialog panel (the conflict zone's recruiter after
+// the side is chosen: drawn once, then held by the game, gone after 0.9 s on 10.11) and the battle statistics.
+inline bool keepsPicture(Layer l) { return l == Layer::Info || l == Layer::Dialog || l == Layer::Stats; }
 // The keep's state: armed by a fresh draw, a read due every kKeepPeriodMs while not drawn, its verdict for the hold.
 struct PanelKeep {
     bool armed = false, saidKept = false, cleared = false;
@@ -659,7 +684,7 @@ inline int formatSummary(const Summary& s, const Panel* p, int count, uint32_t d
         e += std::snprintf(extra + e, sizeof(extra) - size_t(e), " changes-unwritten=%u", unwritten);
     if (seen.unrecorded && e >= 0 && size_t(e) < sizeof(extra))
         std::snprintf(extra + e, sizeof(extra) - size_t(e), " new-panels-unrecorded=%u", seen.unrecorded);
-    char menus[320] = "";
+    char menus[480] = "";
     int m = 0;
     for (int k = 1; k < kLayers && m >= 0 && size_t(m) < sizeof(menus); ++k) {
         const LayerCount& c = s.menus[k];
