@@ -539,6 +539,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\aim_dot.cpp" ^
     "src\d3d11\on_foot_aim_eye.cpp" ^
     "src\d3d11\head_aim.cpp" ^
+    "src\d3d11\scope_zoom_probe.cpp" ^
     "src\d3d11\on_foot_markers.cpp" ^
     "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" "src\d3d11\vscreen_footprint.cpp" ^
     "src\d3d11\binding_shadow.cpp" ^
@@ -3133,6 +3134,20 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     "tools\on_foot_aim_eye_test\on_foot_aim_eye_test.cpp" /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: on-foot aim eye test build failed & exit /b 1 )
 "%BUILD%\on_foot_aim_eye_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_scope_zoom_probe_test
+echo [edvr] === scope_zoom_probe_test.exe ===
+REM EDVRonFOOT: build gate for the on-foot scope zoom probe (src\d3d11\scope_zoom_probe_core.h, experimental.native_vr_on_foot_scope_zoom;
+REM openspec change scope-zoom-probe). Drives the pure half: the key's reading (off, census, preview, empty, junk), the weapon names, the zoom
+REM table (the Executioner about 1.70 bare and 4.07 with the Scope mod, the C-44 not in it), the journal's loadout lines, the aiming centre and
+REM the circle from the eye's tangents (symmetric, asymmetric, at the edge), the ramp of M, the LT and game-flag tracker, and every line's text.
+if not exist "%OBJ%\scopezoom" mkdir "%OBJ%\scopezoom"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\scopezoom"\ /Fe"%BUILD%\scope_zoom_probe_test.exe" ^
+    "tools\scope_zoom_probe_test\scope_zoom_probe_test.cpp" /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: scope zoom probe test build failed & exit /b 1 )
+"%BUILD%\scope_zoom_probe_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_head_aim_test
