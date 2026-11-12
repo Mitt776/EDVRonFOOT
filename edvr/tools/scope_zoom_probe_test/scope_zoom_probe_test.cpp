@@ -79,6 +79,15 @@ void partRamp() {
     check(near(rampedM(1.70f, 2.0f), 1.70f, 1e-6f) && near(rampedM(1.70f, -1.0f), 1.0f, 1e-6f), "the blend is clamped");
     check(near(rampedM(1.70f, NAN), 1.0f, 1e-6f), "a NaN blend is 0");
     check(near(rampedM(0.5f, 1.0f), 1.0f, 1e-6f), "an M below 1 never shrinks");
+    // The zoom from the game's FOV (flight 13.11: 56.25 at the hip, 35.09 aiming the Executioner, about 50.5 with the C-44).
+    const float cap = zoomFor(kExecutioner, "").m;
+    check(near(zoomFromFov(degToRad(56.25f), cap), 1.0f, 0.005f), "the hip FOV: no zoom");
+    check(near(zoomFromFov(degToRad(35.09f), cap), 1.69f, 0.01f), "the Executioner aiming: about 1.69");
+    check(near(zoomFromFov(degToRad(45.0f), cap), std::tan(degToRad(28.15f)) / std::tan(degToRad(22.5f)), 1e-4f), "half way up: the game's own M");
+    check(near(zoomFromFov(degToRad(20.0f), cap), cap, 1e-5f), "never above the table's M");
+    check(zoomFromFov(degToRad(70.0f), cap) == 1.0f && zoomFromFov(-1.0f, cap) == 1.0f && zoomFromFov(NAN, cap) == 1.0f,
+          "a wider, negative or NaN FOV: 1");
+    check(near(zoomFromFov(degToRad(35.09f), 0.0f), 1.69f, 0.01f), "no cap: the game's M");
 }
 
 void partLoadout() {
@@ -141,6 +150,29 @@ void partLens() {
     check(l.valid && std::fabs(l.cy - 1270.0f) < 10.0f && std::fabs(l.cx - 950.0f) < 30.0f, "flight 13.11: 10 degrees down puts the centre on the sights");
     check(near(l.ry, 97.7f, 0.5f) && near(l.rx, 96.7f, 0.5f), "flight 13.11: the radii as logged");
     check(!lensFor(flight, 2448, 2672, kRadiusDeg, 90.0f).valid, "an absurd pitch: no lens");
+    // The Executioner's glass, against the corners measured on the 13.11 snapshot (within 1.5 px), and the zoom on the reticle.
+    l = lensFor(flight, 2448, 2672, kRadiusDeg, 10.0f, 0.0f, glassFor(kExecutioner));
+    const float measured[8][2] = {{892, 1199}, {1008, 1200}, {1050, 1252}, {1049, 1305}, {1015, 1338}, {887, 1337}, {850, 1310}, {846, 1270}};
+    bool cornersOk = l.valid && l.corners == kGlassCorners;
+    for (int i = 0; i < kGlassCorners && cornersOk; ++i)
+        cornersOk = std::fabs(l.px[i] - measured[i][0]) < 1.5f && std::fabs(l.py[i] - measured[i][1]) < 1.5f;
+    check(cornersOk, "flight 13.11: the glass's corners land where they were measured");
+    check(std::fabs(l.cx - 947.0f) < 1.5f && std::fabs(l.cy - 1271.0f) < 1.5f, "flight 13.11: the zoom is centred on the reticle");
+    check(l.x0 <= 846 - 2 && l.x1 >= 1050 + 2 && l.y0 <= 1199 - 2 && l.y1 >= 1338 + 2, "the box holds the glass and its edge");
+    check(insideGlass(l, 947.0f, 1271.0f) > 50.0f, "the reticle is deep inside the glass");
+    check(insideGlass(l, 947.0f, 1190.0f) < 0.0f && insideGlass(l, 1060.0f, 1271.0f) < 0.0f && insideGlass(l, 947.0f, 1345.0f) < 0.0f &&
+              insideGlass(l, 836.0f, 1271.0f) < 0.0f,
+          "above, right of, below and left of the glass is outside");
+    check(insideGlass(l, 860.0f, 1215.0f) < 0.0f, "the upper left slant cuts its corner off");
+    check(glassFor("wpn_m_assaultrifle_kinetic_fauto") == nullptr && glassFor(nullptr) == nullptr, "only the Executioner has a glass");
+    // The barrel's lag in a turn moves the whole lens with it: 2 degrees right and 1 down.
+    const Lens still = l;
+    l = lensFor(flight, 2448, 2672, kRadiusDeg, 11.0f, 2.0f, glassFor(kExecutioner));
+    const float dx = std::tan(degToRad(2.0f)) * 2448.0f / 2.2148f;
+    const float dy = (std::tan(degToRad(11.0f)) - std::tan(degToRad(10.0f))) * 2672.0f / 2.393f;
+    check(near(l.cx - still.cx, dx, 0.5f) && near(l.cy - still.cy, dy, 0.5f) && near(l.px[3] - still.px[3], dx, 0.5f),
+          "a lag of 2 degrees right and 1 down moves the zoom and the glass by its tangents");
+    check(!lensFor(flight, 2448, 2672, kRadiusDeg, 10.0f, 70.0f, nullptr).valid, "an absurd yaw: no lens");
     // The centre at the edge: clipped, never out of the region, never empty.
     const float edge[4] = {-0.0001f, 2.0f, -1.0f, 1.0f};
     l = lensFor(edge, 1000, 1000);
@@ -227,7 +259,7 @@ void partLines() {
     Lens l = lensFor(sym, 2000, 2000);
     formatSnapshot(kExecutioner, true, "right", l, 2000, 2000, true, 1.70f, line, sizeof(line));
     check(contains(line, "snapshot weapon=wpn_m_sniper_plasma_charged aiming=yes eye=right centre=(1000.0, 1000.0) of 2000x2000") &&
-              contains(line, "lens=yes zoom=1.70"),
+              contains(line, "shape=circle lens=yes zoom=1.70"),
           "the snapshot line");
     formatSnapshot(nullptr, false, "none", Lens{}, 0, 0, false, 1.0f, line, sizeof(line));
     check(contains(line, "centre=unknown lens=no"), "the snapshot line without a centre");

@@ -54,6 +54,7 @@ constexpr float kEdgePx = 2.0f;        // the circle's soft edge
 constexpr uint64_t kSnapshotGapMs = 2000;   // at most one snapshot in this long
 constexpr uint64_t kSummaryMs = 30000;      // the summary's period
 constexpr float kFovStepDeg = 0.5f;         // a FOV line only for a change bigger than this
+constexpr float kLensMinM = 1.005f;         // below this the lens is not drawn (the game's FOV is not narrowed)
 
 inline float degToRad(float d) { return d * 0.017453292519943295f; }
 inline float radToDeg(float r) { return r * 57.29577951308232f; }
@@ -128,6 +129,17 @@ inline Zoom zoomFor(const char* weapon, const char* mods) {
     z.adsDeg = modsHaveScope(mods) ? kExecutionerScopeAdsDeg : kExecutionerAdsDeg;
     z.m = magnification(z.adsDeg);
     return z;
+}
+
+// The zoom the game itself is at: its camera's FOV (radians, read by the hook after its ADS step) against F_ref. The game ramps that FOV with the same
+// aiming fraction that raises the weapon (flight 13.11: 56 -> 35 degrees over about 0.4 s, starting about 0.15 s after LT), so a lens driven by it
+// grows exactly as the sights come to the eye -- the first preview ramped with the dominant eye (0.12 s from LT) and zoomed before the weapon was up.
+// 1 for anything that is not a usable FOV, never below 1, never above `cap`.
+inline float zoomFromFov(float fovRad, float cap, float refDeg = kFRefDeg) {
+    if (!std::isfinite(fovRad) || !(fovRad > degToRad(1.0f)) || !(fovRad < degToRad(179.0f))) return 1.0f;
+    const float m = std::tan(degToRad(refDeg) * 0.5f) / std::tan(fovRad * 0.5f);
+    if (!(m > 1.0f)) return 1.0f;
+    return cap >= 1.0f && m > cap ? cap : m;
 }
 
 // The zoom while the aiming blend (the dominant eye's ramp, 0..1) runs: 1 + (M - 1) * blend, without a jump at either end.
@@ -273,31 +285,100 @@ inline bool modsOf(const Loadout& l, const char* weapon, const char** mods) {
 // the sights at about (950, 1270), this gives (927, 1274). The first build read the pair as {top, bottom} and put the lens at y 1594, 324 px
 // low. The circle of kRadiusDeg around the centre is an ellipse in pixels (rx, ry: tan(radius) over the pixel's tangent), and the box the lens
 // pass touches is the circle plus its soft edge, clipped to the region.
+// The glass of a weapon's scope, measured on a snapshot: its corners and the point the zoom is centred on (the reticle), as offsets from the
+// computed centre in the eye's tangent plane (x right, y down), so they hold at any resolution. Convex, in order around it.
+constexpr int kGlassCorners = 8;
+struct Glass {
+    float aim[2];
+    float v[kGlassCorners][2];
+};
+// The bare Executioner's glass, flight 13.11 (Quest 3 right eye 2448x2672, eye_001007, LT held, no lens; the computed centre (927.2, 1274.7), a
+// tangent 1105.3 px across and 1116.6 px down): corners (892,1199) (1008,1200) (1050,1252) (1049,1305) (1015,1338) (887,1337) (850,1310)
+// (846,1270), the reticle at (947,1271) -- 20 px (about 1 degree) right of the computed centre, a fact the report keeps open.
+constexpr Glass kExecutionerGlass = {
+    {0.0179f, -0.0033f},
+    {{-0.0321f, -0.0675f}, {0.0734f, -0.0669f}, {0.1111f, -0.0206f}, {0.1105f, 0.0271f},
+     {0.0794f, 0.0564f}, {-0.0366f, 0.0555f}, {-0.0698f, 0.0316f}, {-0.0735f, -0.0042f}}};
+inline const Glass* glassFor(const char* weapon) {
+    return weapon && std::strcmp(weapon, kExecutioner) == 0 ? &kExecutionerGlass : nullptr;
+}
+
 struct Lens {
     bool valid = false;
-    float cx = 0, cy = 0;     // the centre, in region pixels
-    float rx = 0, ry = 0;     // the circle's radii, in region pixels
+    float cx = 0, cy = 0;     // the zoom's centre (the reticle with a glass; the computed centre without), in region pixels
+    float rx = 0, ry = 0;     // the circle's radii, or the glass's half extents, in region pixels
     int x0 = 0, y0 = 0, x1 = 0, y1 = 0;   // the box, [x0, x1) x [y0, y1), clipped to the region
+    int corners = 0;          // 0: the circle; kGlassCorners: the glass below
+    float px[kGlassCorners] = {}, py[kGlassCorners] = {};
 };
-inline Lens lensFor(const float tans[4], uint32_t w, uint32_t h, float radiusDeg = kRadiusDeg, float pitchDownDeg = 0.0f) {
+// `pitchDownDeg` / `yawRightDeg`: where the sights sit against the eye's axis (the head aim's offset and its lag). `glass`: the weapon's glass, or
+// null for the circle of `radiusDeg`.
+inline Lens lensFor(const float tans[4], uint32_t w, uint32_t h, float radiusDeg = kRadiusDeg, float pitchDownDeg = 0.0f, float yawRightDeg = 0.0f,
+                    const Glass* glass = nullptr) {
     Lens o;
     if (!tans || !w || !h) return o;
     for (int i = 0; i < 4; ++i)
         if (!std::isfinite(tans[i])) return o;
     const float L = std::fabs(tans[0]), R = std::fabs(tans[1]), D = std::fabs(tans[2]), U = std::fabs(tans[3]);
-    if (!(L + R > 1e-4f) || !(U + D > 1e-4f) || !(radiusDeg > 0.0f && radiusDeg < 80.0f) || !(pitchDownDeg > -60.0f && pitchDownDeg < 60.0f)) return o;
-    o.cx = float(w) * L / (L + R);
-    o.cy = float(h) * (U + std::tan(degToRad(pitchDownDeg))) / (U + D);
-    const float t = std::tan(degToRad(radiusDeg));
-    o.rx = t * float(w) / (L + R);
-    o.ry = t * float(h) / (U + D);
+    if (!(L + R > 1e-4f) || !(U + D > 1e-4f) || !(radiusDeg > 0.0f && radiusDeg < 80.0f) || !(pitchDownDeg > -60.0f && pitchDownDeg < 60.0f) ||
+        !(yawRightDeg > -60.0f && yawRightDeg < 60.0f))
+        return o;
+    const float sx = float(w) / (L + R), sy = float(h) / (U + D);   // pixels per tangent
+    const float bx = sx * (L + std::tan(degToRad(yawRightDeg)));
+    const float by = sy * (U + std::tan(degToRad(pitchDownDeg)));
     auto clampi = [](float v, int lo, int hi) { int i = int(std::floor(v)); return i < lo ? lo : i > hi ? hi : i; };
-    o.x0 = clampi(o.cx - o.rx - kEdgePx, 0, int(w));
-    o.y0 = clampi(o.cy - o.ry - kEdgePx, 0, int(h));
-    o.x1 = clampi(std::ceil(o.cx + o.rx + kEdgePx), 0, int(w));
-    o.y1 = clampi(std::ceil(o.cy + o.ry + kEdgePx), 0, int(h));
+    float minX, maxX, minY, maxY;
+    if (glass) {
+        o.corners = kGlassCorners;
+        o.cx = bx + glass->aim[0] * sx;
+        o.cy = by + glass->aim[1] * sy;
+        minX = maxX = bx + glass->v[0][0] * sx;
+        minY = maxY = by + glass->v[0][1] * sy;
+        for (int i = 0; i < kGlassCorners; ++i) {
+            o.px[i] = bx + glass->v[i][0] * sx;
+            o.py[i] = by + glass->v[i][1] * sy;
+            minX = o.px[i] < minX ? o.px[i] : minX;
+            maxX = o.px[i] > maxX ? o.px[i] : maxX;
+            minY = o.py[i] < minY ? o.py[i] : minY;
+            maxY = o.py[i] > maxY ? o.py[i] : maxY;
+        }
+        o.rx = 0.5f * (maxX - minX);
+        o.ry = 0.5f * (maxY - minY);
+    } else {
+        o.cx = bx;
+        o.cy = by;
+        const float t = std::tan(degToRad(radiusDeg));
+        o.rx = t * sx;
+        o.ry = t * sy;
+        minX = o.cx - o.rx;
+        maxX = o.cx + o.rx;
+        minY = o.cy - o.ry;
+        maxY = o.cy + o.ry;
+    }
+    o.x0 = clampi(minX - kEdgePx, 0, int(w));
+    o.y0 = clampi(minY - kEdgePx, 0, int(h));
+    o.x1 = clampi(std::ceil(maxX + kEdgePx), 0, int(w));
+    o.y1 = clampi(std::ceil(maxY + kEdgePx), 0, int(h));
     o.valid = o.x1 > o.x0 && o.y1 > o.y0;
     return o;
+}
+
+// How far a pixel is inside the glass (positive) or outside (negative), in pixels: the least distance to an edge line, each edge's normal turned
+// toward the zoom's centre. The shader does the same sum; this is the rig's reference.
+inline float insideGlass(const Lens& l, float x, float y) {
+    float best = 1e30f;
+    for (int i = 0; i < l.corners; ++i) {
+        const int j = (i + 1) % l.corners;
+        float nx = -(l.py[j] - l.py[i]), ny = l.px[j] - l.px[i];
+        const float len = std::sqrt(nx * nx + ny * ny);
+        if (len <= 0.0f) continue;
+        nx /= len;
+        ny /= len;
+        if ((l.cx - l.px[i]) * nx + (l.cy - l.py[i]) * ny < 0.0f) { nx = -nx; ny = -ny; }
+        const float d = (x - l.px[i]) * nx + (y - l.py[i]) * ny;
+        best = d < best ? d : best;
+    }
+    return best;
 }
 
 // ---- the aiming tracker -----------------------------------------------------------------------------------------------------------------------
@@ -397,9 +478,10 @@ inline int formatSnapshot(const char* weapon, bool aiming, const char* eyeName, 
     if (!l.valid)
         return std::snprintf(out, cap, "scope zoom: snapshot weapon=%s aiming=%s eye=%s centre=unknown lens=%s", wp, aiming ? "yes" : "no",
                              eyeName, lens ? "yes" : "no");
-    return std::snprintf(out, cap, "scope zoom: snapshot weapon=%s aiming=%s eye=%s centre=(%.1f, %.1f) of %ux%u radius=(%.1f, %.1f) px lens=%s zoom=%.2f",
-                         wp, aiming ? "yes" : "no", eyeName, double(l.cx), double(l.cy), w, h, double(l.rx), double(l.ry), lens ? "yes" : "no",
-                         double(m));
+    return std::snprintf(out, cap,
+                         "scope zoom: snapshot weapon=%s aiming=%s eye=%s centre=(%.1f, %.1f) of %ux%u radius=(%.1f, %.1f) px shape=%s lens=%s zoom=%.2f",
+                         wp, aiming ? "yes" : "no", eyeName, double(l.cx), double(l.cy), w, h, double(l.rx), double(l.ry),
+                         l.corners ? "glass" : "circle", lens ? "yes" : "no", double(m));
 }
 inline int formatSnapshotSkipped(uint32_t n, char* out, size_t cap) {
     return std::snprintf(out, cap, "scope zoom: snapshot skipped (%u press%s inside 2 s of the last)", n, n == 1 ? "" : "es");

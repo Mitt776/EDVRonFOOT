@@ -4,6 +4,7 @@
 #include "scope_zoom_probe_core.h"
 #include "on_foot_aim_eye_core.h"
 #include "head_aim_core.h"        // kPitchOffsetDeg: where the sights sit below the eye's axis
+#include "head_aim.h"             // headAimSightLag: the barrel's lag behind the head in a turn
 #include "journal_watch.h"
 #include "xinput_watch.h"
 #include "temporal_pass.h"        // temporalPassArmEyeDump: the snapshot
@@ -35,7 +36,9 @@ void say(const char* line) { Log::get().note("%s", line); }
 std::atomic<bool> g_keyOn{false};       // the key is census or preview: the door measures the eye's size
 std::atomic<bool> g_lensOn{false};      // draw the lens this frame
 std::atomic<int> g_lensEye{1};          // the measured eye, 0 left, 1 right: the dominant eye, the right one when there is none
-std::atomic<float> g_lensM{1.0f};       // the ramped M
+std::atomic<float> g_lensM{1.0f};       // the M the door last drew (from the game's FOV), for the snapshot's line
+std::atomic<float> g_tableM{1.0f};      // the table's M for the weapon in hand: the cap on the M the game's FOV gives
+std::atomic<const szp::Glass*> g_glass{nullptr};   // the weapon's glass, or null for the circle
 std::atomic<float> g_pitchDownDeg{0.0f};   // how far below the eye's axis the sights sit: the head aim's pitch offset while it is on
 std::mutex g_tanMutex;                  // the dominant eye's tangents, as the frame thread last read them
 float g_tans[4] = {};
@@ -203,6 +206,22 @@ void readTangents(int eye) {
 
 const char* eyeName(int eye) { return eye == 0 ? "left" : eye == 1 ? "right" : "none"; }
 
+// The lens's geometry this moment: the sights at the head aim's offset plus its lag (head_aim.h headAimSightLag), the weapon's glass or the circle.
+szp::Lens lensNow(const float tans[4], uint32_t w, uint32_t h) {
+    float lagYaw = 0.0f, lagPitch = 0.0f;
+    if (g_pitchDownDeg.load(std::memory_order_relaxed) != 0.0f) headAimSightLag(&lagYaw, &lagPitch);
+    return szp::lensFor(tans, w, h, szp::kRadiusDeg, g_pitchDownDeg.load(std::memory_order_relaxed) + szp::radToDeg(lagPitch),
+                        szp::radToDeg(lagYaw), g_glass.load(std::memory_order_relaxed));
+}
+
+// The zoom the game is at now, capped at the table's (1 when the FOV is not known or not narrowed).
+float zoomNow() {
+    const uint32_t bits = g_fovBits.load(std::memory_order_relaxed);
+    float fov = 0.0f;
+    std::memcpy(&fov, &bits, sizeof(fov));
+    return szp::zoomFromFov(fov, g_tableM.load(std::memory_order_relaxed));
+}
+
 }  // namespace
 
 void scopeZoomProbeFrameBoundary() {
@@ -341,9 +360,11 @@ void scopeZoomProbeFrameBoundary() {
         }
         lens = false;
     }
-    lens = lens && f.eye >= 0 && f.blend > 0.0f;
+    // The zoom itself follows the game's own FOV in the door (szp::zoomFromFov), so the lens grows as the weapon comes up; here only whether it may.
+    lens = lens && f.eye >= 0;
     g_lensEye.store(f.eye >= 0 ? f.eye : 1, std::memory_order_relaxed);
-    g_lensM.store(szp::rampedM(f.zoom.m, f.blend), std::memory_order_relaxed);
+    g_tableM.store(f.zoom.inTable ? f.zoom.m : 1.0f, std::memory_order_relaxed);
+    g_glass.store(szp::glassFor(f.weapon), std::memory_order_relaxed);
     g_lensOn.store(lens, std::memory_order_release);
 
     // The summary, every 30 s on foot, zeros too.
@@ -402,9 +423,10 @@ bool scopeZoomProbeOnPause() {
         std::memcpy(tans, g_tans, sizeof(tans));
     }
     const uint32_t w = g_regionW.load(std::memory_order_relaxed), h = g_regionH.load(std::memory_order_relaxed);
-    const szp::Lens l = known ? szp::lensFor(tans, w, h, szp::kRadiusDeg, g_pitchDownDeg.load(std::memory_order_relaxed)) : szp::Lens{};
-    szp::formatSnapshot(f.weapon, f.lt || f.ads.flag, eyeName(f.eye >= 0 ? f.eye : 1), l, w, h, g_lensOn.load(std::memory_order_relaxed),
-                        g_lensM.load(std::memory_order_relaxed), line, sizeof(line));
+    const szp::Lens l = known ? lensNow(tans, w, h) : szp::Lens{};
+    const float m = zoomNow();
+    szp::formatSnapshot(f.weapon, f.lt || f.ads.flag, eyeName(f.eye >= 0 ? f.eye : 1), l, w, h,
+                        g_lensOn.load(std::memory_order_relaxed) && m > szp::kLensMinM, m, line, sizeof(line));
     say(line);
     return true;
 }
@@ -434,8 +456,9 @@ struct LensParams {
     int32_t box[4];
     int32_t origin[4];
     float texInv[4];
+    float corner[szp::kGlassCorners][4];
 };
-static_assert(sizeof(LensParams) == 80, "five 16-byte rows");
+static_assert(sizeof(LensParams) == 208, "thirteen 16-byte rows");
 
 template <class T>
 void rel(T*& p) {
@@ -531,16 +554,22 @@ ID3D11Texture2D* lensInner(ID3D11Texture2D* src, const uint32_t region[4], bool 
         std::memcpy(tans, g_tans, sizeof(tans));
     }
     if (!known) { fail("the eye's tangents are not known (the temporal channel is closed)"); return nullptr; }
-    szp::Lens l = szp::lensFor(tans, w, h, szp::kRadiusDeg, g_pitchDownDeg.load(std::memory_order_relaxed));
-    if (!l.valid) { fail("the eye's tangents give no circle"); return nullptr; }
-    // A region stored mirrored: the centre mirrors with it (the radii and the box's size do not).
+    // The zoom the game is at (its FOV, narrowing as the weapon comes up): nothing to draw until it narrows.
+    const float m = zoomNow();
+    if (!(m > szp::kLensMinM)) return nullptr;
+    g_lensM.store(m, std::memory_order_relaxed);
+    szp::Lens l = lensNow(tans, w, h);
+    if (!l.valid) { fail("the eye's tangents give no lens"); return nullptr; }
+    // A region stored mirrored: the centre and the corners mirror with it (the radii and the box's size do not).
     if (flipU) {
         l.cx = float(w) - l.cx;
+        for (int i = 0; i < l.corners; ++i) l.px[i] = float(w) - l.px[i];
         const int x0 = int(w) - l.x1, x1 = int(w) - l.x0;
         l.x0 = x0; l.x1 = x1;
     }
     if (flipV) {
         l.cy = float(h) - l.cy;
+        for (int i = 0; i < l.corners; ++i) l.py[i] = float(h) - l.py[i];
         const int y0 = int(h) - l.y1, y1 = int(h) - l.y0;
         l.y0 = y0; l.y1 = y1;
     }
@@ -626,9 +655,13 @@ ID3D11Texture2D* lensInner(ID3D11Texture2D* src, const uint32_t region[4], bool 
         p.centreRadius[1] = l.cy;
         p.centreRadius[2] = l.rx;
         p.centreRadius[3] = l.ry;
-        const float m = g_lensM.load(std::memory_order_relaxed);
-        p.params[0] = m > 1.0f ? 1.0f / m : 1.0f;
+        p.params[0] = 1.0f / m;
         p.params[1] = szp::kEdgePx;
+        p.params[2] = float(l.corners);
+        for (int i = 0; i < l.corners; ++i) {
+            p.corner[i][0] = l.px[i];
+            p.corner[i][1] = l.py[i];
+        }
         p.box[0] = l.x0; p.box[1] = l.y0; p.box[2] = l.x1; p.box[3] = l.y1;
         p.origin[0] = int32_t(region[0]); p.origin[1] = int32_t(region[1]); p.origin[2] = int32_t(w); p.origin[3] = int32_t(h);
         p.texInv[0] = 1.0f / float(sd.Width);

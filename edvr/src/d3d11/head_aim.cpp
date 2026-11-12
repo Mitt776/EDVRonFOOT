@@ -59,6 +59,8 @@ std::atomic<int> g_featReason{int(ha::Reason::Key)};
 std::atomic<bool> g_featHeld{false};   // a menu or the GUI focus holds the angles (the latch's verdict, for the hold line)
 // The player's angle 1 as the game built it, from the last getter call on the player (the summary shows it as the stick's tilt).
 std::atomic<float> g_lastOrig1{0.0f};
+// The barrel against the view in the latch's last frame (headAimSightLag), radians: right, down.
+std::atomic<float> g_sightLagYaw{0.0f}, g_sightLagPitch{0.0f};
 // The camera counter: whether this game frame has had its latch, and how many camera builds came before it and after it (the latch sets the flag, the
 // frame boundary takes all three).
 std::atomic<bool> g_latchedThisFrame{false};
@@ -163,6 +165,16 @@ bool latchFeature(uint64_t nowMs, const float* head, uint32_t version, head_aim:
     // The pitch offset goes onto the head's tilt here, so the blend, the getters and the pose correction below all carry it.
     o.pitchTarget = ha::offsetTarget(o.pitchTarget);
     const bool lead = in.channel8;
+    // The scope zoom probe's lag (head_aim.h headAimSightLag): the barrel's filtered angles against the head's own, times the level.
+    if (lead && g_featState.hasAngles) {
+        const double yawLag = ha::detail::wrap(g_featState.filtYaw - g_featState.headYaw);
+        const double pitchLagDown = g_featState.headPitchUp - g_featState.filtPitchUp;
+        g_sightLagYaw.store(float(yawLag * o.level), std::memory_order_relaxed);
+        g_sightLagPitch.store(float(pitchLagDown * o.level), std::memory_order_relaxed);
+    } else {
+        g_sightLagYaw.store(0.0f, std::memory_order_relaxed);
+        g_sightLagPitch.store(0.0f, std::memory_order_relaxed);
+    }
     float pitchAdded = 0.0f;
     g_latchedThisFrame.store(true, std::memory_order_relaxed);
     if (lead) {
@@ -280,6 +292,11 @@ void headAimInstall(bool flatProfile) {
     head_aim::registerLatch(&latch);
     ha::formatHooked(g_camera, line, sizeof(line));
     say(line);
+}
+
+void headAimSightLag(float* yawRightRad, float* pitchDownRad) {
+    if (yawRightRad) *yawRightRad = g_sightLagYaw.load(std::memory_order_relaxed);
+    if (pitchDownRad) *pitchDownRad = g_sightLagPitch.load(std::memory_order_relaxed);
 }
 
 void headAimFrameBoundary() {
