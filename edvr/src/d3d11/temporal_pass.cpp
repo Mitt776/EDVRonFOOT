@@ -5366,15 +5366,24 @@ bool temporalPassPriceWindow(double regionMedianMs[3], double* otherMedianMs,
     return true;
 }
 
+// EDVRonFOOT scope zoom probe (temporalPassArmEyeDumpQuiet): the next run takes the eye images only -- no draw census, object ledger or pixel
+// probe, whose lines filled the 16 MB log in four snapshots on 13.11.
+static bool g_eyeRunQuiet = false;
 static void beginEyeRun() {
     if (g_eyeRunLeft > 0 || g_eyeRunReady) return;
+    const bool quiet = g_eyeRunQuiet;
+    g_eyeRunQuiet = false;
     if(g_eyeFinalRun.armed)writeFinalEyeRun(nullptr,"rearm_missing_final");
     perfMonitorNoteEvent(kEvEyeDump);
     // This request can occur after the trigger frame's scene draws. The eye
     // crops and decision controls include that frame; the accompanying draw
     // census starts here and can begin with its following frame.
-    drawCensusAutoRequest();
-    Log::get().note("eye capture: requested accompanying eye/offscreen/compute census for LOD investigation; AA-independent, an already active census keeps its current coverage.");
+    if (quiet) {
+        Log::get().note("eye capture: quiet run (the scope zoom probe's snapshot): eye images only, no draw census, object ledger or pixel probe.");
+    } else {
+        drawCensusAutoRequest();
+        Log::get().note("eye capture: requested accompanying eye/offscreen/compute census for LOD investigation; AA-independent, an already active census keeps its current coverage.");
+    }
     SYSTEMTIME stm{};
     GetLocalTime(&stm);
     _snwprintf_s(g_eyeRunStamp, 16, _TRUNCATE, L"%02u%02u%02u", static_cast<unsigned>(stm.wHour),
@@ -5408,6 +5417,7 @@ static void beginEyeRun() {
     // The object ledger is armed at the same seam; its first complete draw
     // ledger can be the following frame, and the capture manifest's frame
     // IDs keep that explicit.
+    if (quiet) return;
     objectProbeArmLedger(g_eyeRunStamp);
     // The pixel probe rides the same eye run, for the same reason: no
     // second keypress, and its one frame is this run's first.
@@ -5494,6 +5504,13 @@ void temporalPassArmEyeDump() {
     // under way is left alone.
     if (g_eyeRunLeft > 0 || g_eyeRunReady) return;
     beginEyeRun();
+}
+
+bool temporalPassArmEyeDumpQuiet() {
+    if (g_eyeRunLeft > 0 || g_eyeRunReady) return false;
+    g_eyeRunQuiet = true;
+    beginEyeRun();
+    return true;
 }
 
 float temporalPassDepthAt(float metres) {

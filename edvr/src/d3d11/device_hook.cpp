@@ -1257,11 +1257,14 @@ void tickHotkeys() {
     // its recovery behind it. The pair is the point -- the first is the
     // reaction-time capture, the second is the one you read.
     if (g_state->dumpKey.pressed()) {
-        // EDVRonFOOT: the scope zoom probe's snapshot rides PAUSE at census/preview on foot (scope_zoom_probe.h); at off it does nothing.
-        scopeZoomProbeOnPause();
-        dumpCameraRing("the history key");
-        temporalPassDumpHistory("the history key");
-        g_state->dumpDueMs = nowMs() + kDumpDelayMs;
+        // EDVRonFOOT: at census/preview on foot PAUSE is the scope zoom probe's snapshot (scope_zoom_probe.h), and only that: the camera and
+        // temporal history dumps below write megabytes a press, and on 13.11 they and the census filled the 16 MB log in six presses. At off,
+        // or off foot, PAUSE is what it always was.
+        if (!scopeZoomProbeOnPause()) {
+            dumpCameraRing("the history key");
+            temporalPassDumpHistory("the history key");
+            g_state->dumpDueMs = nowMs() + kDumpDelayMs;
+        }
     }
     // THE PRESS THAT WENT NOWHERE, said out loud.
     //

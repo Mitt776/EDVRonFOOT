@@ -267,25 +267,27 @@ inline bool modsOf(const Loadout& l, const char* weapon, const char** mods) {
 }
 
 // ---- the aiming centre and the lens circle ----------------------------------------------------------------------------------------------------
-// The eye's frustum as the runtime publishes it ({left, right, top, bottom} tangents, left and top negative, top the image's first row) and the
-// eye region's size. The centre is where the eye's straight-ahead lands: x = W L / (L + R), y = H U / (U + D). The circle of kRadiusDeg around it
-// is an ellipse in pixels (rx, ry: tan(radius) over the pixel's tangent), and the box the lens pass touches is the circle plus its soft edge,
-// clipped to the region.
+// The eye's frustum as the runtime publishes it (nativeTemporalEyeGeometry: {left, right, down, up} tangents, left and down negative; the image's
+// first row is up) and the eye region's size. The eye's straight-ahead lands at x = W L / (L + R), y = H U / (U + D); the sights sit pitchDownDeg
+// below it (the head aim's pitch offset), so the centre is y = H (U + tan(pitchDown)) / (U + D). Flight 13.11 (Quest 3, right eye 2448x2672):
+// the sights at about (950, 1270), this gives (927, 1274). The first build read the pair as {top, bottom} and put the lens at y 1594, 324 px
+// low. The circle of kRadiusDeg around the centre is an ellipse in pixels (rx, ry: tan(radius) over the pixel's tangent), and the box the lens
+// pass touches is the circle plus its soft edge, clipped to the region.
 struct Lens {
     bool valid = false;
     float cx = 0, cy = 0;     // the centre, in region pixels
     float rx = 0, ry = 0;     // the circle's radii, in region pixels
     int x0 = 0, y0 = 0, x1 = 0, y1 = 0;   // the box, [x0, x1) x [y0, y1), clipped to the region
 };
-inline Lens lensFor(const float tans[4], uint32_t w, uint32_t h, float radiusDeg = kRadiusDeg) {
+inline Lens lensFor(const float tans[4], uint32_t w, uint32_t h, float radiusDeg = kRadiusDeg, float pitchDownDeg = 0.0f) {
     Lens o;
     if (!tans || !w || !h) return o;
     for (int i = 0; i < 4; ++i)
         if (!std::isfinite(tans[i])) return o;
-    const float L = std::fabs(tans[0]), R = std::fabs(tans[1]), U = std::fabs(tans[2]), D = std::fabs(tans[3]);
-    if (!(L + R > 1e-4f) || !(U + D > 1e-4f) || !(radiusDeg > 0.0f && radiusDeg < 80.0f)) return o;
+    const float L = std::fabs(tans[0]), R = std::fabs(tans[1]), D = std::fabs(tans[2]), U = std::fabs(tans[3]);
+    if (!(L + R > 1e-4f) || !(U + D > 1e-4f) || !(radiusDeg > 0.0f && radiusDeg < 80.0f) || !(pitchDownDeg > -60.0f && pitchDownDeg < 60.0f)) return o;
     o.cx = float(w) * L / (L + R);
-    o.cy = float(h) * U / (U + D);
+    o.cy = float(h) * (U + std::tan(degToRad(pitchDownDeg))) / (U + D);
     const float t = std::tan(degToRad(radiusDeg));
     o.rx = t * float(w) / (L + R);
     o.ry = t * float(h) / (U + D);

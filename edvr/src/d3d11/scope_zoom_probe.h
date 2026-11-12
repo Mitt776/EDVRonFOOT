@@ -18,8 +18,9 @@ namespace edvr {
 // The frame thread, once a frame (device_hook, after the aiming eye's boundary it reads).
 void scopeZoomProbeFrameBoundary();
 
-// The PAUSE key (hotkey.dump_camera), from device_hook's hotkey tick: at census/preview on foot, the eyes' snapshot and its line.
-void scopeZoomProbeOnPause();
+// The PAUSE key (hotkey.dump_camera), from device_hook's hotkey tick: at census/preview on foot, the eyes' snapshot (images only, no census)
+// and its line, and true: the press is the probe's, and the camera history dumps are skipped. False at off and off foot: PAUSE as before.
+bool scopeZoomProbeOnPause();
 
 // The lens, from native_sharpen's door (the render thread). `src` holds the eye in `region` ({x0, y0, x1, y1}); flipU/flipV say the region is
 // stored mirrored. Returns a region-sized texture with the lens drawn (borrowed: valid until the next call for this eye; the door adds its own

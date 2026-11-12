@@ -127,16 +127,25 @@ void partLens() {
     const float r = std::tan(degToRad(5.0f)) * 1000.0f;   // tan(5) over a pixel's tangent (2/2000)
     check(near(l.rx, r, 0.01f) && near(l.ry, r, 0.01f), "the radius is tan(5 deg) in tangent pixels");
     check(l.x0 >= 0 && l.x1 <= 2000 && l.x1 - l.x0 >= int(2 * r) && l.y1 - l.y0 >= int(2 * r), "the box holds the circle");
-    // An asymmetric field (Quest 3-like, the right eye: more to the outside and down): the centre moves off the middle.
+    // An asymmetric field ({left, right, down, up}): the centre moves off the middle.
     const float q3[4] = {-0.90f, 1.28f, -1.10f, 1.20f};
     l = lensFor(q3, 2064, 2208);
     check(l.valid && l.cx < 1032.0f - 50.0f, "an asymmetric field: the centre moves toward the smaller side");
-    check(near(l.cx, 2064.0f * 0.90f / 2.18f, 0.1f) && near(l.cy, 2208.0f * 1.10f / 2.30f, 0.1f), "the centre is W L/(L+R), H U/(U+D)");
+    check(near(l.cx, 2064.0f * 0.90f / 2.18f, 0.1f) && near(l.cy, 2208.0f * 1.20f / 2.30f, 0.1f), "the centre is W L/(L+R), H U/(U+D) (U the 4th)");
+    // Flight 13.11, Quest 3 right eye 2448x2672 (the tangents rebuilt from the first build's snapshot line): the sights were at about
+    // (950, 1270). The eye's axis is at y 1078; with the head aim's 10 degrees down the centre lands on the sights.
+    const float flight[4] = {-0.8389f, 1.3759f, -1.4278f, 0.9652f};
+    l = lensFor(flight, 2448, 2672);
+    check(l.valid && near(l.cx, 927.2f, 1.0f) && near(l.cy, 1077.7f, 2.0f), "flight 13.11: the axis at (927, 1078), not the first build's y 1594");
+    l = lensFor(flight, 2448, 2672, kRadiusDeg, 10.0f);
+    check(l.valid && std::fabs(l.cy - 1270.0f) < 10.0f && std::fabs(l.cx - 950.0f) < 30.0f, "flight 13.11: 10 degrees down puts the centre on the sights");
+    check(near(l.ry, 97.7f, 0.5f) && near(l.rx, 96.7f, 0.5f), "flight 13.11: the radii as logged");
+    check(!lensFor(flight, 2448, 2672, kRadiusDeg, 90.0f).valid, "an absurd pitch: no lens");
     // The centre at the edge: clipped, never out of the region, never empty.
     const float edge[4] = {-0.0001f, 2.0f, -1.0f, 1.0f};
     l = lensFor(edge, 1000, 1000);
     check(l.valid && l.x0 == 0 && l.x1 > 0 && l.x1 <= 1000, "the centre at the left edge: clipped, not empty");
-    const float edge2[4] = {-2.0f, 0.0001f, -1.0f, 0.0001f};
+    const float edge2[4] = {-2.0f, 0.0001f, -0.0001f, 1.0f};
     l = lensFor(edge2, 1000, 1000);
     check(l.valid && l.x1 == 1000 && l.y1 == 1000 && l.x0 < 1000 && l.y0 < 1000, "the centre at the bottom right corner: clipped, not empty");
     const float bad[4] = {NAN, 1.0f, -1.0f, 1.0f};

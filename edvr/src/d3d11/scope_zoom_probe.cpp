@@ -3,6 +3,7 @@
 #include "scope_zoom_probe.h"
 #include "scope_zoom_probe_core.h"
 #include "on_foot_aim_eye_core.h"
+#include "head_aim_core.h"        // kPitchOffsetDeg: where the sights sit below the eye's axis
 #include "journal_watch.h"
 #include "xinput_watch.h"
 #include "temporal_pass.h"        // temporalPassArmEyeDump: the snapshot
@@ -35,6 +36,7 @@ std::atomic<bool> g_keyOn{false};       // the key is census or preview: the doo
 std::atomic<bool> g_lensOn{false};      // draw the lens this frame
 std::atomic<int> g_lensEye{1};          // the measured eye, 0 left, 1 right: the dominant eye, the right one when there is none
 std::atomic<float> g_lensM{1.0f};       // the ramped M
+std::atomic<float> g_pitchDownDeg{0.0f};   // how far below the eye's axis the sights sit: the head aim's pitch offset while it is on
 std::mutex g_tanMutex;                  // the dominant eye's tangents, as the frame thread last read them
 float g_tans[4] = {};
 bool g_tansKnown = false;
@@ -233,6 +235,10 @@ void scopeZoomProbeFrameBoundary() {
         f.key = now;
         f.nativeOnFoot = cfg.getBool("experimental.native_vr_on_foot", true);
         f.aimEyeKey = oae::parseKey(cfg.getString("experimental.native_vr_on_foot_aim_eye", "right").c_str());
+        // The head aim puts the barrel, and so the sights, kPitchOffsetDeg below the head's tilt (head_aim_core.h); without it the barrel
+        // follows the stick and the eye's axis is the best guess (flight 13.11: the sights 192 px, 9.8 deg, below the axis with it on).
+        const bool headAim = ha::parseKey(cfg.getString("experimental.native_vr_on_foot_head_aim", "on").c_str()) == ha::Key::On;
+        g_pitchDownDeg.store(headAim ? float(ha::kPitchOffsetDeg) : 0.0f, std::memory_order_relaxed);
     }
 
     g_keyOn.store(f.key != szp::Key::Off, std::memory_order_release);
@@ -370,9 +376,9 @@ void scopeZoomProbeFrameBoundary() {
     }
 }
 
-void scopeZoomProbeOnPause() {
+bool scopeZoomProbeOnPause() {
     Frame& f = g_f;
-    if (f.key == szp::Key::Off || !f.onFoot) return;
+    if (f.key == szp::Key::Off || !f.onFoot) return false;
     const uint64_t now = GetTickCount64();
     char line[400];
     if (!szp::snapshotAllowed(f.snapAny, f.snapMs, now)) {
@@ -380,13 +386,13 @@ void scopeZoomProbeOnPause() {
         ++f.skippedSinceLast;
         szp::formatSnapshotSkipped(f.skippedSinceLast, line, sizeof(line));
         say(line);
-        return;
+        return true;
     }
     f.snapAny = true;
     f.snapMs = now;
     f.skippedSinceLast = 0;
     ++f.snapshots;
-    temporalPassArmEyeDump();
+    if (!temporalPassArmEyeDumpQuiet()) say("scope zoom: snapshot images not taken: an eye run is already under way");
     // The centre on the dominant eye's region as the door last saw it (the right eye's when there is no dominant eye).
     float tans[4] = {};
     bool known = false;
@@ -396,10 +402,11 @@ void scopeZoomProbeOnPause() {
         std::memcpy(tans, g_tans, sizeof(tans));
     }
     const uint32_t w = g_regionW.load(std::memory_order_relaxed), h = g_regionH.load(std::memory_order_relaxed);
-    const szp::Lens l = known ? szp::lensFor(tans, w, h) : szp::Lens{};
+    const szp::Lens l = known ? szp::lensFor(tans, w, h, szp::kRadiusDeg, g_pitchDownDeg.load(std::memory_order_relaxed)) : szp::Lens{};
     szp::formatSnapshot(f.weapon, f.lt || f.ads.flag, eyeName(f.eye >= 0 ? f.eye : 1), l, w, h, g_lensOn.load(std::memory_order_relaxed),
                         g_lensM.load(std::memory_order_relaxed), line, sizeof(line));
     say(line);
+    return true;
 }
 
 // ---- the lens (the render thread, in native_sharpen's door) --------------------------------------------------------------------------------------
@@ -524,7 +531,7 @@ ID3D11Texture2D* lensInner(ID3D11Texture2D* src, const uint32_t region[4], bool 
         std::memcpy(tans, g_tans, sizeof(tans));
     }
     if (!known) { fail("the eye's tangents are not known (the temporal channel is closed)"); return nullptr; }
-    szp::Lens l = szp::lensFor(tans, w, h);
+    szp::Lens l = szp::lensFor(tans, w, h, szp::kRadiusDeg, g_pitchDownDeg.load(std::memory_order_relaxed));
     if (!l.valid) { fail("the eye's tangents give no circle"); return nullptr; }
     // A region stored mirrored: the centre mirrors with it (the radii and the box's size do not).
     if (flipU) {
