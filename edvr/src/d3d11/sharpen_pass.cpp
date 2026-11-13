@@ -156,7 +156,9 @@ struct EyeState {
     uint32_t                   outW = 0, outH = 0;
     DXGI_FORMAT                outFmt = DXGI_FORMAT_UNKNOWN;
 };
-EyeState g_eye[2];
+// Slots 0 and 1 the eyes'; slot 2 EDVRonFOOT's sharp scope lens (scope_zoom.cpp): the glass's gathered image, sharpened with the eye's
+// strength so the glass matches the world around it. Its passes count in this pass's totals and price like an eye's.
+EyeState g_eye[3];
 
 void releaseSrc(EyeState& e) {
     if (e.srcSrv) { e.srcSrv->Release(); e.srcSrv = nullptr; }
@@ -876,7 +878,7 @@ void sharpenPassHeldForTest(SharpenPassHeld* out) {
 extern "C" __declspec(dllexport) void* edvrSharpen(void* srcTex, int eye,
                                                    const float* bounds,
                                                    float strength) {
-    if (edvr::graphicsRuntimeDisabled() || !srcTex || eye < 0 || eye > 1) return nullptr;
+    if (edvr::graphicsRuntimeDisabled() || !srcTex || eye < 0 || eye > 2) return nullptr;
     void* out = nullptr;
     edvr::guardedBudget(edvr::g_budget, [&] {
         out = edvr::sharpenInner(srcTex, eye, bounds, strength);

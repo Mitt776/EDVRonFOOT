@@ -2,6 +2,7 @@
 #include "dlss_floor.h"  // dlssModeRanges, defined below beside dlaaAvailable
 #include "hdr_backend_flags.h"  // the HDR route's creation flags, pure (section 81)
 
+#include <atomic>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -803,8 +804,202 @@ bool dlaaFullTotals(int eye, uint32_t* evaluations, double* avgMs, double* maxMs
     return fullTotals(eye, evaluations, avgMs, maxMs);
 }
 
+// ---- EDVRonFOOT: the glass's area (dlaa.h, dlssAreaEvaluate) -------------------------------------------------------------------------------------
+namespace {
+std::atomic<uint32_t> g_areaSamples{0};
+std::atomic<uint64_t> g_areaMicroSum{0}, g_areaMicroMax{0};
+#ifdef EDVR_HAVE_NGX
+struct AreaFeature {
+    NVSDK_NGX_Handle* handle = nullptr;
+    uint32_t w = 0, h = 0, outW = 0, outH = 0;
+    uint64_t presetGen = 0;
+};
+AreaFeature g_area;
+struct AreaQuery {
+    GpuTimer timer;
+    bool inUse = false;
+};
+constexpr int kAreaRing = 4;
+AreaQuery g_areaRing[kAreaRing];
+char g_areaReason[256];
+
+void pollAreaRing(ID3D11DeviceContext* ctx) {
+    if (!gpuTimingOwns(ctx)) return;
+    for (AreaQuery& q : g_areaRing) {
+        if (!q.inUse) continue;
+        double ms = 0.0;
+        const GpuTimerPoll r = q.timer.poll(ctx, ms);
+        if (r == GpuTimerPoll::Pending) continue;
+        q.inUse = false;
+        if (r != GpuTimerPoll::Ready) continue;
+        const uint64_t us = static_cast<uint64_t>(ms * 1000.0 + 0.5);
+        g_areaSamples.fetch_add(1, std::memory_order_relaxed);
+        g_areaMicroSum.fetch_add(us, std::memory_order_relaxed);
+        uint64_t prev = g_areaMicroMax.load(std::memory_order_relaxed);
+        while (us > prev && !g_areaMicroMax.compare_exchange_weak(prev, us, std::memory_order_relaxed)) {
+        }
+    }
+}
+int acquireAreaQuery(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+    if (!gpuTimingAccepts(ctx) && !gpuTimingBind(dev, ctx)) return -1;
+    for (int i = 0; i < kAreaRing; ++i) {
+        if (g_areaRing[i].inUse) continue;
+        if (g_areaRing[i].timer.begin(dev, ctx)) { g_areaRing[i].inUse = true; return i; }
+        return -1;
+    }
+    return -1;
+}
+void releaseArea() {
+    if (g_area.handle) NVSDK_NGX_D3D11_ReleaseFeature(g_area.handle);
+    g_area = AreaFeature{};
+    for (AreaQuery& q : g_areaRing) { q.timer.reset(); q.inUse = false; }
+}
+
+// The area's feature, made when missing or when its key moved. The mode: among the four the runtime names for this output, the one whose range
+// holds the input (dlssChooseMode, the eyes' own rule); the ratio decides only when the runtime will not say.
+bool ensureArea(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h, uint32_t outW, uint32_t outH, bool* created, const char** reason) {
+    if (g_area.handle && g_area.w == w && g_area.h == h && g_area.outW == outW && g_area.outH == outH && g_area.presetGen == g_presetGen)
+        return true;
+    if (g_area.handle) {
+        NVSDK_NGX_D3D11_ReleaseFeature(g_area.handle);
+        g_area.handle = nullptr;
+    }
+    NVSDK_NGX_PerfQuality_Value quality = NVSDK_NGX_PerfQuality_Value_DLAA;
+    if (outW != w || outH != h) {
+        DlssModeRange modes[kDlssModeCount];
+        for (int k = 0; k < kDlssModeCount; ++k) {
+            unsigned oW = 0, oH = 0, mxW = 0, mxH = 0, mnW = 0, mnH = 0;
+            float sh = 0.0f;
+            const NVSDK_NGX_Result r =
+                NGX_DLSS_GET_OPTIMAL_SETTINGS(g_caps, outW, outH, kNgxLadder[k], &oW, &oH, &mxW, &mxH, &mnW, &mnH, &sh);
+            modes[k].ok = !NVSDK_NGX_FAILED(r);
+            if (!modes[k].ok) continue;
+            modes[k].optW = oW; modes[k].optH = oH;
+            modes[k].minW = mnW; modes[k].minH = mnH;
+            modes[k].maxW = mxW; modes[k].maxH = mxH;
+        }
+        DlssMode picked = DlssMode::Quality;
+        bool fromRange = false;
+        DlssModeRange range;
+        if (!dlssChooseMode(modes, w, h, outW, &picked, &fromRange, &range)) {
+            snprintf(g_areaReason, sizeof(g_areaReason), "no DLSS mode takes %ux%u in for %ux%u out (the glass's area)", w, h, outW, outH);
+            if (reason) *reason = g_areaReason;
+            return false;
+        }
+        quality = kNgxLadder[static_cast<int>(picked)];
+    }
+    NVSDK_NGX_DLSS_Create_Params cp{};
+    cp.Feature.InWidth = w;
+    cp.Feature.InHeight = h;
+    cp.Feature.InTargetWidth = outW;
+    cp.Feature.InTargetHeight = outH;
+    cp.Feature.InPerfQualityValue = quality;
+    cp.InFeatureCreateFlags = static_cast<int>(flatDlssCreateFlags(false, runtimeFlatProfile()));
+    cp.InEnableOutputSubrects = false;
+    applyPresetHints();
+    const int64_t t0 = qpcNow();
+    const NVSDK_NGX_Result cr = NGX_D3D11_CREATE_DLSS_EXT(ctx, &g_area.handle, g_params, &cp);
+    const double ms = qpcFrequency() > 0 ? static_cast<double>(qpcNow() - t0) * 1000.0 / static_cast<double>(qpcFrequency()) : 0.0;
+    perfMonitorNoteEvent(kEvNgx, ms);
+    if (NVSDK_NGX_FAILED(cr) || !g_area.handle) {
+        g_area.handle = nullptr;
+        snprintf(g_areaReason, sizeof(g_areaReason), "the glass's DLSS feature would not be created at %ux%u -> %ux%u: %s (0x%08X)", w, h, outW,
+                 outH, ngxResultName(cr), static_cast<unsigned>(cr));
+        if (reason) *reason = g_areaReason;
+        return false;
+    }
+    g_area.w = w;
+    g_area.h = h;
+    g_area.outW = outW;
+    g_area.outH = outH;
+    g_area.presetGen = g_presetGen;
+    if (created) *created = true;
+    Log::get().note("dlss: the glass's feature (the scope zoom) is created, %ux%u in and %ux%u out, the %s mode, preset %s; its own history "
+                    "starts here (made in %.0f ms).",
+                    w, h, outW, outH, qualityName(quality), presetName(presetFor(quality)), ms);
+    return true;
+}
+#endif  // EDVR_HAVE_NGX
+}  // namespace
+
+bool dlssAreaEvaluate(ID3D11DeviceContext* ctx, ID3D11Texture2D* colour, ID3D11Texture2D* depth, ID3D11Texture2D* motion,
+                      ID3D11Texture2D* output, uint32_t baseX, uint32_t baseY, uint32_t w, uint32_t h, uint32_t outW, uint32_t outH,
+                      float jx, float jy, bool reset, float frameMs, bool* created, const char** reason) {
+    if (created) *created = false;
+#ifndef EDVR_HAVE_NGX
+    (void)ctx; (void)colour; (void)depth; (void)motion; (void)output; (void)baseX; (void)baseY; (void)w; (void)h; (void)outW; (void)outH;
+    (void)jx; (void)jy; (void)reset; (void)frameMs;
+    if (reason) *reason = "this build has no DLSS SDK in it";
+    return false;
+#else
+    if (!g_available || !g_params || !g_caps) {
+        if (reason) *reason = g_reason;
+        return false;
+    }
+    if (!ctx || !colour || !depth || !motion || !output || !w || !h || !outW || !outH) {
+        if (reason) *reason = "a missing input to the glass's DLSS";
+        return false;
+    }
+    pollAreaRing(ctx);
+    bool made = false;
+    if (!ensureArea(ctx, w, h, outW, outH, &made, reason)) return false;
+    if (created) *created = made;
+    NVSDK_NGX_D3D11_DLSS_Eval_Params ep{};
+    ep.Feature.pInColor = colour;
+    ep.Feature.pInOutput = output;
+    ep.Feature.InSharpness = 0.0f;
+    ep.pInDepth = depth;
+    ep.pInMotionVectors = motion;
+    ep.InJitterOffsetX = jx;
+    ep.InJitterOffsetY = jy;
+    ep.InRenderSubrectDimensions.Width = w;
+    ep.InRenderSubrectDimensions.Height = h;
+    ep.InColorSubrectBase.X = baseX;
+    ep.InColorSubrectBase.Y = baseY;
+    ep.InDepthSubrectBase.X = baseX;
+    ep.InDepthSubrectBase.Y = baseY;
+    ep.InMVSubrectBase.X = 0;
+    ep.InMVSubrectBase.Y = 0;
+    ep.InReset = (reset || made) ? 1 : 0;
+    ep.InMVScaleX = 1.0f;
+    ep.InMVScaleY = 1.0f;
+    ep.InPreExposure = 1.0f;
+    ep.InExposureScale = 1.0f;
+    ep.InFrameTimeDeltaInMsec = frameMs;
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    const int qs = dev ? acquireAreaQuery(dev, ctx) : -1;
+    if (dev) dev->Release();
+    const NVSDK_NGX_Result er = NGX_D3D11_EVALUATE_DLSS_EXT(ctx, g_area.handle, g_params, &ep);
+    if (qs >= 0) g_areaRing[qs].timer.end(ctx);
+    if (NVSDK_NGX_FAILED(er)) {
+        snprintf(g_areaReason, sizeof(g_areaReason), "the glass's DLSS evaluation failed: %s (0x%08X)", ngxResultName(er),
+                 static_cast<unsigned>(er));
+        if (reason) *reason = g_areaReason;
+        return false;
+    }
+    return true;
+#endif
+}
+
+void dlssAreaTakePrice(uint32_t* samples, double* sumMs, double* maxMs) {
+    const uint32_t n = g_areaSamples.exchange(0, std::memory_order_relaxed);
+    const uint64_t sum = g_areaMicroSum.exchange(0, std::memory_order_relaxed);
+    const uint64_t mx = g_areaMicroMax.exchange(0, std::memory_order_relaxed);
+    if (samples) *samples = n;
+    if (sumMs) *sumMs = double(sum) / 1000.0;
+    if (maxMs) *maxMs = double(mx) / 1000.0;
+}
+
+void dlssAreaRelease() {
+#ifdef EDVR_HAVE_NGX
+    releaseArea();
+#endif
+}
+
 void dlaaShutdown() {
 #ifdef EDVR_HAVE_NGX
+    releaseArea();
     releaseFeatures();
     if (g_exposureOne) { g_exposureOne->Release(); g_exposureOne = nullptr; }
     for (QuerySlot& q : g_qring) releaseQuerySlot(q);

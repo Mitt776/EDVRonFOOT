@@ -111,7 +111,8 @@ void sharpenPassHeldForTest(SharpenPassHeld* out);
 extern "C" {
 // srcTex:   an ID3D11Texture2D* a submit path is about to forward -- the
 //           game's own, or the texture the pass before this one produced.
-// eye:      0 left, 1 right; selects the per-eye owned resources.
+// eye:      0 left, 1 right; selects the per-eye owned resources. 2 is EDVRonFOOT's sharp scope
+//           lens's own slot (the glass's gathered image, scope_zoom.cpp).
 // bounds:   the Submit's uMin, vMin, uMax, vMax naming this eye's region of
 //           srcTex, or null for the whole texture. Flipped spans name the
 //           same pixels as their unflipped twins; the openvr half keeps the

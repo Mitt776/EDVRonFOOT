@@ -1,6 +1,7 @@
 #include "fixed_shader_source.h"
 #include "temporal_pass.h"
 #include "temporal_history.h"
+#include "scope_zoom.h"   // EDVRonFOOT: scopeZoomGatherGlass, the sharp lens's glass after the aiming eye's DLAA
 #include "../common/runtime_profile.h"
 #include "draw_census.h"
 #include "eye_engine_capture.h"
@@ -3989,6 +3990,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         gpuCensusEnd(ctx, GpuCensusSection::DoorUpscaler);
                         usedDlaa = true;
                         e.dlHaveHistory = true;
+                        // EDVRonFOOT's sharp scope lens (scope_zoom.h): the aiming eye's glass gathered by a DLSS feature of its own,
+                        // from the inputs NVIDIA just read; the eye's output and history are not touched. One atomic load when its key is off.
+                        if (!amdEngine)
+                            scopeZoomGatherGlass(ctx, eye, e.dlColour, e.dlDepth, e.dlMv, w, h, oW, oH, jxNow, jyNow, resetHist, frameMs);
                         if (amdEngine) {
                             if (!g_fsrNoted || (oW != w && !g_fsrUpscaleNoted)) {
                                 g_fsrNoted = true;

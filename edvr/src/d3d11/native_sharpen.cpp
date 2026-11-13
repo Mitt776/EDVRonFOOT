@@ -111,7 +111,7 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   const uint32_t whole[4]={0,0,region[2]-region[0],region[3]-region[1]};
   // The unsharpened eye (the sharpener off or refused): the lens, then the layer, as before otherwise.
   auto unsharpened=[&]() -> HRESULT {
-    ID3D11Texture2D* lensed=edvr::scopeZoomLens(eye,source,region,flipU,flipV);
+    ID3D11Texture2D* lensed=edvr::scopeZoomLens(eye,source,region,flipU,flipV,0.f);
     ID3D11Texture2D* in=lensed?lensed:source; const uint32_t* inRegion=lensed?whole:region;
     if(ID3D11Texture2D* layered=edvr::uiLayerComposite(seq,eye,in,inRegion,layerUv)) { edvr::temporalPassCaptureFinalEye(seq,eye,layered,whole,true,flipU,flipV); *output=layered; std::memcpy(outBounds,full,sizeof(full)); return S_OK; }
     if(lensed) { lensed->AddRef(); edvr::temporalPassCaptureFinalEye(seq,eye,lensed,whole,false,flipU,flipV); *output=lensed; std::memcpy(outBounds,full,sizeof(full)); return S_OK; }
@@ -129,7 +129,7 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   }
   ID3D11Texture2D* result=static_cast<ID3D11Texture2D*>(raw);
   // The sharpened texture is the input region, region-sized.
-  if(ID3D11Texture2D* lensed=edvr::scopeZoomLens(eye,result,whole,flipU,flipV)) result=lensed;
+  if(ID3D11Texture2D* lensed=edvr::scopeZoomLens(eye,result,whole,flipU,flipV,s->strength)) result=lensed;
   bool composite=false;
   if(ID3D11Texture2D* layered=edvr::uiLayerComposite(seq,eye,result,whole,layerUv)) { result=layered;composite=true; } else result->AddRef();
   edvr::temporalPassCaptureFinalEye(seq,eye,result,whole,composite,flipU,flipV);
