@@ -3,6 +3,7 @@
 #include "ui_layer.h"
 #include "ui_layer_math.h"  // uiLayerUvFromRegion
 #include "temporal_pass.h"
+#include "scope_zoom_probe.h"  // EDVRonFOOT: the scope zoom probe's lens, between RCAS and the UI layer
 #include "../common/config.h"
 #include "../common/log.h"
 #include "../common/supersample_math.h"
@@ -104,22 +105,31 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
     edvr::temporalPassCaptureFinalEye(seq,eye,result,whole,true,flipU,flipV);
     *output=result; std::memcpy(outBounds,full,sizeof(full)); return S_OK;
   }
-  if(s->strength<=0.f||s->stoodDown) {
-    ++s->off; if(s->strength<=0.f&&!s->offNoted){s->offNoted=true;edvr::Log::get().note("native sharpen: off (fix.render_sharpness=0); eyes consumed as passthrough.");}
-    if(ID3D11Texture2D* layered=edvr::uiLayerComposite(seq,eye,source,region,layerUv)) { const uint32_t whole[4]={0,0,region[2]-region[0],region[3]-region[1]}; edvr::temporalPassCaptureFinalEye(seq,eye,layered,whole,true,flipU,flipV); *output=layered; std::memcpy(outBounds,full,sizeof(full)); return S_OK; }
+  // EDVRonFOOT scope zoom probe (scope_zoom_probe.h): the lens goes on the eye here, after RCAS and before the UI layer, so the HUD is drawn
+  // over it and never magnified. Null (one atomic load when its key is off): the eye goes on exactly as before. A lens texture is
+  // region-sized and borrowed, like the sharpener's result.
+  const uint32_t whole[4]={0,0,region[2]-region[0],region[3]-region[1]};
+  // The unsharpened eye (the sharpener off or refused): the lens, then the layer, as before otherwise.
+  auto unsharpened=[&]() -> HRESULT {
+    ID3D11Texture2D* lensed=edvr::scopeZoomLens(eye,source,region,flipU,flipV);
+    ID3D11Texture2D* in=lensed?lensed:source; const uint32_t* inRegion=lensed?whole:region;
+    if(ID3D11Texture2D* layered=edvr::uiLayerComposite(seq,eye,in,inRegion,layerUv)) { edvr::temporalPassCaptureFinalEye(seq,eye,layered,whole,true,flipU,flipV); *output=layered; std::memcpy(outBounds,full,sizeof(full)); return S_OK; }
+    if(lensed) { lensed->AddRef(); edvr::temporalPassCaptureFinalEye(seq,eye,lensed,whole,false,flipU,flipV); *output=lensed; std::memcpy(outBounds,full,sizeof(full)); return S_OK; }
     edvr::temporalPassCaptureFinalEye(seq,eye,source,region,false,flipU,flipV);
     return S_FALSE;
+  };
+  if(s->strength<=0.f||s->stoodDown) {
+    ++s->off; if(s->strength<=0.f&&!s->offNoted){s->offNoted=true;edvr::Log::get().note("native sharpen: off (fix.render_sharpness=0); eyes consumed as passthrough.");}
+    return unsharpened();
   }
   void* raw=edvrSharpen(source,int(eye),bounds,s->strength);
   if(!raw) {
     s->stoodDown=true;++s->refusals; edvr::Log::get().note("native sharpen: pass refused; standing down for this session.");
-    if(ID3D11Texture2D* layered=edvr::uiLayerComposite(seq,eye,source,region,layerUv)) { const uint32_t whole[4]={0,0,region[2]-region[0],region[3]-region[1]}; edvr::temporalPassCaptureFinalEye(seq,eye,layered,whole,true,flipU,flipV); *output=layered; std::memcpy(outBounds,full,sizeof(full)); return S_OK; }
-    edvr::temporalPassCaptureFinalEye(seq,eye,source,region,false,flipU,flipV);
-    return S_FALSE;
+    return unsharpened();
   }
   ID3D11Texture2D* result=static_cast<ID3D11Texture2D*>(raw);
   // The sharpened texture is the input region, region-sized.
-  const uint32_t whole[4]={0,0,region[2]-region[0],region[3]-region[1]};
+  if(ID3D11Texture2D* lensed=edvr::scopeZoomLens(eye,result,whole,flipU,flipV)) result=lensed;
   bool composite=false;
   if(ID3D11Texture2D* layered=edvr::uiLayerComposite(seq,eye,result,whole,layerUv)) { result=layered;composite=true; } else result->AddRef();
   edvr::temporalPassCaptureFinalEye(seq,eye,result,whole,composite,flipU,flipV);

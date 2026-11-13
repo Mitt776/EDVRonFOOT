@@ -28,4 +28,9 @@ void headAimInstall(bool flatProfile);
 // Once a frame from device_hook's boundary, after the journal's tick.
 void headAimFrameBoundary();
 
+// EDVRonFOOT scope zoom probe (scope_zoom_probe.h): where the barrel points against the view in the frame the latch last made. The barrel follows the
+// FILTERED head, the view the head itself, so in a turn the sights drift off the eye's axis by (filtered - head): yawRight radians to the right,
+// pitchDown radians down, on top of kPitchOffsetDeg. Both times the level; 0 when the feature does not lead. Any thread.
+void headAimSightLag(float* yawRightRad, float* pitchDownRad);
+
 }  // namespace edvr
