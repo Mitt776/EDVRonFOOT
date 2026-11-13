@@ -1,8 +1,8 @@
 #pragma once
-// EDVRonFOOT scope zoom probe (scope_zoom_probe.h): the lens. One compute pass over the box around the lens, writing into the eye's own copy (the
+// EDVRonFOOT scope zoom (scope_zoom.h): the lens. One compute pass over the box around the lens, writing into the eye's own copy (the
 // pass before it copied the whole region there). Each pixel p inside takes the eye at c + (p - c) / M -- offsets in the eye's tangent plane, which
 // is linear in pixels -- with a bilinear sample clamped into the eye's region (a double-wide texture's other eye is never read). The lens is the
-// weapon's glass (a convex polygon, scope_zoom_probe_core.h Glass; its last 2 pixels inside blend into the untouched eye, so the frame around it is
+// weapon's glass (a convex polygon, scope_zoom_core.h Glass; its last 2 pixels inside blend into the untouched eye, so the frame around it is
 // never magnified) or, without one, a circle (its edge blends 2 pixels either side). Outside nothing is written. Compiled at build time
 // (tools\temporal_shader_build, kScopeZoomLensBytecode).
 namespace edvr {

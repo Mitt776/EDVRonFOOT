@@ -1,13 +1,12 @@
-// The on-foot scope zoom probe: the frame thread's lines, the read-only FOV hook, the PAUSE snapshot and the lens (scope_zoom_probe.h says what and
-// why; scope_zoom_probe_core.h is the pure half).
-#include "scope_zoom_probe.h"
-#include "scope_zoom_probe_core.h"
+// The on-foot scope zoom: the frame thread's lines, the read-only FOV hook, the lens, and (TEMPORARY, build 1 of on-foot-scope-zoom) the PAUSE
+// recording (scope_zoom.h says what and why; scope_zoom_core.h is the pure half).
+#include "scope_zoom.h"
+#include "scope_zoom_core.h"
 #include "on_foot_aim_eye_core.h"
 #include "head_aim_core.h"        // kPitchOffsetDeg: where the sights sit below the eye's axis
-#include "head_aim.h"             // headAimSightLag: the barrel's lag behind the head in a turn
+#include "head_aim.h"             // headAimSightLag: the barrel's lag behind the head in a turn; headAimRecordSample: the recording's numbers
 #include "journal_watch.h"
 #include "xinput_watch.h"
-#include "temporal_pass.h"        // temporalPassArmEyeDump: the snapshot
 #include "vr_camera_census.h"     // nativeTemporalEyeGeometry: the eye's tangents
 #include "shader_swap.h"
 #include "gpu_timing.h"
@@ -23,8 +22,11 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace edvr {
 
@@ -32,23 +34,33 @@ namespace {
 
 void say(const char* line) { Log::get().note("%s", line); }
 
+double qpcMs() {
+    LARGE_INTEGER c{}, f{};
+    QueryPerformanceCounter(&c);
+    QueryPerformanceFrequency(&f);
+    return f.QuadPart > 0 ? double(c.QuadPart) * 1000.0 / double(f.QuadPart) : 0.0;
+}
+
 // ---- the state the frame thread publishes for the door (render thread) ---------------------------------------------------------------------------
-std::atomic<bool> g_keyOn{false};       // the key is census or preview: the door measures the eye's size
+std::atomic<bool> g_keyOn{false};       // the key is on
 std::atomic<bool> g_lensOn{false};      // draw the lens this frame
-std::atomic<int> g_lensEye{1};          // the measured eye, 0 left, 1 right: the dominant eye, the right one when there is none
-std::atomic<float> g_lensM{1.0f};       // the M the door last drew (from the game's FOV), for the snapshot's line
+std::atomic<int> g_lensEye{1};          // the dominant eye, 0 left, 1 right; the right one when there is none
+std::atomic<float> g_lensM{1.0f};       // the M the door last drew (from the game's FOV), for the aim's line
 std::atomic<float> g_tableM{1.0f};      // the table's M for the weapon in hand: the cap on the M the game's FOV gives
-std::atomic<const szp::Glass*> g_glass{nullptr};   // the weapon's glass, or null for the circle
+std::atomic<const scz::Glass*> g_glass{nullptr};   // the weapon's glass, or null
 std::atomic<float> g_pitchDownDeg{0.0f};   // how far below the eye's axis the sights sit: the head aim's pitch offset while it is on
+std::atomic<double> g_ltDownMs{0.0};    // qpcMs() at the LT press while LT is held, 0 while it is up (the recording's clock)
 std::mutex g_tanMutex;                  // the dominant eye's tangents, as the frame thread last read them
 float g_tans[4] = {};
 bool g_tansKnown = false;
 // Set by the door, read and cleared by the frame thread.
 std::atomic<bool> g_inert{false};       // the lens failed: stand down until the key changes
 std::atomic<uint32_t> g_lensFrames{0};
-std::atomic<uint32_t> g_regionW{0}, g_regionH{0};   // the dominant eye's region at the door, for the snapshot's centre
 std::mutex g_inertMutex;
 std::string g_inertReason;
+// The recording (TEMPORARY, build 1): armed by PAUSE on the frame thread, run by the door.
+std::atomic<bool> g_recArm{false};
+std::atomic<bool> g_recRunning{false};
 
 // ---- the FOV hook (334925; scope-zoom-probe design, decision 5, and the report's "Зонд зума: разведка FOV") ------------------------------------
 constexpr uintptr_t kSlotFov = 0x51887B8, kAdaptor = 0x1031D90, kFovStep = 0x10748D0;
@@ -60,9 +72,7 @@ using Adaptor = uintptr_t (*)(void*, void*, void*, void*);
 Adaptor g_origAdaptor = nullptr;
 bool g_fovInstalled = false, g_fovTried = false;
 uintptr_t g_base = 0;
-std::atomic<uint32_t> g_fovCalls{0};
 std::atomic<uint32_t> g_fovBits{0};
-std::atomic<uint32_t> g_fovSeq{0};
 
 bool readBytes(uintptr_t at, void* out, size_t n) {
     __try {
@@ -92,13 +102,12 @@ bool exchangeSlot(uintptr_t slot, void* replacement) {
 // The game's call, then the camera's FOV as the step left it. Nothing of the game's is written.
 uintptr_t fovDetour(void* a, void* b, void* c, void* d) {
     const uintptr_t r = g_origAdaptor(a, b, c, d);
-    g_fovCalls.fetch_add(1, std::memory_order_relaxed);
     if (b) {
         float v = 0.0f;
         if (readBytes(reinterpret_cast<uintptr_t>(b) - kCameraFromArg + kCameraFov, &v, sizeof(v))) {
             uint32_t bits = 0;
             std::memcpy(&bits, &v, sizeof(bits));
-            if (g_fovBits.exchange(bits, std::memory_order_relaxed) != bits) g_fovSeq.fetch_add(1, std::memory_order_release);
+            g_fovBits.store(bits, std::memory_order_relaxed);
         }
     }
     return r;
@@ -111,18 +120,18 @@ void fovInstall() {
     g_base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     if (!slotHolds(g_base + kSlotFov, g_base + kAdaptor) || !bytesAre(g_base + kAdaptor, kAdaptorBytes, sizeof(kAdaptorBytes)) ||
         !bytesAre(g_base + kFovStep, kFovStepBytes, sizeof(kFovStepBytes))) {
-        szp::formatFovUnread("the game's code at +0x51887B8 / +0x1031D90 / +0x10748D0 is not 334925's; nothing hooked", line, sizeof(line));
+        scz::formatFovUnread("the game's code at +0x51887B8 / +0x1031D90 / +0x10748D0 is not 334925's; nothing hooked, no lens", line, sizeof(line));
         say(line);
         return;
     }
     g_origAdaptor = reinterpret_cast<Adaptor>(g_base + kAdaptor);
     if (!exchangeSlot(g_base + kSlotFov, reinterpret_cast<void*>(&fovDetour))) {
-        szp::formatFovUnread("the table page would not open for writing; nothing hooked", line, sizeof(line));
+        scz::formatFovUnread("the table page would not open for writing; nothing hooked, no lens", line, sizeof(line));
         say(line);
         return;
     }
     g_fovInstalled = true;
-    szp::formatFovHooked(line, sizeof(line));
+    scz::formatFovHooked(line, sizeof(line));
     say(line);
 }
 // Back to the game's own entry, when the key goes off. A call already inside the detour finishes on the pinned DLL.
@@ -133,13 +142,14 @@ void fovUninstall() {
     }
     g_fovInstalled = false;
     g_fovTried = false;
+    g_fovBits.store(0, std::memory_order_relaxed);
 }
 
 // ---- the frame thread's own state ---------------------------------------------------------------------------------------------------------------
 struct Frame {
     uint32_t generation = ~0u;
     bool saidKey = false;
-    szp::Key key = szp::Key::Off;
+    scz::Key key = scz::Key::Off;
     std::string rawKey;
     bool nativeOnFoot = true;
     oae::Key aimEyeKey = oae::Key::Right;
@@ -149,25 +159,17 @@ struct Frame {
     char mods[96] = {};
     bool modsKnown = false;
     bool noWeaponSaid = false;
-    szp::Zoom zoom;
-    // Aims, the FOV, the lines.
-    szp::AdsTrack ads;
+    scz::Zoom zoom;
+    // The aim and the lines.
+    scz::Aim aim;
     bool lt = false;
-    bool fovHad = false;
-    float fovRad = 0.0f;
-    uint32_t fovSeqSeen = 0;
     bool needsEyeSaid = false;
     bool inertSaid = false;
-    // The snapshot.
-    bool snapAny = false;
-    uint64_t snapMs = 0;
-    uint32_t skippedSinceLast = 0;
     // The summary window.
     uint64_t windowMs = 0;
-    uint32_t aimsAtWindow = 0, lensAtWindow = 0, fovCallsAtWindow = 0;
-    uint32_t snapshots = 0, skipped = 0, failures = 0;
+    uint32_t aimsAtWindow = 0, lensAtWindow = 0;
+    uint32_t failures = 0;
     bool onFoot = false;
-    float blend = 0.0f;
     int eye = -1;
 };
 Frame g_f;
@@ -192,7 +194,7 @@ void sayInertOnce(Frame& f) {
         reason = g_inertReason;
     }
     char line[300];
-    szp::formatLensInert(reason.c_str(), line, sizeof(line));
+    scz::formatLensInert(reason.c_str(), line, sizeof(line));
     say(line);
 }
 
@@ -206,40 +208,42 @@ void readTangents(int eye) {
 
 const char* eyeName(int eye) { return eye == 0 ? "left" : eye == 1 ? "right" : "none"; }
 
-// The lens's geometry this moment: the sights at the head aim's offset plus its lag (head_aim.h headAimSightLag), the weapon's glass or the circle.
-szp::Lens lensNow(const float tans[4], uint32_t w, uint32_t h) {
+// The lens's geometry this moment: the sights at the head aim's offset plus its lag (head_aim.h headAimSightLag), the weapon's glass.
+// `withLag` false: the offset alone (the recording's still crop).
+scz::Lens lensNow(const float tans[4], uint32_t w, uint32_t h, bool withLag = true) {
     float lagYaw = 0.0f, lagPitch = 0.0f;
-    if (g_pitchDownDeg.load(std::memory_order_relaxed) != 0.0f) headAimSightLag(&lagYaw, &lagPitch);
-    return szp::lensFor(tans, w, h, szp::kRadiusDeg, g_pitchDownDeg.load(std::memory_order_relaxed) + szp::radToDeg(lagPitch),
-                        szp::radToDeg(lagYaw), g_glass.load(std::memory_order_relaxed));
+    if (withLag && g_pitchDownDeg.load(std::memory_order_relaxed) != 0.0f) headAimSightLag(&lagYaw, &lagPitch);
+    return scz::lensFor(tans, w, h, scz::kRadiusDeg, g_pitchDownDeg.load(std::memory_order_relaxed) + scz::radToDeg(lagPitch),
+                        scz::radToDeg(lagYaw), g_glass.load(std::memory_order_relaxed));
 }
 
-// The zoom the game is at now, capped at the table's (1 when the FOV is not known or not narrowed).
-float zoomNow() {
+float fovNowRad() {
     const uint32_t bits = g_fovBits.load(std::memory_order_relaxed);
     float fov = 0.0f;
     std::memcpy(&fov, &bits, sizeof(fov));
-    return szp::zoomFromFov(fov, g_tableM.load(std::memory_order_relaxed));
+    return fov;
 }
+// The zoom the game is at now, capped at the table's (1 when the FOV is not known or not narrowed).
+float zoomNow() { return scz::zoomFromFov(fovNowRad(), g_tableM.load(std::memory_order_relaxed)); }
 
 }  // namespace
 
-void scopeZoomProbeFrameBoundary() {
+void scopeZoomFrameBoundary() {
     Frame& f = g_f;
     char line[400];
     const Config& cfg = Config::get();
     if (cfg.generation() != f.generation) {
         f.generation = cfg.generation();
-        const std::string raw = cfg.getString("experimental.native_vr_on_foot_scope_zoom", "off");
+        const std::string raw = cfg.getString("experimental.native_vr_on_foot_scope_zoom", "on");
         bool valid = true;
-        const szp::Key now = szp::parseKey(raw.c_str(), &valid);
+        const scz::Key now = scz::parseKey(raw.c_str(), &valid);
         if (!f.saidKey || now != f.key || (!valid && raw != f.rawKey)) {
             if (!valid) {
-                szp::formatKeyUnknown(raw.c_str(), line, sizeof(line));
+                scz::formatKeyUnknown(raw.c_str(), line, sizeof(line));
                 say(line);
             }
             if (!f.saidKey || now != f.key) {
-                szp::formatKey(now, line, sizeof(line));
+                scz::formatKey(now, line, sizeof(line));
                 say(line);
                 // A new key: the lens may try again, and the once-lines may be said again.
                 g_inert.store(false, std::memory_order_release);
@@ -260,11 +264,14 @@ void scopeZoomProbeFrameBoundary() {
         g_pitchDownDeg.store(headAim ? float(ha::kPitchOffsetDeg) : 0.0f, std::memory_order_relaxed);
     }
 
-    g_keyOn.store(f.key != szp::Key::Off, std::memory_order_release);
-    if (f.key == szp::Key::Off) {
+    g_keyOn.store(f.key != scz::Key::Off, std::memory_order_release);
+    if (f.key == scz::Key::Off) {
         g_lensOn.store(false, std::memory_order_release);
+        g_recArm.store(false, std::memory_order_relaxed);
+        g_ltDownMs.store(0.0, std::memory_order_relaxed);
         if (g_fovInstalled || g_fovTried) fovUninstall();
         f.onFoot = false;
+        f.aim.active = false;
         return;
     }
     fovInstall();
@@ -273,11 +280,13 @@ void scopeZoomProbeFrameBoundary() {
     const uint64_t now = GetTickCount64();
     if (!onFoot) {
         g_lensOn.store(false, std::memory_order_release);
+        g_ltDownMs.store(0.0, std::memory_order_relaxed);
         if (f.onFoot) {
             // Off foot: the next disembark says its weapon again.
             f.weaponSaid = false;
             f.noWeaponSaid = false;
             f.weapon[0] = '\0';
+            f.aim.active = false;
         }
         f.onFoot = false;
         return;
@@ -286,9 +295,8 @@ void scopeZoomProbeFrameBoundary() {
         f.onFoot = true;
         if (!f.windowMs) {
             f.windowMs = now;
-            f.aimsAtWindow = f.ads.aims;
+            f.aimsAtWindow = f.aim.aims;
             f.lensAtWindow = g_lensFrames.load(std::memory_order_relaxed);
-            f.fovCallsAtWindow = g_fovCalls.load(std::memory_order_relaxed);
         }
     }
     const bool cinema = !f.nativeOnFoot;
@@ -298,7 +306,7 @@ void scopeZoomProbeFrameBoundary() {
     const bool weaponKnown = journalSelectedWeapon(weapon, sizeof(weapon));
     if (!weaponKnown && journalStatusSamples() > 0 && !f.noWeaponSaid) {
         f.noWeaponSaid = true;
-        szp::formatNoSelectedWeapon(line, sizeof(line));
+        scz::formatNoSelectedWeapon(line, sizeof(line));
         say(line);
     }
     char mods[96] = {};
@@ -308,113 +316,273 @@ void scopeZoomProbeFrameBoundary() {
         std::memcpy(f.weapon, weapon, sizeof(f.weapon));
         std::memcpy(f.mods, mods, sizeof(f.mods));
         f.modsKnown = modsKnown;
-        f.zoom = szp::zoomFor(f.weapon, modsKnown ? f.mods : nullptr);
-        szp::formatWeapon(f.weapon, modsKnown, f.mods, f.zoom, line, sizeof(line));
+        f.zoom = scz::zoomFor(f.weapon, modsKnown ? f.mods : nullptr);
+        scz::formatWeapon(f.weapon, modsKnown, f.mods, f.zoom, line, sizeof(line));
         say(line);
     }
     if (!weaponKnown) {
         f.weapon[0] = '\0';
-        f.zoom = szp::Zoom{};
+        f.zoom = scz::Zoom{};
     }
 
-    // LT and the game's flag.
+    // LT: the aim's edges, and the recording's clock.
     xinputWatchTick();
     XinputBinding ltBinding;
     ltBinding.trigger = 1;   // the left trigger: HumanoidZoomButton on this pad
     ltBinding.valid = true;
-    f.lt = xinputHeld(ltBinding);
-    const szp::AdsOut ev = szp::stepAds(f.ads, f.lt, journalAimDownSightKnown(), journalAimDownSight(), now);
-    for (int i = 0; i < 2; ++i) {
-        if (ev.ev[i] == szp::AdsEvent::None) continue;
-        szp::formatAds(ev.ev[i], ev.delayMs[i], f.weapon, f.ads.aims, line, sizeof(line));
+    const bool lt = xinputHeld(ltBinding);
+    if (lt && !f.lt) g_ltDownMs.store(qpcMs(), std::memory_order_relaxed);
+    if (!lt) g_ltDownMs.store(0.0, std::memory_order_relaxed);
+    f.lt = lt;
+    // One line per aim, for a weapon with a lens only (an aim of the C-44 is no business of this module's).
+    const scz::AimEnd end = scz::stepAim(f.aim, lt && f.zoom.inTable, g_lensFrames.load(std::memory_order_relaxed),
+                                         g_lensM.load(std::memory_order_relaxed), now);
+    if (end.ended) {
+        scz::formatAim(f.weapon, end, line, sizeof(line));
         say(line);
     }
 
-    // The game's FOV, a line when it moved by more than half a degree.
-    const uint32_t seq = g_fovSeq.load(std::memory_order_acquire);
-    if (seq != f.fovSeqSeen) {
-        f.fovSeqSeen = seq;
-        const uint32_t bits = g_fovBits.load(std::memory_order_relaxed);
-        float rad = 0.0f;
-        std::memcpy(&rad, &bits, sizeof(rad));
-        if (szp::fovChanged(f.fovHad, f.fovRad, rad)) {
-            f.fovHad = true;
-            f.fovRad = rad;
-            szp::formatFov(cinema, f.lt || f.ads.flag, rad, line, sizeof(line));
-            say(line);
-        }
-    }
-
-    // The dominant eye and its blend (the aiming eye publishes them every frame), and the lens's decision.
+    // The dominant eye (the aiming eye publishes it every frame), and the lens's decision.
     const aim_eye::Signal sig = aim_eye::read(now);
     f.eye = sig.eye == aim_eye::kEyeLeft ? 0 : sig.eye == aim_eye::kEyeRight ? 1 : -1;
-    f.blend = sig.blend;
     readTangents(f.eye >= 0 ? f.eye : 1);
     sayInertOnce(f);
-    bool lens = f.key == szp::Key::Preview && !cinema && f.zoom.inTable && !g_inert.load(std::memory_order_acquire);
+    const scz::Glass* glass = scz::glassFor(f.weapon);
+    bool lens = !cinema && f.zoom.inTable && glass && !g_inert.load(std::memory_order_acquire);
     if (lens && f.aimEyeKey == oae::Key::Off) {
         if (f.lt && !f.needsEyeSaid) {
             f.needsEyeSaid = true;
-            szp::formatLensNeedsEye(line, sizeof(line));
+            scz::formatLensNeedsEye(line, sizeof(line));
             say(line);
         }
         lens = false;
     }
-    // The zoom itself follows the game's own FOV in the door (szp::zoomFromFov), so the lens grows as the weapon comes up; here only whether it may.
+    // The zoom itself follows the game's own FOV in the door (scz::zoomFromFov), so the lens grows as the weapon comes up; here only whether it may.
     lens = lens && f.eye >= 0;
     g_lensEye.store(f.eye >= 0 ? f.eye : 1, std::memory_order_relaxed);
     g_tableM.store(f.zoom.inTable ? f.zoom.m : 1.0f, std::memory_order_relaxed);
-    g_glass.store(szp::glassFor(f.weapon), std::memory_order_relaxed);
+    g_glass.store(glass, std::memory_order_relaxed);
     g_lensOn.store(lens, std::memory_order_release);
 
-    // The summary, every 30 s on foot, zeros too.
-    if (now - f.windowMs >= szp::kSummaryMs) {
-        szp::Summary s;
-        s.key = f.key;
-        s.cinema = cinema;
-        s.aims = f.ads.aims - f.aimsAtWindow;
-        const uint32_t lensNow = g_lensFrames.load(std::memory_order_relaxed);
-        s.lensFrames = lensNow - f.lensAtWindow;
-        s.snapshots = f.snapshots;
-        s.skipped = f.skipped;
+    // The summary, every 60 s on foot, said only for a window with aims in it.
+    if (scz::summaryDue(f.windowMs, now)) {
+        const uint32_t lensFrames = g_lensFrames.load(std::memory_order_relaxed);
+        scz::Summary s;
+        s.aims = f.aim.aims - f.aimsAtWindow;
+        s.lensFrames = lensFrames - f.lensAtWindow;
         s.failures = f.failures;
-        const uint32_t callsNow = g_fovCalls.load(std::memory_order_relaxed);
-        s.fovCalls = callsNow - f.fovCallsAtWindow;
         s.weapon = f.weapon;
-        s.zoom = f.zoom;
-        s.fovKnown = f.fovHad;
-        s.fovRad = f.fovRad;
         s.gpuSamples = g_gpuSamples.exchange(0, std::memory_order_relaxed);
         s.gpuMsSum = double(g_gpuMicroSum.exchange(0, std::memory_order_relaxed)) / 1000.0;
         s.gpuMsMax = double(g_gpuMicroMax.exchange(0, std::memory_order_relaxed)) / 1000.0;
-        szp::formatSummary(s, line, sizeof(line));
-        say(line);
+        if (s.aims) {
+            scz::formatSummary(s, line, sizeof(line));
+            say(line);
+        }
         f.windowMs = now;
-        f.aimsAtWindow = f.ads.aims;
-        f.lensAtWindow = lensNow;
-        f.fovCallsAtWindow = callsNow;
-        f.snapshots = f.skipped = f.failures = 0;
+        f.aimsAtWindow = f.aim.aims;
+        f.lensAtWindow = lensFrames;
+        f.failures = 0;
     }
 }
 
-bool scopeZoomProbeOnPause() {
-    Frame& f = g_f;
-    if (f.key == szp::Key::Off || !f.onFoot) return false;
-    const uint64_t now = GetTickCount64();
-    char line[400];
-    if (!szp::snapshotAllowed(f.snapAny, f.snapMs, now)) {
-        ++f.skipped;
-        ++f.skippedSinceLast;
-        szp::formatSnapshotSkipped(f.skippedSinceLast, line, sizeof(line));
-        say(line);
+bool scopeZoomOnPause() {
+    const Frame& f = g_f;
+    if (f.key == scz::Key::Off || !f.onFoot) return false;
+    if (g_recRunning.load(std::memory_order_acquire) || g_recArm.load(std::memory_order_relaxed)) {
+        say("scope zoom: PAUSE ignored: a recording is already under way");
         return true;
     }
-    f.snapAny = true;
-    f.snapMs = now;
-    f.skippedSinceLast = 0;
-    ++f.snapshots;
-    if (!temporalPassArmEyeDumpQuiet()) say("scope zoom: snapshot images not taken: an eye run is already under way");
-    // The centre on the dominant eye's region as the door last saw it (the right eye's when there is no dominant eye).
+    g_recArm.store(true, std::memory_order_release);
+    say("scope zoom: recording armed (PAUSE); it begins at the dominant eye's next frame");
+    return true;
+}
+
+// ---- the recording (TEMPORARY, build 1 of on-foot-scope-zoom; the render thread, in native_sharpen's door) ---------------------------------------
+namespace {
+
+constexpr int kRecRing = 4;            // staging copies in flight
+constexpr uint32_t kRecMapAfter = 3;   // frames before a copy is asked for without waiting
+constexpr uint32_t kRecGiveUp = 8;     // frames after which a copy still not ready is dropped
+
+struct RecSlot {
+    ID3D11Texture2D* tex = nullptr;
+    bool busy = false;
+    uint32_t frame = 0;   // the recording frame it holds
+};
+struct RecCrop {
+    uint32_t no = 0;
+    std::vector<uint8_t> bgr;   // bottom-up BMP rows, kCropPx wide, 24 bits
+};
+struct Rec {
+    bool running = false;
+    double startMs = 0;
+    uint32_t frames = 0, crops = 0, skipped = 0;
+    std::wstring dir;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    ID3D11Device* dev = nullptr;
+    RecSlot ring[kRecRing];
+    int cropX = 0, cropY = 0;
+    bool cropOk = false;
+    std::vector<std::unique_ptr<RecCrop>> done;
+    std::vector<std::string> lines;
+};
+Rec g_rec;
+
+float halfToFloat(uint16_t h) {
+    const uint32_t s = (h >> 15) & 1u, e = (h >> 10) & 0x1Fu, m = h & 0x3FFu;
+    float v;
+    if (e == 0) v = float(m) / 1024.0f * 6.103515625e-5f;
+    else if (e == 31) v = m ? 0.0f : 65504.0f;
+    else v = (1.0f + float(m) / 1024.0f) * std::pow(2.0f, float(e) - 15.0f);
+    return s ? -v : v;
+}
+uint8_t toByte(float v, bool linear) {
+    if (!(v > 0.0f)) v = 0.0f;
+    if (v > 1.0f) v = 1.0f;
+    if (linear) v = v <= 0.0031308f ? 12.92f * v : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
+    return uint8_t(v * 255.0f + 0.5f);
+}
+// One mapped crop into BMP rows; false for a format it does not read (the lens's own list).
+bool convertCrop(const D3D11_MAPPED_SUBRESOURCE& ms, DXGI_FORMAT fmt, std::vector<uint8_t>& out) {
+    const uint32_t n = uint32_t(scz::kCropPx), rowBytes = (n * 3u + 3u) & ~3u;
+    out.assign(size_t(rowBytes) * n, 0);
+    for (uint32_t y = 0; y < n; ++y) {
+        const uint8_t* src = static_cast<const uint8_t*>(ms.pData) + size_t(y) * ms.RowPitch;
+        uint8_t* dst = out.data() + size_t(n - 1u - y) * rowBytes;
+        for (uint32_t x = 0; x < n; ++x) {
+            float r = 0, g = 0, b = 0;
+            bool linear = false;
+            switch (fmt) {
+                case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+                case DXGI_FORMAT_R8G8B8A8_UNORM: r = src[x * 4] / 255.0f; g = src[x * 4 + 1] / 255.0f; b = src[x * 4 + 2] / 255.0f; break;
+                case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+                case DXGI_FORMAT_B8G8R8A8_UNORM: b = src[x * 4] / 255.0f; g = src[x * 4 + 1] / 255.0f; r = src[x * 4 + 2] / 255.0f; break;
+                case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+                case DXGI_FORMAT_R10G10B10A2_UNORM: {
+                    uint32_t v = 0;
+                    std::memcpy(&v, src + x * 4, 4);
+                    r = float(v & 1023u) / 1023.0f;
+                    g = float((v >> 10) & 1023u) / 1023.0f;
+                    b = float((v >> 20) & 1023u) / 1023.0f;
+                    break;
+                }
+                case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+                case DXGI_FORMAT_R16G16B16A16_FLOAT: {
+                    uint16_t hv[3];
+                    std::memcpy(hv, src + x * 8, 6);
+                    r = halfToFloat(hv[0]); g = halfToFloat(hv[1]); b = halfToFloat(hv[2]);
+                    linear = true;
+                    break;
+                }
+                case DXGI_FORMAT_R16G16B16A16_UNORM: {
+                    uint16_t hv[3];
+                    std::memcpy(hv, src + x * 8, 6);
+                    r = hv[0] / 65535.0f; g = hv[1] / 65535.0f; b = hv[2] / 65535.0f;
+                    break;
+                }
+                default: return false;
+            }
+            dst[x * 3 + 0] = toByte(b, linear);
+            dst[x * 3 + 1] = toByte(g, linear);
+            dst[x * 3 + 2] = toByte(r, linear);
+        }
+    }
+    return true;
+}
+
+bool writeBmp(const std::wstring& path, const std::vector<uint8_t>& rows) {
+    const uint32_t n = uint32_t(scz::kCropPx), bytes = uint32_t(rows.size());
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    BITMAPFILEHEADER fh{};
+    BITMAPINFOHEADER ih{};
+    fh.bfType = 0x4D42;
+    fh.bfOffBits = sizeof(fh) + sizeof(ih);
+    fh.bfSize = fh.bfOffBits + bytes;
+    ih.biSize = sizeof(ih);
+    ih.biWidth = LONG(n);
+    ih.biHeight = LONG(n);
+    ih.biPlanes = 1;
+    ih.biBitCount = 24;
+    ih.biCompression = BI_RGB;
+    ih.biSizeImage = bytes;
+    DWORD wrote = 0;
+    bool ok = WriteFile(f, &fh, sizeof(fh), &wrote, nullptr) != 0;
+    if (ok) ok = WriteFile(f, &ih, sizeof(ih), &wrote, nullptr) != 0;
+    if (ok) ok = WriteFile(f, rows.data(), bytes, &wrote, nullptr) != 0;
+    CloseHandle(f);
+    return ok;
+}
+
+void recRelease() {
+    for (RecSlot& s : g_rec.ring) {
+        if (s.tex) s.tex->Release();
+        s = RecSlot{};
+    }
+    if (g_rec.dev) g_rec.dev->Release();
+    g_rec.dev = nullptr;
+}
+
+// The end: the line, then the files on a thread of their own (the door never writes a file).
+void recFinish() {
+    char line[300];
+    scz::formatRecordEnd(g_rec.frames, g_rec.crops, g_rec.skipped, line, sizeof(line));
+    say(line);
+    recRelease();
+    auto crops = std::make_shared<std::vector<std::unique_ptr<RecCrop>>>(std::move(g_rec.done));
+    auto lines = std::make_shared<std::vector<std::string>>(std::move(g_rec.lines));
+    const std::wstring dir = g_rec.dir;
+    g_rec.done.clear();
+    g_rec.lines.clear();
+    g_rec.running = false;
+    g_recRunning.store(false, std::memory_order_release);
+    try {
+        std::thread([crops, lines, dir] {
+            uint32_t written = 0;
+            for (const auto& c : *crops) {
+                wchar_t name[64];
+                _snwprintf_s(name, 64, _TRUNCATE, L"\\crop_%03u.bmp", c->no);
+                if (writeBmp(dir + name, c->bgr)) ++written;
+            }
+            const std::wstring txt = dir + L"\\frames.txt";
+            if (FILE* f = _wfopen(txt.c_str(), L"wb")) {
+                for (const std::string& l : *lines) std::fprintf(f, "%s\n", l.c_str());
+                std::fclose(f);
+            }
+            Log::get().note("scope zoom: recording written: %u of %u crops and frames.txt into %ls", written, unsigned(crops->size()), dir.c_str());
+        }).detach();
+    } catch (...) {
+        say("scope zoom: recording NOT written: the writer thread would not start");
+    }
+}
+
+// Asks the copies in flight for their pixels, never waiting.
+void recPoll(ID3D11DeviceContext* ctx) {
+    for (RecSlot& s : g_rec.ring) {
+        if (!s.busy || g_rec.frames - s.frame < kRecMapAfter) continue;
+        D3D11_MAPPED_SUBRESOURCE ms{};
+        const HRESULT hr = ctx->Map(s.tex, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &ms);
+        if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
+            if (g_rec.frames - s.frame >= kRecGiveUp) { s.busy = false; ++g_rec.skipped; }
+            continue;
+        }
+        if (FAILED(hr) || !ms.pData) { s.busy = false; ++g_rec.skipped; continue; }
+        auto c = std::make_unique<RecCrop>();
+        c->no = s.frame;
+        const bool ok = convertCrop(ms, g_rec.format, c->bgr);
+        ctx->Unmap(s.tex, 0);
+        s.busy = false;
+        if (ok) { g_rec.done.push_back(std::move(c)); ++g_rec.crops; }
+        else ++g_rec.skipped;
+    }
+}
+
+void recBegin(ID3D11Texture2D* src, const uint32_t region[4], bool flipU, bool flipV, int eye) {
+    char line[400];
+    D3D11_TEXTURE2D_DESC sd{};
+    src->GetDesc(&sd);
+    const uint32_t w = region[2] - region[0], h = region[3] - region[1];
     float tans[4] = {};
     bool known = false;
     {
@@ -422,13 +590,157 @@ bool scopeZoomProbeOnPause() {
         known = g_tansKnown;
         std::memcpy(tans, g_tans, sizeof(tans));
     }
-    const uint32_t w = g_regionW.load(std::memory_order_relaxed), h = g_regionH.load(std::memory_order_relaxed);
-    const szp::Lens l = known ? lensNow(tans, w, h) : szp::Lens{};
-    const float m = zoomNow();
-    szp::formatSnapshot(f.weapon, f.lt || f.ads.flag, eyeName(f.eye >= 0 ? f.eye : 1), l, w, h,
-                        g_lensOn.load(std::memory_order_relaxed) && m > szp::kLensMinM, m, line, sizeof(line));
+    // The crop stands still around the aiming centre without the lag: the head aim's offset, the glass's reticle when a weapon has one.
+    const scz::Lens still = known ? lensNow(tans, w, h, false) : scz::Lens{};
+    const float cx = still.valid ? still.cx : 0.5f * float(w), cy = still.valid ? still.cy : 0.5f * float(h);
+    g_rec = Rec{};
+    if (!scz::cropOrigin(cx, cy, w, h, scz::kCropPx, &g_rec.cropX, &g_rec.cropY)) {
+        say("scope zoom: recording not begun: the eye is smaller than the crop");
+        return;
+    }
+    src->GetDevice(&g_rec.dev);
+    if (!g_rec.dev) { say("scope zoom: recording not begun: the eye has no device"); return; }
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = td.Height = UINT(scz::kCropPx);
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = sd.Format;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_STAGING;
+    td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    for (RecSlot& s : g_rec.ring) {
+        if (FAILED(g_rec.dev->CreateTexture2D(&td, nullptr, &s.tex)) || !s.tex) {
+            recRelease();
+            say("scope zoom: recording not begun: the staging copies could not be created");
+            return;
+        }
+    }
+    SYSTEMTIME stm{};
+    GetLocalTime(&stm);
+    wchar_t stamp[16];
+    _snwprintf_s(stamp, 16, _TRUNCATE, L"%02u%02u%02u", unsigned(stm.wHour), unsigned(stm.wMinute), unsigned(stm.wSecond));
+    const std::wstring root = Log::get().dir() + L"\\scope_zoom";
+    CreateDirectoryW(root.c_str(), nullptr);
+    g_rec.dir = root + L"\\" + stamp;
+    CreateDirectoryW(g_rec.dir.c_str(), nullptr);
+    g_rec.format = sd.Format;
+    g_rec.cropOk = true;
+    g_rec.running = true;
+    g_rec.startMs = qpcMs();
+    g_rec.lines.reserve(80);
+    g_recRunning.store(true, std::memory_order_release);
+    char dirUtf8[MAX_PATH * 2] = {};
+    WideCharToMultiByte(CP_UTF8, 0, g_rec.dir.c_str(), -1, dirUtf8, int(sizeof(dirUtf8)), nullptr, nullptr);
+    scz::formatRecordBegin(dirUtf8, eyeName(eye), w, h, int(sd.Format), flipU, flipV, line, sizeof(line));
     say(line);
-    return true;
+    std::snprintf(line, sizeof(line), "region=%ux%u format=%d flip=%d,%d crop_at=%d,%d crop=%d", w, h, int(sd.Format), flipU ? 1 : 0, flipV ? 1 : 0,
+                  g_rec.cropX, g_rec.cropY, scz::kCropPx);
+    g_rec.lines.emplace_back(line);
+}
+
+void recFrame(ID3D11Texture2D* src, const uint32_t region[4], bool flipU, bool flipV) {
+    ID3D11DeviceContext* ctx = nullptr;
+    g_rec.dev->GetImmediateContext(&ctx);
+    if (!ctx) { recFinish(); return; }
+    recPoll(ctx);
+    const double now = qpcMs();
+    const double t = now - g_rec.startMs;
+    if (t < double(scz::kRecordMs)) {
+        const uint32_t w = region[2] - region[0], h = region[3] - region[1];
+        scz::RecordFrame r;
+        r.n = g_rec.frames;
+        r.tMs = t;
+        const double lt = g_ltDownMs.load(std::memory_order_relaxed);
+        r.ltMs = lt > 0.0 ? now - lt : -1.0;
+        const float fov = fovNowRad();
+        r.fovDeg = std::isfinite(fov) ? scz::radToDeg(fov) : 0.0f;
+        r.m = zoomNow();
+        r.lens = g_lensOn.load(std::memory_order_relaxed) && r.m > scz::kLensMinM;
+        float lagYaw = 0.0f, lagPitch = 0.0f;
+        if (g_pitchDownDeg.load(std::memory_order_relaxed) != 0.0f) headAimSightLag(&lagYaw, &lagPitch);
+        r.lagYawDeg = scz::radToDeg(lagYaw);
+        r.lagPitchDeg = scz::radToDeg(lagPitch);
+        HeadAimRecord ha{};
+        headAimRecordSample(&ha);
+        r.latchLast = ha.latchLast;
+        r.latchCam = ha.latchCam;
+        r.camLagKnown = ha.camLagKnown;
+        r.camLagYawDeg = scz::radToDeg(ha.camLagYawRad);
+        r.camLagPitchDeg = scz::radToDeg(ha.camLagPitchRad);
+        r.yawRateDps = scz::radToDeg(ha.yawRateRad);
+        r.pitchRateDps = scz::radToDeg(ha.pitchRateRad);
+        float tans[4] = {};
+        bool known = false;
+        {
+            std::lock_guard<std::mutex> lock(g_tanMutex);
+            known = g_tansKnown;
+            std::memcpy(tans, g_tans, sizeof(tans));
+        }
+        const scz::Lens l = known ? lensNow(tans, w, h) : scz::Lens{};
+        r.cx = l.valid ? l.cx : -1.0f;
+        r.cy = l.valid ? l.cy : -1.0f;
+        r.cropX = g_rec.cropX;
+        r.cropY = g_rec.cropY;
+        // The crop: a free staging copy, or a skip (all in flight).
+        RecSlot* slot = nullptr;
+        for (RecSlot& s : g_rec.ring)
+            if (!s.busy) { slot = &s; break; }
+        if (slot) {
+            // A mirrored region holds the crop mirrored; the box is taken where the mirror puts it (the line's flip says so).
+            const int x = flipU ? int(w) - g_rec.cropX - scz::kCropPx : g_rec.cropX;
+            const int y = flipV ? int(h) - g_rec.cropY - scz::kCropPx : g_rec.cropY;
+            D3D11_BOX box{};
+            box.left = region[0] + UINT(x);
+            box.top = region[1] + UINT(y);
+            box.right = box.left + UINT(scz::kCropPx);
+            box.bottom = box.top + UINT(scz::kCropPx);
+            box.front = 0;
+            box.back = 1;
+            ctx->CopySubresourceRegion(slot->tex, 0, 0, 0, 0, src, 0, &box);
+            slot->busy = true;
+            slot->frame = g_rec.frames;
+            r.crop = int(g_rec.frames);
+        } else {
+            ++g_rec.skipped;
+        }
+        char line[400];
+        scz::formatRecordFrame(r, line, sizeof(line));
+        say(line);
+        g_rec.lines.emplace_back(line);
+        ++g_rec.frames;
+    } else {
+        // Past the end: only the copies in flight are waited for (they age out by kRecGiveUp), then the files.
+        ++g_rec.frames;
+        bool busy = false;
+        for (const RecSlot& s : g_rec.ring) busy = busy || s.busy;
+        if (!busy) recFinish();
+    }
+    ctx->Release();
+}
+
+}  // namespace
+
+void scopeZoomRecord(uint32_t eye, ID3D11Texture2D* src, const uint32_t region[4], bool flipU, bool flipV) {
+    if (!g_recArm.load(std::memory_order_acquire) && !g_rec.running) return;
+    if (!src || !region || int(eye) != g_lensEye.load(std::memory_order_relaxed)) return;
+    if (region[2] <= region[0] || region[3] <= region[1]) return;
+    const bool ran = guarded("scope zoom/recording", [&] {
+        if (!g_rec.running) {
+            if (!g_recArm.exchange(false, std::memory_order_acq_rel)) return;
+            if (!g_keyOn.load(std::memory_order_acquire)) return;
+            recBegin(src, region, flipU, flipV, int(eye));
+            if (!g_rec.running) return;
+        }
+        D3D11_TEXTURE2D_DESC sd{};
+        src->GetDesc(&sd);
+        if (sd.Format != g_rec.format) { say("scope zoom: recording cut short: the eye's format changed"); recFinish(); return; }
+        recFrame(src, region, flipU, flipV);
+    });
+    if (!ran) {
+        g_rec.running = false;
+        g_recRunning.store(false, std::memory_order_release);
+        say("scope zoom: recording faulted and was dropped");
+    }
 }
 
 // ---- the lens (the render thread, in native_sharpen's door) --------------------------------------------------------------------------------------
@@ -456,7 +768,7 @@ struct LensParams {
     int32_t box[4];
     int32_t origin[4];
     float texInv[4];
-    float corner[szp::kGlassCorners][4];
+    float corner[scz::kGlassCorners][4];
 };
 static_assert(sizeof(LensParams) == 208, "thirteen 16-byte rows");
 
@@ -556,10 +868,11 @@ ID3D11Texture2D* lensInner(ID3D11Texture2D* src, const uint32_t region[4], bool 
     if (!known) { fail("the eye's tangents are not known (the temporal channel is closed)"); return nullptr; }
     // The zoom the game is at (its FOV, narrowing as the weapon comes up): nothing to draw until it narrows.
     const float m = zoomNow();
-    if (!(m > szp::kLensMinM)) return nullptr;
+    if (!(m > scz::kLensMinM)) return nullptr;
     g_lensM.store(m, std::memory_order_relaxed);
-    szp::Lens l = lensNow(tans, w, h);
+    scz::Lens l = lensNow(tans, w, h);
     if (!l.valid) { fail("the eye's tangents give no lens"); return nullptr; }
+    if (!l.corners) return nullptr;   // no glass this moment (the weapon changed under an aim): nothing to draw, not a failure
     // A region stored mirrored: the centre and the corners mirror with it (the radii and the box's size do not).
     if (flipU) {
         l.cx = float(w) - l.cx;
@@ -656,7 +969,7 @@ ID3D11Texture2D* lensInner(ID3D11Texture2D* src, const uint32_t region[4], bool 
         p.centreRadius[2] = l.rx;
         p.centreRadius[3] = l.ry;
         p.params[0] = 1.0f / m;
-        p.params[1] = szp::kEdgePx;
+        p.params[1] = scz::kEdgePx;
         p.params[2] = float(l.corners);
         for (int i = 0; i < l.corners; ++i) {
             p.corner[i][0] = l.px[i];
@@ -724,14 +1037,9 @@ ID3D11Texture2D* lensInner(ID3D11Texture2D* src, const uint32_t region[4], bool 
 }  // namespace
 
 ID3D11Texture2D* scopeZoomLens(uint32_t eye, ID3D11Texture2D* src, const uint32_t region[4], bool flipU, bool flipV) {
-    if (!g_keyOn.load(std::memory_order_acquire)) return nullptr;
+    if (!g_lensOn.load(std::memory_order_acquire)) return nullptr;
     if (!src || !region || int(eye) != g_lensEye.load(std::memory_order_relaxed)) return nullptr;
-    // The measured eye's size, for the snapshot's centre (census and preview alike).
-    if (region[2] > region[0] && region[3] > region[1]) {
-        g_regionW.store(region[2] - region[0], std::memory_order_relaxed);
-        g_regionH.store(region[3] - region[1], std::memory_order_relaxed);
-    }
-    if (!g_lensOn.load(std::memory_order_acquire) || g_inert.load(std::memory_order_acquire)) return nullptr;
+    if (g_inert.load(std::memory_order_acquire)) return nullptr;
     ID3D11Texture2D* out = nullptr;
     if (!guardedBudget(g_lensBudget, [&] { out = lensInner(src, region, flipU, flipV); })) {
         fail("the lens faulted");

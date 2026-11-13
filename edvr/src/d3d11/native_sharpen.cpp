@@ -3,7 +3,7 @@
 #include "ui_layer.h"
 #include "ui_layer_math.h"  // uiLayerUvFromRegion
 #include "temporal_pass.h"
-#include "scope_zoom_probe.h"  // EDVRonFOOT: the scope zoom probe's lens, between RCAS and the UI layer
+#include "scope_zoom.h"  // EDVRonFOOT: the scope zoom's lens, between RCAS and the UI layer
 #include "../common/config.h"
 #include "../common/log.h"
 #include "../common/supersample_math.h"
@@ -105,9 +105,11 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
     edvr::temporalPassCaptureFinalEye(seq,eye,result,whole,true,flipU,flipV);
     *output=result; std::memcpy(outBounds,full,sizeof(full)); return S_OK;
   }
-  // EDVRonFOOT scope zoom probe (scope_zoom_probe.h): the lens goes on the eye here, after RCAS and before the UI layer, so the HUD is drawn
+  // EDVRonFOOT scope zoom (scope_zoom.h): the lens goes on the eye here, after RCAS and before the UI layer, so the HUD is drawn
   // over it and never magnified. Null (one atomic load when its key is off): the eye goes on exactly as before. A lens texture is
   // region-sized and borrowed, like the sharpener's result.
+  // Its recording (TEMPORARY, build 1 of on-foot-scope-zoom) takes the eye here, at the door's input: before RCAS and before the lens.
+  edvr::scopeZoomRecord(eye,source,region,flipU,flipV);
   const uint32_t whole[4]={0,0,region[2]-region[0],region[3]-region[1]};
   // The unsharpened eye (the sharpener off or refused): the lens, then the layer, as before otherwise.
   auto unsharpened=[&]() -> HRESULT {

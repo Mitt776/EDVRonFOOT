@@ -85,7 +85,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "vram_tick.h"       // vramWatchTick: the graphics memory watch, once per owned Present
 #include "vertex_resync_hook.h"   // vertexResyncInstall at startup, vertexResyncPoll once a second: the f3d vertex-buffer cache repair (both profiles)
 #include "head_aim.h"   // EDVRonFOOT: headAimInstall at startup, headAimFrameBoundary each frame (on-foot head aim)
-#include "scope_zoom_probe.h"   // EDVRonFOOT: the scope zoom probe's frame boundary and its PAUSE snapshot (temporary)
+#include "scope_zoom.h"   // EDVRonFOOT: the scope zoom's frame boundary and (build 1 only) its PAUSE recording
 #include "terrain_cull_cover_hook.h"   // terrainCullCoverInstall at startup, terrainCullCoverPoll once a second: the terrain cull frustum cover (VR)
 #include "frame_ticks.h"     // g_frameTicks: what the Present hook's own work cost, by name
 #include "boundary_tick.h"   // one fault budget per frame-boundary tick
@@ -1221,7 +1221,7 @@ EDVR_BOUNDARY_TICK(tkExplorerCam, "explorer_cam");
 EDVR_BOUNDARY_TICK(tkNativeVrOnFoot, "native_vr_on_foot");
 EDVR_BOUNDARY_TICK(tkOnFootAimEye, "on_foot_aim_eye");
 EDVR_BOUNDARY_TICK(tkHeadAim, "head_aim");
-EDVR_BOUNDARY_TICK(tkScopeZoomProbe, "scope_zoom_probe");
+EDVR_BOUNDARY_TICK(tkScopeZoom, "scope_zoom");
 EDVR_BOUNDARY_TICK(tkOnFootHud, "on_foot_hud");
 EDVR_BOUNDARY_TICK(tkOnFootMarkers, "on_foot_markers");
 EDVR_BOUNDARY_TICK(tkFssModeLatch, "fss_mode_latch");
@@ -1257,10 +1257,10 @@ void tickHotkeys() {
     // its recovery behind it. The pair is the point -- the first is the
     // reaction-time capture, the second is the one you read.
     if (g_state->dumpKey.pressed()) {
-        // EDVRonFOOT: at census/preview on foot PAUSE is the scope zoom probe's snapshot (scope_zoom_probe.h), and only that: the camera and
-        // temporal history dumps below write megabytes a press, and on 13.11 they and the census filled the 16 MB log in six presses. At off,
-        // or off foot, PAUSE is what it always was.
-        if (!scopeZoomProbeOnPause()) {
+        // EDVRonFOOT: on foot with the scope zoom on, PAUSE is its recording (scope_zoom.h; TEMPORARY, build 1 of on-foot-scope-zoom), and
+        // only that: the camera and temporal history dumps below write megabytes a press, and on 13.11 they and the census filled the 16 MB
+        // log in six presses. At off, or off foot, PAUSE is what it always was.
+        if (!scopeZoomOnPause()) {
             dumpCameraRing("the history key");
             temporalPassDumpHistory("the history key");
             g_state->dumpDueMs = nowMs() + kDumpDelayMs;
@@ -1580,9 +1580,9 @@ void presentFrameBoundary() {
     tkOnFootAimEye.run([] { onFootAimEyeFrameBoundary(); });
     // EDVRonFOOT: the on-foot head aim (head_aim.h): its key, the journal, who the player is, what the latch may do, the lines.
     tkHeadAim.run([] { headAimFrameBoundary(); });
-    // EDVRonFOOT: the scope zoom probe (scope_zoom_probe.h; temporary): after the aiming eye, whose blend it ramps the lens with. At off one
+    // EDVRonFOOT: the scope zoom (scope_zoom.h): after the aiming eye (its dominant eye) and the head aim (the barrel's lag). At off one
     // config check and nothing else.
-    tkScopeZoomProbe.run([] { scopeZoomProbeFrameBoundary(); });
+    tkScopeZoom.run([] { scopeZoomFrameBoundary(); });
     // EDVRonFOOT: the on-foot markers (on_foot_markers.h): native_vr_on_foot, the journal, the search for the points, whether the
     // writer hooks correct, the install, the on and off lines, the end-of-frame check and the summary.
     tkOnFootMarkers.run([] { onFootMarkersFrameBoundary(); });

@@ -28,9 +28,19 @@ void headAimInstall(bool flatProfile);
 // Once a frame from device_hook's boundary, after the journal's tick.
 void headAimFrameBoundary();
 
-// EDVRonFOOT scope zoom probe (scope_zoom_probe.h): where the barrel points against the view in the frame the latch last made. The barrel follows the
+// EDVRonFOOT scope zoom (scope_zoom.h): where the barrel points against the view in the frame the latch last made. The barrel follows the
 // FILTERED head, the view the head itself, so in a turn the sights drift off the eye's axis by (filtered - head): yawRight radians to the right,
 // pitchDown radians down, on top of kPitchOffsetDeg. Both times the level; 0 when the feature does not lead. Any thread.
 void headAimSightLag(float* yawRightRad, float* pitchDownRad);
+
+// EDVRonFOOT scope zoom's recording (scope_zoom.h; build 1 of on-foot-scope-zoom, TEMPORARY, read only): which latch the game's camera last copied
+// against the last one, that latch's lag (when still in the ring of 16), and the head's own angular speed at the last latch. Any thread.
+struct HeadAimRecord {
+    uint64_t latchLast = 0, latchCam = 0;   // 0: none yet
+    bool camLagKnown = false;
+    float camLagYawRad = 0.0f, camLagPitchRad = 0.0f;   // right, down
+    float yawRateRad = 0.0f, pitchRateRad = 0.0f;       // radians a second, of the filter's headYaw and headPitchUp (their own signs)
+};
+void headAimRecordSample(HeadAimRecord* out);
 
 }  // namespace edvr

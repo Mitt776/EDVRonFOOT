@@ -232,17 +232,3 @@ minutes after a flight finally reproduced the effect being chased.
 - Worktrees under `.claude\worktrees\` and `.Codex\worktrees\` share one
   stash stack with the main checkout. Never use bare `git stash` / `git
   stash pop`.
-
-## Layout
-
-| Path | What |
-|---|---|
-| `src\d3d11\` | the graphics half: hooks, shader fixes, the draw census |
-| `src\openxr\` | the native OpenXR runtime: the OpenVR ABI Elite calls, translated to OpenXR |
-| `src\openvr\compat\` | the OpenVR ABI header |
-| `src\installer\` | the self-contained installer and its log bundler |
-| `src\common\` | config, logging, the crash sentinel |
-| `tools\` | Python tools, each with `--self-test`; C++ test rigs in subdirs |
-| `docs\` | one investigation doc per arc — read its `## Status` block first |
-| `build.bat` | full build, all gates; `--dll-only` is the receipt-guarded promotion path |
-| `package.bat <version>` | builds, tests, then packages a release |

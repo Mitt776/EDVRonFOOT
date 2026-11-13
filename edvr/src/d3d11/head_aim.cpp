@@ -70,6 +70,18 @@ std::atomic<uint32_t> g_camBefore{0}, g_camAfter{0};
 std::mutex g_forceMutex;
 ha::Snapshot g_inForce, g_cameraSnap;
 uint64_t g_latchNo = 0;   // under the mutex; counts the feature's latches
+// The scope zoom's recording (scope_zoom.h; build 1 of on-foot-scope-zoom, read only): the sights' lag of the last latches by their number, and the
+// head's angular speed at the last latch. Under g_forceMutex, like the numbers they go with.
+struct LagByLatch {
+    uint64_t latchNo = 0;
+    float yaw = 0.0f, pitch = 0.0f;
+};
+constexpr int kLagRing = 16;
+LagByLatch g_lagRing[kLagRing];
+double g_rateYaw = 0.0, g_ratePitch = 0.0;   // radians a second, the head's (unfiltered) yaw right and pitch up
+double g_rateLastYaw = 0.0, g_rateLastPitch = 0.0;
+LARGE_INTEGER g_rateLastQpc{};
+bool g_rateHave = false;
 // Written by the getters and the eye's matrix getter, taken by the frame thread and the latch.
 std::atomic<uintptr_t> g_census[ha::kSlots];
 std::atomic<bool> g_censusMany{false};
@@ -165,16 +177,16 @@ bool latchFeature(uint64_t nowMs, const float* head, uint32_t version, head_aim:
     // The pitch offset goes onto the head's tilt here, so the blend, the getters and the pose correction below all carry it.
     o.pitchTarget = ha::offsetTarget(o.pitchTarget);
     const bool lead = in.channel8;
-    // The scope zoom probe's lag (head_aim.h headAimSightLag): the barrel's filtered angles against the head's own, times the level.
+    // The scope zoom's lag (head_aim.h headAimSightLag): the barrel's filtered angles against the head's own, times the level.
+    float lagYaw = 0.0f, lagPitch = 0.0f;
     if (lead && g_featState.hasAngles) {
         const double yawLag = ha::detail::wrap(g_featState.filtYaw - g_featState.headYaw);
         const double pitchLagDown = g_featState.headPitchUp - g_featState.filtPitchUp;
-        g_sightLagYaw.store(float(yawLag * o.level), std::memory_order_relaxed);
-        g_sightLagPitch.store(float(pitchLagDown * o.level), std::memory_order_relaxed);
-    } else {
-        g_sightLagYaw.store(0.0f, std::memory_order_relaxed);
-        g_sightLagPitch.store(0.0f, std::memory_order_relaxed);
+        lagYaw = float(yawLag * o.level);
+        lagPitch = float(pitchLagDown * o.level);
     }
+    g_sightLagYaw.store(lagYaw, std::memory_order_relaxed);
+    g_sightLagPitch.store(lagPitch, std::memory_order_relaxed);
     float pitchAdded = 0.0f;
     g_latchedThisFrame.store(true, std::memory_order_relaxed);
     if (lead) {
@@ -191,6 +203,25 @@ bool latchFeature(uint64_t nowMs, const float* head, uint32_t version, head_aim:
             g_inForce.latchNo = g_latchNo;
             g_inForce.yaw = o.yawAdded;
             g_inForce.pitch = pitchAdded;
+            // The scope zoom's recording: this latch's lag under its number, and the head's speed since the last latch.
+            LagByLatch& r = g_lagRing[g_latchNo % kLagRing];
+            r.latchNo = g_latchNo;
+            r.yaw = lagYaw;
+            r.pitch = lagPitch;
+            if (g_featState.hasAngles) {
+                LARGE_INTEGER qpc{}, freq{};
+                QueryPerformanceCounter(&qpc);
+                QueryPerformanceFrequency(&freq);
+                if (g_rateHave && freq.QuadPart > 0 && qpc.QuadPart > g_rateLastQpc.QuadPart) {
+                    const double dt = double(qpc.QuadPart - g_rateLastQpc.QuadPart) / double(freq.QuadPart);
+                    g_rateYaw = ha::detail::wrap(g_featState.headYaw - g_rateLastYaw) / dt;
+                    g_ratePitch = (g_featState.headPitchUp - g_rateLastPitch) / dt;
+                }
+                g_rateHave = true;
+                g_rateLastQpc = qpc;
+                g_rateLastYaw = g_featState.headYaw;
+                g_rateLastPitch = g_featState.headPitchUp;
+            }
         }
         g_featYaw.store(o.yawAdded, std::memory_order_relaxed);
         g_featTarget.store(o.pitchTarget, std::memory_order_relaxed);
@@ -297,6 +328,22 @@ void headAimInstall(bool flatProfile) {
 void headAimSightLag(float* yawRightRad, float* pitchDownRad) {
     if (yawRightRad) *yawRightRad = g_sightLagYaw.load(std::memory_order_relaxed);
     if (pitchDownRad) *pitchDownRad = g_sightLagPitch.load(std::memory_order_relaxed);
+}
+
+void headAimRecordSample(HeadAimRecord* out) {
+    if (!out) return;
+    *out = HeadAimRecord{};
+    std::lock_guard<std::mutex> lock(g_forceMutex);
+    out->latchLast = g_latchNo;
+    out->latchCam = g_cameraSnap.valid ? g_cameraSnap.latchNo : 0;
+    out->yawRateRad = float(g_rateYaw);
+    out->pitchRateRad = float(g_ratePitch);
+    const LagByLatch& r = g_lagRing[out->latchCam % kLagRing];
+    if (out->latchCam && r.latchNo == out->latchCam) {
+        out->camLagKnown = true;
+        out->camLagYawRad = r.yaw;
+        out->camLagPitchRad = r.pitch;
+    }
 }
 
 void headAimFrameBoundary() {
