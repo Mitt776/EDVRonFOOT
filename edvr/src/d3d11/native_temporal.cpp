@@ -10,6 +10,7 @@
 #include "vscreen.h"           // vScreenClearRenderTargetViewRaw: the black frame's one clear
 #include "vr_camera_census.h"   // nativeTemporalEyeGeometry's declaration, so its definition below is checked against it
 #include "terrain_cull_cover_hook.h"   // the terrain cull cover (docs/terrain-culling.md): begin() tells it the frusta the game is handed
+#include "scope_zoom.h"        // EDVRonFOOT: scopeZoomWantsLongJitter, the sharp scope lens's 32 phases while it is drawn
 #include "../common/config.h"
 #include "../common/frame_flag.h"
 #include "../common/temporal_math.h"
@@ -383,8 +384,12 @@ HRESULT WINAPI begin(void* p,const EdvrNativeTemporalFrame* f,EdvrNativeTemporal
   // lock-free read of what the last frame boundary left): an owned world is resolved once, in the game's flat
   // image, the layer holds each eye's screen, and an eye shift with no eye pass to resolve it would be a shimmer.
   // While the route owns nothing this is what it always was.
+  // EDVRonFOOT's sharp scope lens (scope_zoom.h; on-foot-scope-sharpness, decision 2): while it is drawn the glass's DLSS gathers S = 1.7
+  // times the eye's pixels and wants about 8 S^2 phases, so the sequence runs 32 (its first eight are the eight's); otherwise exactly as before.
+  const bool longJitter=edvr::scopeZoomWantsLongJitter();
   if(s->currentSettings.on&&!s->standDown&&s->currentSettings.jitter&&!edvr::vrWorldRouteOwnsNextFrame()) for(int e=0;e<2;++e) if(s->width[e]&&s->height[e]&&!s->flipped[e]) {
-    edvr::temporalJitter(s->frameCounter,&jx,&jy); float dx=0,dy=0;
+    if(longJitter) edvr::temporalJitter(s->frameCounter,&jx,&jy,32u); else edvr::temporalJitter(s->frameCounter,&jx,&jy);
+    float dx=0,dy=0;
     edvr::temporalJitterToTangents(jx,jy,s->frusta[e],s->width[e],s->height[e],&dx,&dy);
     out->tangentShift[e][0]=dx;out->tangentShift[e][1]=dy;
     s->shift[e][0]=out->tangentShift[e][0];s->shift[e][1]=out->tangentShift[e][1];

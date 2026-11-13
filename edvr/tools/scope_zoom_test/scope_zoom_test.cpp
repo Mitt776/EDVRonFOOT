@@ -7,6 +7,7 @@
 // game's FOV, one aim's bookkeeping, the summary's gate, the zoom's delay, the sway's correction, and the text of every line. Nothing here touches the clock, the
 // pad, the journal or a file, so --dry-run is the same run as --self-test.
 #include "../../src/d3d11/scope_zoom_core.h"
+#include "../../src/common/temporal_math.h"   // the sharp lens's long jitter (native_temporal.cpp, 32 phases while it is drawn)
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -37,6 +38,11 @@ void partKey() {
     check(parseKey("   ", &valid) == Key::On && !valid, "blanks read on and are flagged");
     check(parseKey("offf", &valid) == Key::On && !valid, "a longer word is not off");
     check(parseKey(nullptr, &valid) == Key::On && valid, "a missing key is on and valid");
+    check(parseKey("basic", &valid) == Key::Basic && valid, "basic is basic (the old lens, temporary)");
+    check(parseKey(" Basic\r\n", &valid) == Key::Basic && valid, "Basic with padding is basic");
+    check(parseKey("basics", &valid) == Key::On && !valid, "a longer word is not basic");
+    check(std::strcmp(keyName(Key::Basic), "basic") == 0 && std::strcmp(keyName(Key::On), "on") == 0 && std::strcmp(keyName(Key::Off), "off") == 0,
+          "the three names");
 }
 
 void partNames() {
@@ -230,7 +236,9 @@ void partLines() {
     formatKey(Key::Off, line, sizeof(line));
     check(std::strcmp(line, "scope zoom: key=off f_ref=56.3 deg") == 0, "the key line, off");
     formatKeyUnknown("preview", line, sizeof(line));
-    check(contains(line, "'preview' is not understood (on, off); reading on"), "the unknown key line");
+    check(contains(line, "'preview' is not understood (on, basic, off); reading on"), "the unknown key line");
+    formatKey(Key::Basic, line, sizeof(line));
+    check(std::strcmp(line, "scope zoom: key=basic f_ref=56.3 deg") == 0, "the key line, basic");
     formatWeapon(kExecutioner, true, "", zoomFor(kExecutioner, ""), line, sizeof(line));
     check(std::strcmp(line, "scope zoom: weapon=wpn_m_sniper_plasma_charged mods=none lens=yes zoom_cap=1.70") == 0, "the weapon line, bare");
     formatWeapon(kExecutioner, true, "weapon_scope", zoomFor(kExecutioner, "weapon_scope"), line, sizeof(line));
@@ -267,12 +275,148 @@ void partLines() {
     s.gpuMsSum = 0.5;
     s.gpuMsMax = 0.08;
     formatSummary(s, line, sizeof(line));
-    check(std::strcmp(line, "scope zoom: summary 60 s aims=4 lens_frames=600 failures=0 weapon=wpn_m_sniper_plasma_charged "
-                            "lens_gpu=0.050 ms avg 0.080 max (10)") == 0,
+    check(std::strcmp(line, "scope zoom: summary 60 s aims=4 lens_frames=600 sharp_frames=0 failures=0 weapon=wpn_m_sniper_plasma_charged "
+                            "lens_gpu=0.050 ms avg 0.080 max (10) sharp_gpu=none") == 0,
           "the summary line");
+    s.sharpFrames = 580;
+    s.sharpSamples = 8;
+    s.sharpMsSum = 2.0;
+    s.sharpMsMax = 0.31;
+    formatSummary(s, line, sizeof(line));
+    check(contains(line, "sharp_frames=580 ") && contains(line, "lens_gpu=0.050 ms avg 0.080 max (10) sharp_gpu=0.250 ms avg 0.310 max (8)"),
+          "the summary line: the glass's DLSS apart from the lens");
     Summary z;
     formatSummary(z, line, sizeof(line));
-    check(contains(line, "aims=0 lens_frames=0 failures=0 weapon=unknown lens_gpu=none"), "the summary with zeros");
+    check(contains(line, "aims=0 lens_frames=0 sharp_frames=0 failures=0 weapon=unknown lens_gpu=none sharp_gpu=none"), "the summary with zeros");
+    // The aim line with its path; without one, as before.
+    e.sharpFrames = 64;
+    formatAim(kExecutioner, e, line, sizeof(line), "sharp");
+    check(std::strcmp(line, "scope zoom: aim weapon=wpn_m_sniper_plasma_charged zoom=1.70 lens_frames=70 held=2150 ms path=sharp sharp_frames=64") == 0,
+          "the aim line with its path");
+    // The path lines.
+    formatPath(choosePath(Key::On, true, true, false, nullptr), line, sizeof(line));
+    check(std::strcmp(line, "scope zoom: lens path=sharp reason=DLSS gathers the glass's area") == 0, "the path line, sharp");
+    formatPath(choosePath(Key::On, false, false, false, nullptr), line, sizeof(line));
+    check(std::strcmp(line, "scope zoom: lens path=basic reason=the anti-aliasing is not DLSS (fix.temporal_aa)") == 0, "the path line, no DLSS");
+    formatPath(choosePath(Key::On, true, true, true, "the glass's DLSS feature would not be created at 120x80"), line, sizeof(line));
+    check(contains(line, "lens path=basic reason=the glass's DLSS feature would not be created at 120x80"), "the path line, a refusal");
+    SharpArea a;
+    a.valid = true; a.w = 232; a.h = 168; a.outW = 394; a.outH = 286; a.s = 1.6985f; a.margin = 10;
+    formatSharpFeature(a, 1.6985f, line, sizeof(line));
+    check(std::strcmp(line, "scope zoom: glass DLSS 232x168 -> 394x286 (S 1.70, zoom cap 1.70, stretched on top 1.00, margin 10 px)") == 0,
+          "the feature line");
+}
+
+// The sharp lens's pure half (on-foot-scope-sharpness, tasks 1.1 and 1.2).
+void partSharp() {
+    const float flight[4] = {-0.8389f, 1.3759f, -1.4278f, 0.9652f};
+    const float mBare = zoomFor(kExecutioner, "").m, mScope = zoomFor(kExecutioner, "weapon_scope").m;
+    check(near(sharpScale(mBare), mBare) && near(sharpScale(mScope), 3.0f) && sharpScale(1.0f) == 0.0f && sharpScale(NAN) == 0.0f,
+          "S: the zoom up to 3, nothing for no zoom or a NaN");
+    check(near(sharpRemainder(4.07f, 3.0f), 1.357f, 0.001f) && near(sharpRemainder(1.70f, 1.70f), 1.0f) && near(sharpRemainder(1.2f, 1.70f), 1.0f),
+          "the remainder: 4.07 / 3 = 1.357 with the Scope mod; nothing at or below S");
+    const Lens l = lensFor(flight, 2448, 2672, kRadiusDeg, 10.0f, 0.0f, glassFor(kExecutioner));
+    const SharpArea a = sharpAreaFor(l, 2448, 2672, mBare);
+    check(a.valid && a.w % kSharpStepPx == 0 && a.h % kSharpStepPx == 0, "the area: whole steps of 8");
+    check(a.outW == uint32_t(std::lround(a.w * a.s)) && a.outH == uint32_t(std::lround(a.h * a.s)) && near(a.s, mBare), "the output: the input times S");
+    bool marginOk = true, uvOk = true;
+    for (int i = 0; i < l.corners; ++i) {
+        const float left = (l.px[i] - a.x) * a.s, right = (a.x + float(a.w) - l.px[i]) * a.s;
+        const float top = (l.py[i] - a.y) * a.s, bottom = (a.y + float(a.h) - l.py[i]) * a.s;
+        if (left < 16.0f || right < 16.0f || top < 16.0f || bottom < 16.0f) marginOk = false;
+        float u = 0, v = 0;
+        sharpUv(a, l.px[i], l.py[i], &u, &v);
+        if (!(u > 0.0f && u < 1.0f && v > 0.0f && v < 1.0f)) uvOk = false;
+    }
+    check(marginOk, "every corner of the glass is inside the area with 16 output pixels to spare");
+    check(uvOk, "every corner of the glass maps inside the gathered image");
+    float u = 0, v = 0;
+    sharpUv(a, l.cx, l.cy, &u, &v);
+    check(u > 0.3f && u < 0.7f && v > 0.3f && v < 0.7f, "the reticle maps near the gathered image's middle");
+    sharpUv(a, a.x + 0.5f * a.w, a.y + 0.5f * a.h, &u, &v);
+    check(near(u, 0.5f) && near(v, 0.5f), "the area's middle is the image's middle");
+    // At full zoom, where the lens samples the corners from: c + (corner - c) / M, inside too.
+    bool srcOk = true;
+    for (int i = 0; i < l.corners; ++i) {
+        sharpUv(a, l.cx + (l.px[i] - l.cx) / mBare, l.cy + (l.py[i] - l.cy) / mBare, &u, &v);
+        if (!(u > 0.0f && u < 1.0f && v > 0.0f && v < 1.0f)) srcOk = false;
+    }
+    check(srcOk, "at full zoom the glass's corners sample inside the image");
+    // The glass moving over the eye (the lag, 1 to 40 px): the same feature, only the corner moves.
+    bool same = true, moved = false;
+    for (float yaw = 0.05f; yaw <= 2.2f; yaw += 0.05f) {
+        const SharpArea b = sharpAreaFor(lensFor(flight, 2448, 2672, kRadiusDeg, 10.0f + yaw * 0.5f, yaw, glassFor(kExecutioner)), 2448, 2672, mBare);
+        if (!sameFeature(a, b)) same = false;
+        if (b.x != a.x) moved = true;
+    }
+    check(same && moved, "a glass moving 1-40 px keeps the feature (the sizes), only the corner moves");
+    float dx = 0, dy = 0;
+    SharpArea b = a;
+    b.x += 7; b.y -= 3;
+    sharpMvShift(b, a, &dx, &dy);
+    check(near(dx, 7.0f) && near(dy, -3.0f), "the motion vectors gain this corner minus the last");
+    // With the Scope mod: S 3, a smaller margin in input pixels.
+    const SharpArea sc = sharpAreaFor(l, 2448, 2672, mScope);
+    check(sc.valid && near(sc.s, 3.0f) && sc.margin == 6 && sc.outW == sc.w * 3 && sc.w <= a.w, "the Scope mod: S 3, margin 6 input px");
+    // At the eye's edge: inside the eye, the size kept, never empty.
+    const float edge[4] = {-0.0001f, 2.0f, -1.0f, 1.0f};
+    const SharpArea e = sharpAreaFor(lensFor(edge, 1000, 1000, kRadiusDeg, 0.0f, 0.0f, glassFor(kExecutioner)), 1000, 1000, mBare);
+    check(e.valid && e.x == 0 && e.x + int(e.w) <= 1000 && e.y >= 0 && e.y + int(e.h) <= 1000, "at the eye's left edge: inside, not empty");
+    const SharpArea tiny = sharpAreaFor(lensFor(flight, 100, 60, kRadiusDeg, 10.0f, 0.0f, glassFor(kExecutioner)), 100, 60, mBare);
+    check(!tiny.valid || (tiny.w <= 100 && tiny.h <= 60 && tiny.x >= 0 && tiny.y >= 0), "an eye smaller than the area: cut to the eye");
+    // No area: no glass, NaN, nothing to magnify, an empty eye.
+    check(!sharpAreaFor(lensFor(flight, 2448, 2672), 2448, 2672, mBare).valid, "the circle (no glass): no area");
+    Lens nan = l;
+    nan.px[2] = NAN;
+    check(!sharpAreaFor(nan, 2448, 2672, mBare).valid, "a NaN corner: no area");
+    check(!sharpAreaFor(l, 2448, 2672, 1.0f).valid && !sharpAreaFor(l, 2448, 2672, NAN).valid, "no zoom or a NaN zoom: no area");
+    check(!sharpAreaFor(l, 0, 2672, mBare).valid && !sharpAreaFor(Lens{}, 2448, 2672, mBare).valid, "an empty eye or no lens: no area");
+    // The path (decisions 4 and 5): every combination.
+    check(choosePath(Key::Off, true, true, false, nullptr).path == LensPath::None, "off: nothing");
+    check(choosePath(Key::Off, false, false, true, "x").path == LensPath::None, "off: nothing, whatever else");
+    PathChoice c = choosePath(Key::Basic, true, true, false, nullptr);
+    check(c.path == LensPath::Basic && !*c.reason, "basic: the old lens, no reason (no line)");
+    check(choosePath(Key::Basic, false, false, true, "x").path == LensPath::Basic, "basic without DLSS: the old lens");
+    check(choosePath(Key::On, true, true, false, nullptr).path == LensPath::Sharp, "on with DLSS gathering the eye: sharp");
+    c = choosePath(Key::On, false, true, false, nullptr);
+    check(c.path == LensPath::Basic && contains(c.reason, "not DLSS"), "on without DLSS: basic, the reason");
+    c = choosePath(Key::On, true, false, false, nullptr);
+    check(c.path == LensPath::Basic && contains(c.reason, "not gathering the aiming eye"), "on, DLSS not on the eye: basic, the reason");
+    c = choosePath(Key::On, true, true, true, "refused");
+    check(c.path == LensPath::Basic && std::strcmp(c.reason, "refused") == 0, "on, the glass's feature refused: basic, its reason");
+    c = choosePath(Key::On, true, true, true, nullptr);
+    check(c.path == LensPath::Basic && *c.reason, "a refusal with no reason still says one");
+}
+
+// The long jitter (decision 2): the eight's phases are the 32's first eight; the plain call is the eight, bit for bit; the 32 are distinct and
+// cover the pixel.
+void partJitter() {
+    bool firstEight = true, plain = true;
+    for (uint32_t n = 0; n < 8; ++n) {
+        float ax, ay, bx, by;
+        edvr::temporalJitter(n, &ax, &ay);
+        edvr::temporalJitter(n, &bx, &by, 32u);
+        if (std::memcmp(&ax, &bx, 4) || std::memcmp(&ay, &by, 4)) firstEight = false;
+    }
+    for (uint32_t n = 0; n < 1000; ++n) {
+        float ax, ay, bx, by;
+        edvr::temporalJitter(n, &ax, &ay);
+        edvr::temporalJitter(n, &bx, &by, edvr::kTemporalJitterCount);
+        if (std::memcmp(&ax, &bx, 4) || std::memcmp(&ay, &by, 4)) plain = false;
+    }
+    check(firstEight, "the 32-phase sequence starts with the eight's phases");
+    check(plain, "without the lens the call is the eight-phase one, bit for bit");
+    int quarter[4] = {};
+    bool distinct = true;
+    float px[32], py[32];
+    for (uint32_t n = 0; n < 32; ++n) {
+        edvr::temporalJitter(n, &px[n], &py[n], 32u);
+        ++quarter[(px[n] >= 0.0f ? 1 : 0) + (py[n] >= 0.0f ? 2 : 0)];
+        for (uint32_t k = 0; k < n; ++k)
+            if (px[k] == px[n] && py[k] == py[n]) distinct = false;
+    }
+    // Base 2 halves x exactly; base 3 does not halve y at 32, so a quarter holds 6 to 10.
+    check(distinct && quarter[0] >= 6 && quarter[1] >= 6 && quarter[2] >= 6 && quarter[3] >= 6, "32 distinct phases, every quarter of the pixel covered");
 }
 }  // namespace
 
@@ -328,6 +472,8 @@ int main(int argc, char** argv) {
     partLens();
     partAim();
     partLines();
+    partSharp();
+    partJitter();
     std::printf("%s: scope_zoom_test, %d checks, %d failed\n", g_failures ? "FAIL" : "PASS", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

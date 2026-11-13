@@ -103,6 +103,11 @@ namespace edvr{bool dlssModeRanges(ID3D11Device*,uint32_t outW,uint32_t outH,Dls
 // before that block is the key-off behaviour the route must leave exactly as it was.
 bool routeOwns=false;bool routeTookEye[2]={false,false};uint64_t routeTookSeq=0;int gapAnswer=0;
 unsigned gapCalls=0,rawClears=0;ID3D11Texture2D* gapFrame=nullptr;
+// EDVRonFOOT's sharp scope lens (src/d3d11/scope_zoom.h): the long jitter only while that lens is drawn; nobody aims here, so never --
+// every case below runs the eight-phase sequence it always ran.
+namespace edvr{
+bool scopeZoomWantsLongJitter(){return false;}
+}
 namespace edvr{
 bool vrWorldRouteOwnsNextFrame(){return routeOwns;}
 // The layer's one predicate for a layer-only eye (src/d3d11/ui_layer.h): the route's re-issued world, or a map's or menu's 2D screen

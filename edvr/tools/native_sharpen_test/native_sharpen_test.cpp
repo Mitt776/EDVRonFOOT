@@ -44,7 +44,7 @@ void temporalPassCaptureFinalEye(uint64_t seq,uint32_t eye,ID3D11Texture2D* text
 }
 void uiLayerDoorSeen(uint64_t seq,uint32_t eye,ID3D11Texture2D*){++doorSeen;doorSeq=seq;doorEye=eye;}
 // EDVRonFOOT's scope zoom lens (src/d3d11/scope_zoom.h): null, as when nobody aims -- the door's contract is unchanged.
-ID3D11Texture2D* scopeZoomLens(uint32_t,ID3D11Texture2D*,const uint32_t region[4],bool,bool){(void)region;return nullptr;}
+ID3D11Texture2D* scopeZoomLens(uint32_t,ID3D11Texture2D*,const uint32_t region[4],bool,bool,float){(void)region;return nullptr;}
 // The layer's one predicate for a layer-only eye (src/d3d11/ui_layer.h): the VR world route's re-issued world or, with
 // the on-foot maps gate, a map's or menu's 2D screen the layer took. The door cannot tell which, and a stub answers for both.
 bool uiLayerDoorLayerOnly(uint32_t eye,uint64_t seq){return eye<2&&layerOnlyEye[eye]&&seq!=0&&layerOnlySeq==seq;}

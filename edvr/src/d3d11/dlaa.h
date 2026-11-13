@@ -216,4 +216,19 @@ bool dlaaFullTotals(int eye, uint32_t* evaluations, double* avgMs, double* maxMs
 
 void dlaaShutdown();
 
+// EDVRonFOOT's sharp scope lens (scope_zoom.h; openspec change on-foot-scope-sharpness): DLSS on the glass's area of one eye, output S times
+// larger. A feature of its OWN -- its own handle, its own key (the input's and the output's sizes and the preset generation), its own history,
+// its own price -- beside the eyes' features, which it never touches; only NGX itself (initialised by dlaaAvailable, its parameter blocks) is
+// shared. The colour and the depth are the eye's own textures, read from (baseX, baseY) on through NVIDIA's subrect bases; the motion vectors
+// are an area-sized texture of their own (the area's move added, scope_zoom_shader.h), read from 0; the jitter is the eye's, in input pixels.
+// `created` says the feature was made on this call (its history starts). False, with its reason, on any refusal; the eye is not touched.
+// Render thread only, after the eye's own evaluation.
+bool dlssAreaEvaluate(ID3D11DeviceContext* ctx, ID3D11Texture2D* colour, ID3D11Texture2D* depth, ID3D11Texture2D* motion,
+                      ID3D11Texture2D* output, uint32_t baseX, uint32_t baseY, uint32_t w, uint32_t h, uint32_t outW, uint32_t outH,
+                      float jx, float jy, bool reset, float frameMs, bool* created, const char** reason);
+// The area feature's price since the last call (timestamp queries, never awaited), then zeroed: for the scope zoom's summary. Any thread.
+void dlssAreaTakePrice(uint32_t* samples, double* sumMs, double* maxMs);
+// Lets the area's feature go (the lens stood down for good, or the key went off). Render thread.
+void dlssAreaRelease();
+
 }  // namespace edvr

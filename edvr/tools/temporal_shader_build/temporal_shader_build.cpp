@@ -315,6 +315,8 @@ static std::vector<Variant> fixedVariants(const std::string& core) {
     variants.insert(variants.end(), sibling.begin(), sibling.end());
     // EDVRonFOOT: the scope zoom's lens (src\d3d11\scope_zoom_shader.h).
     variants.push_back({"kScopeZoomLensBytecode", "scope zoom lens", "main", nullptr, {}, false, edvr::kScopeZoomLensCs});
+    // EDVRonFOOT: the sharp lens's motion vectors for the glass's area (the same header).
+    variants.push_back({"kScopeZoomMvBytecode", "scope zoom area vectors", "main", nullptr, {}, false, edvr::kScopeZoomMvCs});
     return variants;
 }
 
@@ -575,10 +577,13 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 28 && originalExtra.size() == 14 && coreFixed.size() == 64 && coreLegacy.size() + 15 == coreFixed.size(),
-          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two) and the scope zoom's lens are registered");
-    check(!std::strcmp(coreFixed.back().symbol, "kScopeZoomLensBytecode") && compile(compiler.fn, coreFixed.back().alternate, coreFixed.back(), true),
-          "the scope zoom's lens is last and compiles");
+    check(originalCore.size() == 28 && originalExtra.size() == 14 && coreFixed.size() == 65 && coreLegacy.size() + 16 == coreFixed.size(),
+          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the scope zoom's lens and its area's vectors are registered");
+    check(!std::strcmp(coreFixed[coreFixed.size() - 2].symbol, "kScopeZoomLensBytecode") &&
+              compile(compiler.fn, coreFixed[coreFixed.size() - 2].alternate, coreFixed[coreFixed.size() - 2], true),
+          "the scope zoom's lens is second to last and compiles");
+    check(!std::strcmp(coreFixed.back().symbol, "kScopeZoomMvBytecode") && compile(compiler.fn, coreFixed.back().alternate, coreFixed.back(), true),
+          "the scope zoom's area vectors are last and compile");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);

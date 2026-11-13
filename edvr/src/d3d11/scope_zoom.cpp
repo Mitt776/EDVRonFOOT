@@ -10,7 +10,9 @@
 #include "vr_camera_census.h"     // nativeTemporalEyeGeometry: the eye's tangents
 #include "shader_swap.h"
 #include "gpu_timing.h"
-#include "temporal_shader_bytecode.h"   // kScopeZoomLensBytecode (scope_zoom_shader.h, compiled at build time)
+#include "temporal_shader_bytecode.h"   // kScopeZoomLensBytecode, kScopeZoomMvBytecode (scope_zoom_shader.h, compiled at build time)
+#include "dlaa.h"                       // dlssAreaEvaluate: the glass's own DLSS feature
+#include "sharpen_pass.h"               // edvrSharpen: the glass's gathered image, sharpened in slot 2 like the eye
 #include "../common/aim_eye_signal.h"
 #include "../common/config.h"
 #include "../common/guard.h"
@@ -54,6 +56,15 @@ std::atomic<bool> g_inert{false};       // the lens failed: stand down until the
 std::atomic<uint32_t> g_lensFrames{0};
 std::mutex g_inertMutex;
 std::string g_inertReason;
+// The sharp lens (on-foot-scope-sharpness). Set by the frame thread: gather the glass (the key is on and the path is sharp while a lens may
+// be drawn). Set by the door: the lens was drawn on its last call. Set by the temporal pass: when DLSS last gathered the aiming eye 1:1 (tick
+// ms). Set by the temporal pass on a refusal of the glass's feature, cleared by the frame thread on a key change (the reason beside it).
+std::atomic<bool> g_sharpWanted{false};
+std::atomic<bool> g_lensDrawing{false};
+std::atomic<uint64_t> g_eyeGatheredMs{0};
+std::atomic<bool> g_sharpFailed{false};
+std::string g_sharpReason;              // under g_inertMutex
+std::atomic<uint32_t> g_sharpFrames{0}; // lens frames drawn from the gathered image
 
 // ---- the FOV hook (334925; scope-zoom-probe design, decision 5, and the report's "Зонд зума: разведка FOV") ------------------------------------
 constexpr uintptr_t kSlotFov = 0x51887B8, kAdaptor = 0x1031D90, kFovStep = 0x10748D0;
@@ -164,6 +175,14 @@ struct Frame {
     uint32_t failures = 0;
     bool onFoot = false;
     int eye = -1;
+    // The sharp lens: fix.temporal_aa is dlss; the path last said (under on), and the path of the aim in progress.
+    bool dlss = false;
+    bool pathSaid = false;
+    scz::LensPath saidPath = scz::LensPath::None;
+    std::string saidReason;
+    scz::LensPath aimPath = scz::LensPath::None;
+    bool sharpFailCounted = false;
+    uint32_t sharpAtWindow = 0;
 };
 Frame g_f;
 
@@ -239,8 +258,11 @@ void scopeZoomFrameBoundary() {
             if (!f.saidKey || now != f.key) {
                 scz::formatKey(now, line, sizeof(line));
                 say(line);
-                // A new key: the lens may try again, and the once-lines may be said again.
+                // A new key: the lens may try again, and the once-lines may be said again; so may the glass's DLSS.
                 g_inert.store(false, std::memory_order_release);
+                g_sharpFailed.store(false, std::memory_order_release);
+                f.sharpFailCounted = false;
+                f.pathSaid = false;
                 f.inertSaid = false;
                 f.needsEyeSaid = false;
                 f.noWeaponSaid = false;
@@ -251,6 +273,16 @@ void scopeZoomFrameBoundary() {
         f.rawKey = raw;
         f.key = now;
         f.nativeOnFoot = cfg.getBool("experimental.native_vr_on_foot", true);
+        // The sharp lens needs NVIDIA's DLSS as the anti-aliasing (a restart key; read here for the reason's line only -- whether DLSS
+        // actually gathers the eye is the temporal pass's report, g_eyeGatheredMs).
+        {
+            std::string aa = cfg.getString("fix.temporal_aa", "off");
+            for (char& ch : aa) ch = (ch >= 'A' && ch <= 'Z') ? char(ch - 'A' + 'a') : ch;
+            while (!aa.empty() && (aa.back() == ' ' || aa.back() == '\t' || aa.back() == '\r')) aa.pop_back();
+            size_t b = 0;
+            while (b < aa.size() && (aa[b] == ' ' || aa[b] == '\t')) ++b;
+            f.dlss = aa.compare(b, std::string::npos, "dlss") == 0;
+        }
         f.aimEyeKey = oae::parseKey(cfg.getString("experimental.native_vr_on_foot_aim_eye", "right").c_str());
         // The head aim puts the barrel, and so the sights, kPitchOffsetDeg below the head's tilt (head_aim_core.h); without it the barrel
         // follows the stick and the eye's axis is the best guess (flight 13.11: the sights 192 px, 9.8 deg, below the axis with it on).
@@ -261,6 +293,7 @@ void scopeZoomFrameBoundary() {
     g_keyOn.store(f.key != scz::Key::Off, std::memory_order_release);
     if (f.key == scz::Key::Off) {
         g_lensOn.store(false, std::memory_order_release);
+        g_sharpWanted.store(false, std::memory_order_release);
         if (g_fovInstalled || g_fovTried) fovUninstall();
         f.onFoot = false;
         f.aim.active = false;
@@ -272,6 +305,7 @@ void scopeZoomFrameBoundary() {
     const uint64_t now = GetTickCount64();
     if (!onFoot) {
         g_lensOn.store(false, std::memory_order_release);
+        g_sharpWanted.store(false, std::memory_order_release);
         if (f.onFoot) {
             // Off foot: the next disembark says its weapon again.
             f.weaponSaid = false;
@@ -288,6 +322,7 @@ void scopeZoomFrameBoundary() {
             f.windowMs = now;
             f.aimsAtWindow = f.aim.aims;
             f.lensAtWindow = g_lensFrames.load(std::memory_order_relaxed);
+            f.sharpAtWindow = g_sharpFrames.load(std::memory_order_relaxed);
         }
     }
     const bool cinema = !f.nativeOnFoot;
@@ -325,10 +360,11 @@ void scopeZoomFrameBoundary() {
     f.lt = lt;
     // One line per aim, for a weapon with a lens only (an aim of the C-44 is no business of this module's).
     const scz::AimEnd end = scz::stepAim(f.aim, lt && f.zoom.inTable, g_lensFrames.load(std::memory_order_relaxed),
-                                         g_lensM.load(std::memory_order_relaxed), now);
+                                         g_lensM.load(std::memory_order_relaxed), now, g_sharpFrames.load(std::memory_order_relaxed));
     if (end.ended) {
-        scz::formatAim(f.weapon, end, line, sizeof(line));
+        scz::formatAim(f.weapon, end, line, sizeof(line), scz::pathName(f.aimPath));
         say(line);
+        f.aimPath = scz::LensPath::None;
     }
 
     // The dominant eye (the aiming eye publishes it every frame), and the lens's decision.
@@ -351,6 +387,35 @@ void scopeZoomFrameBoundary() {
     g_lensEye.store(f.eye >= 0 ? f.eye : 1, std::memory_order_relaxed);
     g_tableM.store(f.zoom.inTable ? f.zoom.m : 1.0f, std::memory_order_relaxed);
     g_glass.store(glass, std::memory_order_relaxed);
+
+    // The lens's path (on-foot-scope-sharpness, decisions 4 and 5): sharp where DLSS gathers the aiming eye and the glass's own feature has not
+    // been refused, basic otherwise. A line on a change, said while aiming a weapon with a lens under on (basic says nothing: its key line did).
+    {
+        const uint64_t gathered = g_eyeGatheredMs.load(std::memory_order_relaxed);
+        const bool eyeGathered = gathered && now >= gathered && now - gathered < 1000;
+        const bool failed = g_sharpFailed.load(std::memory_order_acquire);
+        std::string failReason;
+        if (failed) {
+            std::lock_guard<std::mutex> lock(g_inertMutex);
+            failReason = g_sharpReason;
+        }
+        if (failed && !f.sharpFailCounted) {
+            f.sharpFailCounted = true;
+            ++f.failures;
+        }
+        const scz::PathChoice pc = scz::choosePath(f.key, f.dlss, eyeGathered, failed, failReason.c_str());
+        g_sharpWanted.store(lens && pc.path == scz::LensPath::Sharp, std::memory_order_release);
+        if (lens && f.lt) {
+            if (f.aim.active && (f.aimPath == scz::LensPath::None || pc.path == scz::LensPath::Basic)) f.aimPath = pc.path;
+            if (f.key == scz::Key::On && (!f.pathSaid || pc.path != f.saidPath || f.saidReason != pc.reason)) {
+                f.pathSaid = true;
+                f.saidPath = pc.path;
+                f.saidReason = pc.reason;
+                scz::formatPath(pc, line, sizeof(line));
+                say(line);
+            }
+        }
+    }
     g_lensOn.store(lens, std::memory_order_release);
 
     // The summary, every 60 s on foot, said only for a window with aims in it.
@@ -364,6 +429,9 @@ void scopeZoomFrameBoundary() {
         s.gpuSamples = g_gpuSamples.exchange(0, std::memory_order_relaxed);
         s.gpuMsSum = double(g_gpuMicroSum.exchange(0, std::memory_order_relaxed)) / 1000.0;
         s.gpuMsMax = double(g_gpuMicroMax.exchange(0, std::memory_order_relaxed)) / 1000.0;
+        const uint32_t sharpFrames = g_sharpFrames.load(std::memory_order_relaxed);
+        s.sharpFrames = sharpFrames - f.sharpAtWindow;
+        dlssAreaTakePrice(&s.sharpSamples, &s.sharpMsSum, &s.sharpMsMax);
         if (s.aims) {
             scz::formatSummary(s, line, sizeof(line));
             say(line);
@@ -371,6 +439,7 @@ void scopeZoomFrameBoundary() {
         f.windowMs = now;
         f.aimsAtWindow = f.aim.aims;
         f.lensAtWindow = lensFrames;
+        f.sharpAtWindow = sharpFrames;
         f.failures = 0;
     }
 }
@@ -401,13 +470,78 @@ struct LensParams {
     int32_t origin[4];
     float texInv[4];
     float corner[scz::kGlassCorners][4];
+    float sharp[4];
 };
-static_assert(sizeof(LensParams) == 208, "thirteen 16-byte rows");
+static_assert(sizeof(LensParams) == 224, "fourteen 16-byte rows");
+
+// The sharp lens's GPU state (the render thread's): the area's vectors pass, the glass's gathered image, and what the door may sample this
+// frame. Made on the first gather, kept while the sizes hold.
+struct SharpGpu {
+    ID3D11Device* owner = nullptr;
+    ID3D11ComputeShader* mvCs = nullptr;
+    bool mvCsTried = false;
+    ID3D11Buffer* mvCb = nullptr;
+    void* mvSrcRes = nullptr;
+    ID3D11ShaderResourceView* mvSrcSrv = nullptr;
+    ID3D11Texture2D* mvTex = nullptr;            // the area's vectors, R16G16_FLOAT, area-sized
+    ID3D11UnorderedAccessView* mvUav = nullptr;
+    uint32_t mvW = 0, mvH = 0;
+    ID3D11Texture2D* out = nullptr;              // the glass's gathered image, R8G8B8A8_UNORM, the area's output size
+    uint32_t outW = 0, outH = 0;
+    void* viewRes = nullptr;                     // the texture the lens's t1 views (the image, or its sharpened copy)
+    ID3D11ShaderResourceView* viewSrv = nullptr;
+    // The history: the last area gathered (its corner for the vectors' shift, its sizes for the feature).
+    bool history = false;
+    scz::SharpArea last;
+    // This frame's gathered image, for the door: the area and the eye's size it was gathered in. Cleared by the door.
+    bool ready = false;
+    scz::SharpArea area;
+    uint32_t eyeW = 0, eyeH = 0;
+};
+SharpGpu g_sharp;
+FaultBudget g_sharpBudget("scopeZoomSharp", 4);
+
+struct MvParams {
+    int32_t area[4];
+    float shift[4];
+    int32_t limit[4];
+};
+static_assert(sizeof(MvParams) == 48, "three 16-byte rows");
 
 template <class T>
 void rel(T*& p) {
     if (p) { p->Release(); p = nullptr; }
 }
+void releaseSharp() {
+    rel(g_sharp.viewSrv);
+    g_sharp.viewRes = nullptr;
+    rel(g_sharp.out);
+    g_sharp.outW = g_sharp.outH = 0;
+    rel(g_sharp.mvUav);
+    rel(g_sharp.mvTex);
+    g_sharp.mvW = g_sharp.mvH = 0;
+    rel(g_sharp.mvSrcSrv);
+    g_sharp.mvSrcRes = nullptr;
+    rel(g_sharp.mvCb);
+    rel(g_sharp.mvCs);
+    g_sharp.mvCsTried = false;
+    g_sharp.history = false;
+    g_sharp.ready = false;
+    rel(g_sharp.owner);
+}
+
+// The glass's DLSS refused or faulted: the lens goes on as basic until the key changes (the frame thread says why, once); the eye is untouched.
+void sharpFail(const char* reason) {
+    {
+        std::lock_guard<std::mutex> lock(g_inertMutex);
+        g_sharpReason = reason ? reason : "the glass's DLSS failed";
+    }
+    g_sharpFailed.store(true, std::memory_order_release);
+    g_sharp.history = false;
+    g_sharp.ready = false;
+    dlssAreaRelease();
+}
+
 void releaseGpu() {
     for (QuerySlot& q : g_qring) { q.timer.reset(); q.inUse = false; }
     rel(g_gpu.srcSrv);
@@ -475,7 +609,7 @@ int acquireTimer(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     return -1;
 }
 
-ID3D11Texture2D* lensInner(ID3D11Texture2D* src, const uint32_t region[4], bool flipU, bool flipV) {
+ID3D11Texture2D* lensInner(ID3D11Texture2D* src, const uint32_t region[4], bool flipU, bool flipV, float sharpness) {
     D3D11_TEXTURE2D_DESC sd{};
     src->GetDesc(&sd);
     if (sd.SampleDesc.Count != 1 || sd.ArraySize != 1 || sd.MipLevels != 1) { fail("the eye is a multisampled, array or mipped texture"); return nullptr; }
@@ -489,6 +623,11 @@ ID3D11Texture2D* lensInner(ID3D11Texture2D* src, const uint32_t region[4], bool 
     if (!(sd.BindFlags & D3D11_BIND_SHADER_RESOURCE)) { fail("the eye refuses a shader view"); return nullptr; }
     if (region[2] <= region[0] || region[3] <= region[1] || region[2] > sd.Width || region[3] > sd.Height) { fail("the eye's region is not usable"); return nullptr; }
     const uint32_t w = region[2] - region[0], h = region[3] - region[1];
+    // This frame's gathered glass, taken once: valid only for an unmirrored eye of the size it was gathered in (the DLAA eye is the door's
+    // eye pixel for pixel then: the temporal pass never treats a mirrored eye, and 1:1 keeps the size).
+    const bool sharpReady = g_sharp.ready && !flipU && !flipV && g_sharp.eyeW == w && g_sharp.eyeH == h && g_sharp.out;
+    const scz::SharpArea sharpArea = g_sharp.area;
+    g_sharp.ready = false;
 
     float tans[4] = {};
     bool known = false;
@@ -595,7 +734,39 @@ ID3D11Texture2D* lensInner(ID3D11Texture2D* src, const uint32_t region[4], bool 
             g_gpu.outFmt = sd.Format;
         }
 
+        // The gathered glass, sharpened with the eye's strength (sharpen_pass slot 2) so the glass and the world around it match; a refusal of
+        // the sharpening leaves the image as gathered. Viewed at t1.
+        bool useSharp = false;
+        if (sharpReady) {
+            ID3D11Texture2D* img = g_sharp.out;
+            if (sharpness > 0.0f) {
+                if (void* raw = edvrSharpen(g_sharp.out, 2, nullptr, sharpness)) img = static_cast<ID3D11Texture2D*>(raw);
+            }
+            if (g_sharp.viewRes != static_cast<void*>(img) || !g_sharp.viewSrv) {
+                rel(g_sharp.viewSrv);
+                g_sharp.viewRes = nullptr;
+                D3D11_TEXTURE2D_DESC idesc{};
+                img->GetDesc(&idesc);
+                D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+                vd.Format = viewFormatOf(idesc.Format);
+                vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+                vd.Texture2D.MipLevels = 1;
+                if (vd.Format != DXGI_FORMAT_UNKNOWN && SUCCEEDED(dev->CreateShaderResourceView(img, &vd, &g_sharp.viewSrv)) && g_sharp.viewSrv)
+                    g_sharp.viewRes = img;
+                else
+                    rel(g_sharp.viewSrv);
+            }
+            useSharp = g_sharp.viewSrv != nullptr;
+        }
+
         LensParams p{};
+        if (useSharp) {
+            p.params[3] = 1.0f;
+            p.sharp[0] = float(sharpArea.x);
+            p.sharp[1] = float(sharpArea.y);
+            p.sharp[2] = 1.0f / float(sharpArea.w);
+            p.sharp[3] = 1.0f / float(sharpArea.h);
+        }
         p.centreRadius[0] = l.cx;
         p.centreRadius[1] = l.cy;
         p.centreRadius[2] = l.rx;
@@ -628,37 +799,40 @@ ID3D11Texture2D* lensInner(ID3D11Texture2D* src, const uint32_t region[4], bool 
 
         // The compute stage is saved and put back around the dispatch, as the sharpener does.
         ID3D11ComputeShader* savedCs = nullptr;
-        ID3D11ShaderResourceView* savedSrv = nullptr;
+        ID3D11ShaderResourceView* savedSrv[2] = {};
         ID3D11UnorderedAccessView* savedUav = nullptr;
         ID3D11Buffer* savedCb = nullptr;
         ID3D11SamplerState* savedSampler = nullptr;
         ctx->CSGetShader(&savedCs, nullptr, nullptr);
-        ctx->CSGetShaderResources(0, 1, &savedSrv);
+        ctx->CSGetShaderResources(0, 2, savedSrv);
         ctx->CSGetUnorderedAccessViews(0, 1, &savedUav);
         ctx->CSGetConstantBuffers(0, 1, &savedCb);
         ctx->CSGetSamplers(0, 1, &savedSampler);
         ctx->CSSetShader(g_gpu.cs, nullptr, 0);
         ctx->CSSetConstantBuffers(0, 1, &g_gpu.cb);
         ctx->CSSetSamplers(0, 1, &g_gpu.sampler);
-        ctx->CSSetShaderResources(0, 1, &g_gpu.srcSrv);
+        ID3D11ShaderResourceView* srvs[2] = {g_gpu.srcSrv, useSharp ? g_sharp.viewSrv : nullptr};
+        ctx->CSSetShaderResources(0, 2, srvs);
         ctx->CSSetUnorderedAccessViews(0, 1, &g_gpu.outUav, nullptr);
         ctx->Dispatch(UINT(l.x1 - l.x0 + 7) / 8, UINT(l.y1 - l.y0 + 7) / 8, 1);
-        ID3D11ShaderResourceView* nullSrv = nullptr;
+        ID3D11ShaderResourceView* nullSrv[2] = {};
         ID3D11UnorderedAccessView* nullUav = nullptr;
-        ctx->CSSetShaderResources(0, 1, &nullSrv);
+        ctx->CSSetShaderResources(0, 2, nullSrv);
         ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
         ctx->CSSetShader(savedCs, nullptr, 0);
-        ctx->CSSetShaderResources(0, 1, &savedSrv);
+        ctx->CSSetShaderResources(0, 2, savedSrv);
         ctx->CSSetUnorderedAccessViews(0, 1, &savedUav, nullptr);
         ctx->CSSetConstantBuffers(0, 1, &savedCb);
         ctx->CSSetSamplers(0, 1, &savedSampler);
         rel(savedCs);
-        rel(savedSrv);
+        rel(savedSrv[0]);
+        rel(savedSrv[1]);
         rel(savedUav);
         rel(savedCb);
         rel(savedSampler);
         if (qs >= 0) g_qring[qs].timer.end(ctx);
         g_lensFrames.fetch_add(1, std::memory_order_relaxed);
+        if (useSharp) g_sharpFrames.fetch_add(1, std::memory_order_relaxed);
         result = g_gpu.out;
     } while (false);
     ctx->Release();
@@ -666,18 +840,203 @@ ID3D11Texture2D* lensInner(ID3D11Texture2D* src, const uint32_t region[4], bool 
     return result;
 }
 
+// The glass's gather (the temporal pass, right after the aiming eye's DLAA): the area from this moment's lens (sharpAreaFor), the eye's vectors
+// shifted by the area's move into the area's own texture, then the glass's DLSS feature into the gathered image. A refusal goes to sharpFail.
+void gatherInner(ID3D11DeviceContext* ctx, ID3D11Texture2D* colour, ID3D11Texture2D* depth, ID3D11Texture2D* motion, uint32_t w, uint32_t h,
+                 float jx, float jy, bool reset, float frameMs) {
+    float tans[4] = {};
+    bool known = false;
+    {
+        std::lock_guard<std::mutex> lock(g_tanMutex);
+        known = g_tansKnown;
+        std::memcpy(tans, g_tans, sizeof(tans));
+    }
+    if (!known) return;   // the door's lens says so, once
+    const scz::Lens l = lensNow(tans, w, h);
+    const float mFull = g_tableM.load(std::memory_order_relaxed);
+    const scz::SharpArea area = scz::sharpAreaFor(l, w, h, mFull);
+    if (!area.valid) { g_sharp.history = false; return; }   // no glass this moment: nothing to gather, not a failure
+
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (!dev) { sharpFail("the eye's context has no device"); return; }
+    if (g_sharp.owner != dev) {
+        releaseSharp();
+        dlssAreaRelease();
+        g_sharp.owner = dev;
+        dev->AddRef();
+    }
+    do {
+        if (!g_sharp.mvCs && !g_sharp.mvCsTried) {
+            g_sharp.mvCsTried = true;
+            g_sharp.mvCs = shaderSwapCreateCs(ctx, kScopeZoomMvBytecode, sizeof(kScopeZoomMvBytecode), "scope_zoom_mv_cs", "scope zoom area vectors");
+        }
+        if (!g_sharp.mvCs) { sharpFail("the glass's vectors shader could not be created"); break; }
+        if (!g_sharp.mvCb) {
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = sizeof(MvParams);
+            bd.Usage = D3D11_USAGE_DYNAMIC;
+            bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            if (FAILED(dev->CreateBuffer(&bd, nullptr, &g_sharp.mvCb)) || !g_sharp.mvCb) { sharpFail("the glass's vectors buffer could not be created"); break; }
+        }
+        if (g_sharp.mvSrcRes != static_cast<void*>(motion) || !g_sharp.mvSrcSrv) {
+            rel(g_sharp.mvSrcSrv);
+            g_sharp.mvSrcRes = nullptr;
+            D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+            vd.Format = DXGI_FORMAT_R16G16_FLOAT;
+            vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            vd.Texture2D.MipLevels = 1;
+            if (FAILED(dev->CreateShaderResourceView(motion, &vd, &g_sharp.mvSrcSrv)) || !g_sharp.mvSrcSrv) {
+                sharpFail("the eye's motion vectors refuse a shader view");
+                break;
+            }
+            g_sharp.mvSrcRes = motion;
+        }
+        if (!g_sharp.mvTex || g_sharp.mvW != area.w || g_sharp.mvH != area.h) {
+            rel(g_sharp.mvUav);
+            rel(g_sharp.mvTex);
+            D3D11_TEXTURE2D_DESC td{};
+            td.Width = area.w;
+            td.Height = area.h;
+            td.MipLevels = 1;
+            td.ArraySize = 1;
+            td.Format = DXGI_FORMAT_R16G16_FLOAT;
+            td.SampleDesc.Count = 1;
+            td.Usage = D3D11_USAGE_DEFAULT;
+            td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+            if (FAILED(dev->CreateTexture2D(&td, nullptr, &g_sharp.mvTex)) || !g_sharp.mvTex ||
+                FAILED(dev->CreateUnorderedAccessView(g_sharp.mvTex, nullptr, &g_sharp.mvUav)) || !g_sharp.mvUav) {
+                rel(g_sharp.mvUav);
+                rel(g_sharp.mvTex);
+                sharpFail("the glass's vectors texture could not be created");
+                break;
+            }
+            g_sharp.mvW = area.w;
+            g_sharp.mvH = area.h;
+        }
+        if (!g_sharp.out || g_sharp.outW != area.outW || g_sharp.outH != area.outH) {
+            rel(g_sharp.viewSrv);
+            g_sharp.viewRes = nullptr;
+            rel(g_sharp.out);
+            D3D11_TEXTURE2D_DESC td{};
+            td.Width = area.outW;
+            td.Height = area.outH;
+            td.MipLevels = 1;
+            td.ArraySize = 1;
+            td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;   // the eyes' DLAA output's format (dlaa.h)
+            td.SampleDesc.Count = 1;
+            td.Usage = D3D11_USAGE_DEFAULT;
+            td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+            if (FAILED(dev->CreateTexture2D(&td, nullptr, &g_sharp.out)) || !g_sharp.out) {
+                rel(g_sharp.out);
+                sharpFail("the glass's gathered image could not be created");
+                break;
+            }
+            g_sharp.outW = area.outW;
+            g_sharp.outH = area.outH;
+        }
+        // The history holds while the feature does; a move of the area is the vectors' shift.
+        const bool fresh = reset || !g_sharp.history || !scz::sameFeature(area, g_sharp.last);
+        float dx = 0.0f, dy = 0.0f;
+        if (!fresh) scz::sharpMvShift(area, g_sharp.last, &dx, &dy);
+        D3D11_TEXTURE2D_DESC md{};
+        motion->GetDesc(&md);
+        MvParams mp{};
+        mp.area[0] = area.x; mp.area[1] = area.y; mp.area[2] = int32_t(area.w); mp.area[3] = int32_t(area.h);
+        mp.shift[0] = dx; mp.shift[1] = dy;
+        mp.limit[0] = int32_t(md.Width); mp.limit[1] = int32_t(md.Height);
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if (FAILED(ctx->Map(g_sharp.mvCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)) || !mapped.pData) { sharpFail("the glass's vectors buffer would not map"); break; }
+        std::memcpy(mapped.pData, &mp, sizeof(mp));
+        ctx->Unmap(g_sharp.mvCb, 0);
+        {
+            ID3D11ComputeShader* savedCs = nullptr;
+            ID3D11ShaderResourceView* savedSrv = nullptr;
+            ID3D11UnorderedAccessView* savedUav = nullptr;
+            ID3D11Buffer* savedCb = nullptr;
+            ctx->CSGetShader(&savedCs, nullptr, nullptr);
+            ctx->CSGetShaderResources(0, 1, &savedSrv);
+            ctx->CSGetUnorderedAccessViews(0, 1, &savedUav);
+            ctx->CSGetConstantBuffers(0, 1, &savedCb);
+            ctx->CSSetShader(g_sharp.mvCs, nullptr, 0);
+            ctx->CSSetConstantBuffers(0, 1, &g_sharp.mvCb);
+            ctx->CSSetShaderResources(0, 1, &g_sharp.mvSrcSrv);
+            ctx->CSSetUnorderedAccessViews(0, 1, &g_sharp.mvUav, nullptr);
+            ctx->Dispatch((area.w + 7) / 8, (area.h + 7) / 8, 1);
+            ID3D11ShaderResourceView* nullSrv = nullptr;
+            ID3D11UnorderedAccessView* nullUav = nullptr;
+            ctx->CSSetShaderResources(0, 1, &nullSrv);
+            ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
+            ctx->CSSetShader(savedCs, nullptr, 0);
+            ctx->CSSetShaderResources(0, 1, &savedSrv);
+            ctx->CSSetUnorderedAccessViews(0, 1, &savedUav, nullptr);
+            ctx->CSSetConstantBuffers(0, 1, &savedCb);
+            rel(savedCs);
+            rel(savedSrv);
+            rel(savedUav);
+            rel(savedCb);
+        }
+        bool created = false;
+        const char* why = nullptr;
+        if (!dlssAreaEvaluate(ctx, colour, depth, g_sharp.mvTex, g_sharp.out, uint32_t(area.x), uint32_t(area.y), area.w, area.h, area.outW,
+                              area.outH, jx, jy, fresh, frameMs, &created, &why)) {
+            sharpFail(why);
+            break;
+        }
+        if (created) {
+            char line[240];
+            scz::formatSharpFeature(area, mFull, line, sizeof(line));
+            say(line);
+        }
+        g_sharp.last = area;
+        g_sharp.history = true;
+        g_sharp.area = area;
+        g_sharp.eyeW = w;
+        g_sharp.eyeH = h;
+        g_sharp.ready = true;
+    } while (false);
+    dev->Release();
+}
+
 }  // namespace
 
-ID3D11Texture2D* scopeZoomLens(uint32_t eye, ID3D11Texture2D* src, const uint32_t region[4], bool flipU, bool flipV) {
-    if (!g_lensOn.load(std::memory_order_acquire)) return nullptr;
-    if (!src || !region || int(eye) != g_lensEye.load(std::memory_order_relaxed)) return nullptr;
-    if (g_inert.load(std::memory_order_acquire)) return nullptr;
-    ID3D11Texture2D* out = nullptr;
-    if (!guardedBudget(g_lensBudget, [&] { out = lensInner(src, region, flipU, flipV); })) {
-        fail("the lens faulted");
+ID3D11Texture2D* scopeZoomLens(uint32_t eye, ID3D11Texture2D* src, const uint32_t region[4], bool flipU, bool flipV, float sharpness) {
+    if (!g_lensOn.load(std::memory_order_acquire)) {
+        g_lensDrawing.store(false, std::memory_order_relaxed);
         return nullptr;
     }
+    if (!src || !region || int(eye) != g_lensEye.load(std::memory_order_relaxed)) return nullptr;
+    if (g_inert.load(std::memory_order_acquire)) {
+        g_lensDrawing.store(false, std::memory_order_relaxed);
+        return nullptr;
+    }
+    ID3D11Texture2D* out = nullptr;
+    if (!guardedBudget(g_lensBudget, [&] { out = lensInner(src, region, flipU, flipV, sharpness); })) {
+        fail("the lens faulted");
+        out = nullptr;
+    }
+    g_lensDrawing.store(out != nullptr, std::memory_order_relaxed);
     return out;
+}
+
+void scopeZoomGatherGlass(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour, ID3D11Texture2D* depth, ID3D11Texture2D* motion,
+                          uint32_t w, uint32_t h, uint32_t outW, uint32_t outH, float jx, float jy, bool reset, float frameMs) {
+    if (!g_keyOn.load(std::memory_order_acquire)) return;
+    if (eye != g_lensEye.load(std::memory_order_relaxed) || !w || !h || outW != w || outH != h) return;
+    // DLSS gathered the aiming eye 1:1: the path's choice may be sharp.
+    g_eyeGatheredMs.store(GetTickCount64(), std::memory_order_relaxed);
+    g_sharp.ready = false;
+    if (!g_sharpWanted.load(std::memory_order_acquire) || !g_lensDrawing.load(std::memory_order_relaxed) ||
+        g_sharpFailed.load(std::memory_order_acquire) || g_inert.load(std::memory_order_acquire) || !ctx || !colour || !depth || !motion) {
+        g_sharp.history = false;   // the next gather starts the glass's history again
+        return;
+    }
+    if (!guardedBudget(g_sharpBudget, [&] { gatherInner(ctx, colour, depth, motion, w, h, jx, jy, reset, frameMs); })) sharpFail("the glass's DLSS faulted");
+}
+
+bool scopeZoomWantsLongJitter() {
+    return g_sharpWanted.load(std::memory_order_relaxed) && g_lensDrawing.load(std::memory_order_relaxed);
 }
 
 }  // namespace edvr
