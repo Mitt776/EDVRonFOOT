@@ -2,7 +2,7 @@
 // The on-foot scope zoom, the pure half (EDVRonFOOT; experimental.native_vr_on_foot_scope_zoom; openspec change on-foot-scope-zoom, and
 // scope_zoom.h for the glue). Everything here is plain C++ the rig (tools\scope_zoom_test) drives directly: the key's reading, the zoom table,
 // the weapon names out of Status.json and the journal's loadout, the aiming centre and the glass from the eye's tangents, the zoom from the game's
-// FOV, the aim's and the summary's bookkeeping, the recording's crop, and the text of every line.
+// FOV, the aim's and the summary's bookkeeping, the zoom's delay, the sway's correction, and the text of every line.
 //
 // WHAT IT IS FOR. In the flat game and in the cinema the game narrows its field of view while a weapon aims (LT); in stereo the lenses fix the
 // field of view and the game cannot narrow it, so a scope shows the world 1:1. The lens puts the zoom back where it belongs: in the dominant eye
@@ -147,6 +147,45 @@ inline float rampedM(float m, float blend) {
     if (!(m >= 1.0f)) m = 1.0f;
     return 1.0f + (m - 1.0f) * blend;
 }
+
+// The zoom held back until the glass is at the eye (design, decision 4). Flight 1 of on-foot-scope-zoom (13.11, three PAUSE recordings): the game's
+// FOV is full 385-410 ms after LT, the Executioner's glass lands 237-277 ms later. The lens takes the smaller of the zoom now and the zoom D ago, so
+// on the way up it runs D late and on the way down it follows the FOV at once (a magnified glass on a weapon going away looks worse than a zoom
+// gone a moment early). A gap in the samples (the lens was not asked for a while) starts the history again, so an old aim's zoom never comes back;
+// until a sample D old exists the zoom is 1.
+constexpr double kZoomDelayMs = 260.0;
+constexpr double kZoomGapMs = 100.0;
+struct ZoomDelay {
+    static constexpr int kN = 128;   // 1.7 s at 75 samples a second, past D with room
+    double t[kN] = {};
+    float m[kN] = {};
+    int head = 0, count = 0;         // the newest sample is at head - 1
+};
+inline float delayedZoom(ZoomDelay& z, float m, double nowMs, double delayMs = kZoomDelayMs) {
+    if (!(m >= 1.0f)) m = 1.0f;
+    if (z.count > 0) {
+        const double last = z.t[(z.head + ZoomDelay::kN - 1) % ZoomDelay::kN];
+        if (!(nowMs >= last) || nowMs - last > kZoomGapMs) z.count = 0;
+    }
+    z.t[z.head] = nowMs;
+    z.m[z.head] = m;
+    z.head = (z.head + 1) % ZoomDelay::kN;
+    if (z.count < ZoomDelay::kN) ++z.count;
+    // The newest sample at or before now - D.
+    const double want = nowMs - delayMs;
+    float then = 1.0f;
+    for (int i = 1; i <= z.count; ++i) {
+        const int k = (z.head + ZoomDelay::kN - i) % ZoomDelay::kN;
+        if (z.t[k] <= want) { then = z.m[k]; break; }
+    }
+    return then < m ? then : m;
+}
+
+// The Executioner's glass swings further than the barrel's lag in a head turn and lifts with it: the game's own weapon sway (design, decision 5).
+// Flight 1 (13.11, recording 224709, turns up to 50 degrees a second, lag up to 5.9 degrees): the glass moved 0.157 of a tangent more per tangent of
+// yaw lag than the lens, and 0.137 of a tangent up; with both the error left is 5 px (sd) of 26.
+constexpr float kLagYawGain = 1.157f;   // the lens's yaw tangent per tangent of the barrel's yaw lag
+constexpr float kLagYawLift = -0.137f;  // the lens's down tangent per tangent of the barrel's yaw lag (negative: up as the lag grows right)
 
 // ---- the journal's loadout --------------------------------------------------------------------------------------------------------------------
 // SuitLoadout lists the loadout's modules ({"SlotName":"PrimaryWeapon1", "ModuleName":"wpn_...", "WeaponMods":["weapon_scope", ...]} each);
@@ -323,8 +362,10 @@ inline Lens lensFor(const float tans[4], uint32_t w, uint32_t h, float radiusDeg
         !(yawRightDeg > -60.0f && yawRightDeg < 60.0f))
         return o;
     const float sx = float(w) / (L + R), sy = float(h) / (U + D);   // pixels per tangent
-    const float bx = sx * (L + std::tan(degToRad(yawRightDeg)));
-    const float by = sy * (U + std::tan(degToRad(pitchDownDeg)));
+    // yawRightDeg is the barrel's lag alone (the head aim has no yaw offset), so the sway's correction rides on it (kLagYawGain, kLagYawLift).
+    const float yawTan = std::tan(degToRad(yawRightDeg));
+    const float bx = sx * (L + kLagYawGain * yawTan);
+    const float by = sy * (U + std::tan(degToRad(pitchDownDeg)) + kLagYawLift * yawTan);
     auto clampi = [](float v, int lo, int hi) { int i = int(std::floor(v)); return i < lo ? lo : i > hi ? hi : i; };
     float minX, maxX, minY, maxY;
     if (glass) {
@@ -419,58 +460,6 @@ inline AimEnd stepAim(Aim& a, bool lt, uint32_t lensFrames, float drawnM, uint64
 // ---- the summary's gate -----------------------------------------------------------------------------------------------------------------------
 // A window is closed every kSummaryMs; it is said only when aims were begun in it.
 inline bool summaryDue(uint64_t windowMs, uint64_t nowMs) { return nowMs - windowMs >= kSummaryMs; }
-
-// ---- the recording (TEMPORARY: build 1 of on-foot-scope-zoom only, design decision 3) -------------------------------------------------------------
-// PAUSE on foot at on arms kRecordMs of frames: a line of numbers each frame and a kCropPx square crop of the dominant eye at the door's input,
-// around the aiming centre (the head aim's offset, no lag, so the crop stands still while the glass moves in it).
-constexpr uint64_t kRecordMs = 1500;
-constexpr int kCropPx = 768;
-// The crop's first pixel: the centre minus half, clamped into the region; false when the region is smaller than the crop.
-inline bool cropOrigin(float cx, float cy, uint32_t w, uint32_t h, int size, int* x0, int* y0) {
-    if (size <= 0 || w < uint32_t(size) || h < uint32_t(size) || !std::isfinite(cx) || !std::isfinite(cy)) return false;
-    int x = int(std::floor(cx)) - size / 2, y = int(std::floor(cy)) - size / 2;
-    x = x < 0 ? 0 : x > int(w) - size ? int(w) - size : x;
-    y = y < 0 ? 0 : y > int(h) - size ? int(h) - size : y;
-    *x0 = x;
-    *y0 = y;
-    return true;
-}
-// One frame's numbers. The angles in degrees, the rates in degrees a second, the pixels in the region's own coordinates.
-struct RecordFrame {
-    uint32_t n = 0;              // the frame's number in the recording
-    double tMs = 0;              // since the recording began
-    double ltMs = -1;            // since LT was pressed; -1 while it is up
-    float fovDeg = 0;            // the game's camera FOV as last read
-    float m = 1;                 // the zoom the lens takes from it (1: no lens)
-    bool lens = false;           // the lens is drawn this frame
-    float lagYawDeg = 0, lagPitchDeg = 0;          // the barrel's lag the lens takes (the last latch's)
-    uint64_t latchLast = 0, latchCam = 0;          // the last latch's number and the one the game's camera last copied
-    bool camLagKnown = false;
-    float camLagYawDeg = 0, camLagPitchDeg = 0;    // the lag of the camera's latch
-    float yawRateDps = 0, pitchRateDps = 0;        // the head's angular speed at the last latch
-    float cx = 0, cy = 0;                          // the lens's centre (the reticle), region pixels
-    int cropX = 0, cropY = 0;                      // the crop's first pixel, region pixels
-    int crop = -1;                                 // the crop's file number, -1: no crop this frame
-};
-inline int formatRecordFrame(const RecordFrame& r, char* out, size_t cap) {
-    char cam[48];
-    if (r.camLagKnown) std::snprintf(cam, sizeof(cam), "%.3f,%.3f", double(r.camLagYawDeg), double(r.camLagPitchDeg));
-    else std::snprintf(cam, sizeof(cam), "na,na");
-    return std::snprintf(out, cap,
-                         "scope zoom rec,n=%u,t=%.1f,lt=%.1f,fov=%.3f,m=%.4f,lens=%d,lag=%.3f,%.3f,latch=%llu,cam_latch=%llu,cam_lag=%s,"
-                         "rate=%.1f,%.1f,centre=%.1f,%.1f,crop_at=%d,%d,crop=%d",
-                         r.n, r.tMs, r.ltMs, double(r.fovDeg), double(r.m), r.lens ? 1 : 0, double(r.lagYawDeg), double(r.lagPitchDeg),
-                         (unsigned long long)r.latchLast, (unsigned long long)r.latchCam, cam, double(r.yawRateDps), double(r.pitchRateDps),
-                         double(r.cx), double(r.cy), r.cropX, r.cropY, r.crop);
-}
-inline int formatRecordBegin(const char* dir, const char* eyeName, uint32_t w, uint32_t h, int format, bool flipU, bool flipV, char* out,
-                             size_t cap) {
-    return std::snprintf(out, cap, "scope zoom: recording begun (%llu ms) eye=%s region=%ux%u format=%d flip=%d,%d crops=%dx%d into %s",
-                         (unsigned long long)kRecordMs, eyeName, w, h, format, flipU ? 1 : 0, flipV ? 1 : 0, kCropPx, kCropPx, dir ? dir : "?");
-}
-inline int formatRecordEnd(uint32_t frames, uint32_t crops, uint32_t skipped, char* out, size_t cap) {
-    return std::snprintf(out, cap, "scope zoom: recording ended: %u frames, %u crops, %u skipped", frames, crops, skipped);
-}
 
 // ---- the lines --------------------------------------------------------------------------------------------------------------------------------
 inline int formatKey(Key k, char* out, size_t cap) {

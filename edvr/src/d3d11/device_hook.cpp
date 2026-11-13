@@ -85,7 +85,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "vram_tick.h"       // vramWatchTick: the graphics memory watch, once per owned Present
 #include "vertex_resync_hook.h"   // vertexResyncInstall at startup, vertexResyncPoll once a second: the f3d vertex-buffer cache repair (both profiles)
 #include "head_aim.h"   // EDVRonFOOT: headAimInstall at startup, headAimFrameBoundary each frame (on-foot head aim)
-#include "scope_zoom.h"   // EDVRonFOOT: the scope zoom's frame boundary and (build 1 only) its PAUSE recording
+#include "scope_zoom.h"   // EDVRonFOOT: the scope zoom's frame boundary
 #include "terrain_cull_cover_hook.h"   // terrainCullCoverInstall at startup, terrainCullCoverPoll once a second: the terrain cull frustum cover (VR)
 #include "frame_ticks.h"     // g_frameTicks: what the Present hook's own work cost, by name
 #include "boundary_tick.h"   // one fault budget per frame-boundary tick
@@ -1257,14 +1257,9 @@ void tickHotkeys() {
     // its recovery behind it. The pair is the point -- the first is the
     // reaction-time capture, the second is the one you read.
     if (g_state->dumpKey.pressed()) {
-        // EDVRonFOOT: on foot with the scope zoom on, PAUSE is its recording (scope_zoom.h; TEMPORARY, build 1 of on-foot-scope-zoom), and
-        // only that: the camera and temporal history dumps below write megabytes a press, and on 13.11 they and the census filled the 16 MB
-        // log in six presses. At off, or off foot, PAUSE is what it always was.
-        if (!scopeZoomOnPause()) {
-            dumpCameraRing("the history key");
-            temporalPassDumpHistory("the history key");
-            g_state->dumpDueMs = nowMs() + kDumpDelayMs;
-        }
+        dumpCameraRing("the history key");
+        temporalPassDumpHistory("the history key");
+        g_state->dumpDueMs = nowMs() + kDumpDelayMs;
     }
     // THE PRESS THAT WENT NOWHERE, said out loud.
     //

@@ -3142,7 +3142,7 @@ REM EDVRonFOOT: build gate for the on-foot scope zoom (src\d3d11\scope_zoom_core
 REM openspec change on-foot-scope-zoom). Drives the pure half: the key's reading (on, off, the probe's census and preview, empty, junk), the
 REM weapon names, the zoom table (the Executioner capped at 1.70 bare and 4.07 with the Scope mod; the C-44, the pistol and fists without a
 REM lens), the journal's loadout lines, the aiming centre and the glass from the eye's tangents, the zoom from the game's FOV, the aim's and
-REM the summary's bookkeeping, the recording's crop, and every line's text.
+REM the summary's bookkeeping, the zoom's delay behind the FOV (260 ms up, at once down), the weapon sway's correction, and every line's text.
 if not exist "%OBJ%\scopezoom" mkdir "%OBJ%\scopezoom"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\scopezoom"\ /Fe"%BUILD%\scope_zoom_test.exe" ^

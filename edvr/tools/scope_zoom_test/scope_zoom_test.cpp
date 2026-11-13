@@ -4,7 +4,7 @@
 // Drives the pure half: the key's reading (on, off, the probe's census and preview, empty, junk, case and padding), the weapon names out of
 // Status.json and the journal, the zoom table (the Executioner capped at about 1.70 without the Scope mod and about 4.07 with it; the C-44, the
 // pistol and the fists without a lens), the journal's loadout lines, the aiming centre and the glass from the eye's tangents, the zoom from the
-// game's FOV, one aim's bookkeeping, the summary's gate, the recording's crop, and the text of every line. Nothing here touches the clock, the
+// game's FOV, one aim's bookkeeping, the summary's gate, the zoom's delay, the sway's correction, and the text of every line. Nothing here touches the clock, the
 // pad, the journal or a file, so --dry-run is the same run as --self-test.
 #include "../../src/d3d11/scope_zoom_core.h"
 #include <cmath>
@@ -173,13 +173,23 @@ void partLens() {
     check(glassFor("wpn_m_assaultrifle_kinetic_fauto") == nullptr && glassFor("wpn_s_pistol_plasma_charged") == nullptr &&
               glassFor("humanoid_fists") == nullptr && glassFor(nullptr) == nullptr,
           "only the Executioner has a glass (the C-44, the pistol and the fists none)");
-    // The barrel's lag in a turn moves the whole lens with it: 2 degrees right and 1 down.
+    // The barrel's lag in a turn moves the whole lens with it: 2 degrees right and 1 down, the yaw with the game's sway on top (kLagYawGain,
+    // kLagYawLift: further and up).
     const Lens still = l;
     l = lensFor(flight, 2448, 2672, kRadiusDeg, 11.0f, 2.0f, glassFor(kExecutioner));
-    const float dx = std::tan(degToRad(2.0f)) * 2448.0f / 2.2148f;
-    const float dy = (std::tan(degToRad(11.0f)) - std::tan(degToRad(10.0f))) * 2672.0f / 2.393f;
+    const float sx = 2448.0f / 2.2148f, sy = 2672.0f / 2.393f;
+    const float dx = kLagYawGain * std::tan(degToRad(2.0f)) * sx;
+    const float dy = (std::tan(degToRad(11.0f)) - std::tan(degToRad(10.0f)) + kLagYawLift * std::tan(degToRad(2.0f))) * sy;
     check(near(l.cx - still.cx, dx, 0.5f) && near(l.cy - still.cy, dy, 0.5f) && near(l.px[3] - still.px[3], dx, 0.5f),
-          "a lag of 2 degrees right and 1 down moves the zoom and the glass by its tangents");
+          "a lag of 2 degrees right and 1 down moves the zoom and the glass by its tangents, the yaw with the sway");
+    // Flight 1's turn: a yaw lag of 5 degrees right moves the lens 16% further than the lag alone and about 13 px up; 5 left, the mirror.
+    const Lens r5 = lensFor(flight, 2448, 2672, kRadiusDeg, 10.0f, 5.0f, glassFor(kExecutioner));
+    const Lens l5 = lensFor(flight, 2448, 2672, kRadiusDeg, 10.0f, -5.0f, glassFor(kExecutioner));
+    const float bare = std::tan(degToRad(5.0f)) * sx;
+    check(near((r5.cx - still.cx) / bare, 1.157f, 0.01f) && r5.cy < still.cy - 10.0f && r5.cy > still.cy - 16.0f,
+          "5 degrees of yaw lag right: the lens 16% further right and 10-16 px up");
+    check(near(l5.cx - still.cx, -(r5.cx - still.cx), 0.01f) && near(l5.cy - still.cy, -(r5.cy - still.cy), 0.01f),
+          "5 degrees left: the mirror (left and down)");
     check(!lensFor(flight, 2448, 2672, kRadiusDeg, 10.0f, 70.0f, nullptr).valid, "an absurd yaw: no lens");
     // The centre at the edge: clipped, never out of the region, never empty.
     const float edge[4] = {-0.0001f, 2.0f, -1.0f, 1.0f};
@@ -211,48 +221,6 @@ void partAim() {
     e = stepAim(a, false, 30, 1.70f, 2100);
     check(e.ended && e.lensFrames == 0 && near(e.peakM, 1.0f) && a.aims == 2, "an aim with no lens frame: zoom 1");
     check(!summaryDue(1000, 60999) && summaryDue(1000, 61000), "the summary every 60 s");
-}
-
-void partRecord() {
-    int x = -1, y = -1;
-    check(cropOrigin(947.0f, 1271.0f, 2448, 2672, kCropPx, &x, &y) && x == 947 - 384 && y == 1271 - 384, "the crop around the centre");
-    check(cropOrigin(100.0f, 2600.0f, 2448, 2672, kCropPx, &x, &y) && x == 0 && y == 2672 - 768, "the crop clamped into the region");
-    check(!cropOrigin(500.0f, 500.0f, 700, 2000, kCropPx, &x, &y), "a region narrower than the crop: none");
-    check(!cropOrigin(NAN, 500.0f, 2448, 2672, kCropPx, &x, &y), "a NaN centre: none");
-    char line[512];
-    RecordFrame r;
-    r.n = 3;
-    r.tMs = 41.25;
-    r.ltMs = 170.0;
-    r.fovDeg = 50.5f;
-    r.m = 1.15f;
-    r.lens = true;
-    r.lagYawDeg = 0.25f;
-    r.lagPitchDeg = -0.1f;
-    r.latchLast = 1201;
-    r.latchCam = 1200;
-    r.camLagKnown = true;
-    r.camLagYawDeg = 0.2f;
-    r.camLagPitchDeg = -0.05f;
-    r.yawRateDps = 45.0f;
-    r.pitchRateDps = -2.0f;
-    r.cx = 947.5f;
-    r.cy = 1271.0f;
-    r.cropX = 563;
-    r.cropY = 887;
-    r.crop = 3;
-    formatRecordFrame(r, line, sizeof(line));
-    check(std::strcmp(line, "scope zoom rec,n=3,t=41.2,lt=170.0,fov=50.500,m=1.1500,lens=1,lag=0.250,-0.100,latch=1201,cam_latch=1200,"
-                            "cam_lag=0.200,-0.050,rate=45.0,-2.0,centre=947.5,1271.0,crop_at=563,887,crop=3") == 0,
-          "the recording's frame line");
-    r.camLagKnown = false;
-    r.crop = -1;
-    formatRecordFrame(r, line, sizeof(line));
-    check(contains(line, "cam_lag=na,na") && contains(line, "crop=-1"), "the frame line without the camera's lag and without a crop");
-    formatRecordBegin("D:\\logs\\scope_zoom\\201538", "right", 2448, 2672, 24, false, false, line, sizeof(line));
-    check(contains(line, "recording begun (1500 ms) eye=right region=2448x2672 format=24 flip=0,0 crops=768x768 into D:"), "the begin line");
-    formatRecordEnd(54, 52, 2, line, sizeof(line));
-    check(std::strcmp(line, "scope zoom: recording ended: 54 frames, 52 crops, 2 skipped") == 0, "the end line");
 }
 
 void partLines() {
@@ -308,6 +276,44 @@ void partLines() {
 }
 }  // namespace
 
+namespace {
+// The zoom held back D on the way up, at once on the way down (design, decision 4): flight 1's curve, the FOV's zoom from 1 at 135 ms to 1.70 at
+// 400 ms after LT, sampled every 13 ms.
+float riseZoom(double t) { return t <= 135.0 ? 1.0f : t >= 400.0 ? 1.70f : float(1.0 + 0.70 * (t - 135.0) / 265.0); }
+void partDelay() {
+    check(near(float(kZoomDelayMs), 260.0f, 0.01f), "D is 260 ms (flight 1)");
+    ZoomDelay z;
+    bool zeroUntilD = true, neverAbove = true;
+    float at660 = 0.0f, at390 = 0.0f;
+    double t = 0.0;
+    for (; t <= 1300.0; t += 13.0) {
+        const float now = riseZoom(t);
+        const float d = delayedZoom(z, now, t);
+        if (t < 135.0 + kZoomDelayMs - 13.0 && d > 1.0f) zeroUntilD = false;
+        if (d > now + 1e-6f) neverAbove = false;
+        if (t >= 390.0 && at390 == 0.0f) at390 = d;
+        if (t >= 400.0 + kZoomDelayMs + 13.0 && at660 == 0.0f) at660 = d;   // the FOV full plus D, a frame's sampling later
+    }
+    check(zeroUntilD, "no zoom until the FOV's first narrowing plus D");
+    check(neverAbove, "never more zoom than the game's FOV gives");
+    check(near(at390, riseZoom(390.0 - kZoomDelayMs), 0.03f) && at390 < 1.2f, "on the way up it is the FOV's zoom D ago");
+    check(near(at660, 1.70f, 0.001f), "full at the FOV's full plus D");
+    // LT let go: the FOV widens and the zoom follows the same frame.
+    check(near(delayedZoom(z, 1.40f, t), 1.40f, 0.001f) && near(delayedZoom(z, 1.0f, t + 13.0), 1.0f, 0.001f), "on the way down at once");
+    // A gap (the lens not asked for 200 ms): the old aim's zoom does not come back.
+    ZoomDelay g;
+    for (double s = 0.0; s <= 800.0; s += 13.0) delayedZoom(g, 1.70f, s);
+    check(near(delayedZoom(g, 1.70f, 1000.0), 1.0f, 0.001f) && near(delayedZoom(g, 1.70f, 1013.0), 1.0f, 0.001f),
+          "after a gap the history starts again: 1 until D has passed");
+    float late = 0.0f;
+    for (double s = 1026.0; s <= 1300.0; s += 13.0) late = delayedZoom(g, 1.70f, s);
+    check(near(late, 1.70f, 0.001f), "and full once D has passed");
+    // A clock that goes back starts the history again too; a NaN zoom reads as 1.
+    check(near(delayedZoom(g, 1.70f, 500.0), 1.0f, 0.001f), "a clock going back: the history starts again");
+    check(near(delayedZoom(g, NAN, 513.0), 1.0f, 0.001f), "a NaN zoom is 1");
+}
+}  // namespace
+
 int main(int argc, char** argv) {
     if (argc < 2 || (std::strcmp(argv[1], "--self-test") != 0 && std::strcmp(argv[1], "--dry-run") != 0)) {
         std::printf("usage: scope_zoom_test --self-test | --dry-run (the pure half only; --dry-run writes nothing, as does --self-test)\n");
@@ -317,10 +323,10 @@ int main(int argc, char** argv) {
     partNames();
     partZoom();
     partRamp();
+    partDelay();
     partLoadout();
     partLens();
     partAim();
-    partRecord();
     partLines();
     std::printf("%s: scope_zoom_test, %d checks, %d failed\n", g_failures ? "FAIL" : "PASS", g_checks, g_failures);
     return g_failures ? 1 : 0;

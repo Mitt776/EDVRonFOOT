@@ -1,10 +1,10 @@
-// The on-foot scope zoom: the frame thread's lines, the read-only FOV hook, the lens, and (TEMPORARY, build 1 of on-foot-scope-zoom) the PAUSE
-// recording (scope_zoom.h says what and why; scope_zoom_core.h is the pure half).
+// The on-foot scope zoom: the frame thread's lines, the read-only FOV hook, and the lens (scope_zoom.h says what and why;
+// scope_zoom_core.h is the pure half).
 #include "scope_zoom.h"
 #include "scope_zoom_core.h"
 #include "on_foot_aim_eye_core.h"
 #include "head_aim_core.h"        // kPitchOffsetDeg: where the sights sit below the eye's axis
-#include "head_aim.h"             // headAimSightLag: the barrel's lag behind the head in a turn; headAimRecordSample: the recording's numbers
+#include "head_aim.h"             // headAimSightLag: the barrel's lag behind the head in a turn
 #include "journal_watch.h"
 #include "xinput_watch.h"
 #include "vr_camera_census.h"     // nativeTemporalEyeGeometry: the eye's tangents
@@ -22,11 +22,8 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
-#include <memory>
 #include <mutex>
 #include <string>
-#include <thread>
-#include <vector>
 
 namespace edvr {
 
@@ -49,7 +46,6 @@ std::atomic<float> g_lensM{1.0f};       // the M the door last drew (from the ga
 std::atomic<float> g_tableM{1.0f};      // the table's M for the weapon in hand: the cap on the M the game's FOV gives
 std::atomic<const scz::Glass*> g_glass{nullptr};   // the weapon's glass, or null
 std::atomic<float> g_pitchDownDeg{0.0f};   // how far below the eye's axis the sights sit: the head aim's pitch offset while it is on
-std::atomic<double> g_ltDownMs{0.0};    // qpcMs() at the LT press while LT is held, 0 while it is up (the recording's clock)
 std::mutex g_tanMutex;                  // the dominant eye's tangents, as the frame thread last read them
 float g_tans[4] = {};
 bool g_tansKnown = false;
@@ -58,9 +54,6 @@ std::atomic<bool> g_inert{false};       // the lens failed: stand down until the
 std::atomic<uint32_t> g_lensFrames{0};
 std::mutex g_inertMutex;
 std::string g_inertReason;
-// The recording (TEMPORARY, build 1): armed by PAUSE on the frame thread, run by the door.
-std::atomic<bool> g_recArm{false};
-std::atomic<bool> g_recRunning{false};
 
 // ---- the FOV hook (334925; scope-zoom-probe design, decision 5, and the report's "Зонд зума: разведка FOV") ------------------------------------
 constexpr uintptr_t kSlotFov = 0x51887B8, kAdaptor = 0x1031D90, kFovStep = 0x10748D0;
@@ -206,13 +199,11 @@ void readTangents(int eye) {
     if (ok) std::memcpy(g_tans, fr, sizeof(g_tans));
 }
 
-const char* eyeName(int eye) { return eye == 0 ? "left" : eye == 1 ? "right" : "none"; }
 
 // The lens's geometry this moment: the sights at the head aim's offset plus its lag (head_aim.h headAimSightLag), the weapon's glass.
-// `withLag` false: the offset alone (the recording's still crop).
-scz::Lens lensNow(const float tans[4], uint32_t w, uint32_t h, bool withLag = true) {
+scz::Lens lensNow(const float tans[4], uint32_t w, uint32_t h) {
     float lagYaw = 0.0f, lagPitch = 0.0f;
-    if (withLag && g_pitchDownDeg.load(std::memory_order_relaxed) != 0.0f) headAimSightLag(&lagYaw, &lagPitch);
+    if (g_pitchDownDeg.load(std::memory_order_relaxed) != 0.0f) headAimSightLag(&lagYaw, &lagPitch);
     return scz::lensFor(tans, w, h, scz::kRadiusDeg, g_pitchDownDeg.load(std::memory_order_relaxed) + scz::radToDeg(lagPitch),
                         scz::radToDeg(lagYaw), g_glass.load(std::memory_order_relaxed));
 }
@@ -225,6 +216,9 @@ float fovNowRad() {
 }
 // The zoom the game is at now, capped at the table's (1 when the FOV is not known or not narrowed).
 float zoomNow() { return scz::zoomFromFov(fovNowRad(), g_tableM.load(std::memory_order_relaxed)); }
+// The zoom the lens draws: the game's, held back on the way up until the glass is at the eye (scz::delayedZoom). The render thread's only.
+scz::ZoomDelay g_zoomDelay;
+float lensZoomNow() { return scz::delayedZoom(g_zoomDelay, zoomNow(), qpcMs()); }
 
 }  // namespace
 
@@ -267,8 +261,6 @@ void scopeZoomFrameBoundary() {
     g_keyOn.store(f.key != scz::Key::Off, std::memory_order_release);
     if (f.key == scz::Key::Off) {
         g_lensOn.store(false, std::memory_order_release);
-        g_recArm.store(false, std::memory_order_relaxed);
-        g_ltDownMs.store(0.0, std::memory_order_relaxed);
         if (g_fovInstalled || g_fovTried) fovUninstall();
         f.onFoot = false;
         f.aim.active = false;
@@ -280,7 +272,6 @@ void scopeZoomFrameBoundary() {
     const uint64_t now = GetTickCount64();
     if (!onFoot) {
         g_lensOn.store(false, std::memory_order_release);
-        g_ltDownMs.store(0.0, std::memory_order_relaxed);
         if (f.onFoot) {
             // Off foot: the next disembark says its weapon again.
             f.weaponSaid = false;
@@ -325,14 +316,12 @@ void scopeZoomFrameBoundary() {
         f.zoom = scz::Zoom{};
     }
 
-    // LT: the aim's edges, and the recording's clock.
+    // LT: the aim's edges.
     xinputWatchTick();
     XinputBinding ltBinding;
     ltBinding.trigger = 1;   // the left trigger: HumanoidZoomButton on this pad
     ltBinding.valid = true;
     const bool lt = xinputHeld(ltBinding);
-    if (lt && !f.lt) g_ltDownMs.store(qpcMs(), std::memory_order_relaxed);
-    if (!lt) g_ltDownMs.store(0.0, std::memory_order_relaxed);
     f.lt = lt;
     // One line per aim, for a weapon with a lens only (an aim of the C-44 is no business of this module's).
     const scz::AimEnd end = scz::stepAim(f.aim, lt && f.zoom.inTable, g_lensFrames.load(std::memory_order_relaxed),
@@ -383,363 +372,6 @@ void scopeZoomFrameBoundary() {
         f.aimsAtWindow = f.aim.aims;
         f.lensAtWindow = lensFrames;
         f.failures = 0;
-    }
-}
-
-bool scopeZoomOnPause() {
-    const Frame& f = g_f;
-    if (f.key == scz::Key::Off || !f.onFoot) return false;
-    if (g_recRunning.load(std::memory_order_acquire) || g_recArm.load(std::memory_order_relaxed)) {
-        say("scope zoom: PAUSE ignored: a recording is already under way");
-        return true;
-    }
-    g_recArm.store(true, std::memory_order_release);
-    say("scope zoom: recording armed (PAUSE); it begins at the dominant eye's next frame");
-    return true;
-}
-
-// ---- the recording (TEMPORARY, build 1 of on-foot-scope-zoom; the render thread, in native_sharpen's door) ---------------------------------------
-namespace {
-
-constexpr int kRecRing = 4;            // staging copies in flight
-constexpr uint32_t kRecMapAfter = 3;   // frames before a copy is asked for without waiting
-constexpr uint32_t kRecGiveUp = 8;     // frames after which a copy still not ready is dropped
-
-struct RecSlot {
-    ID3D11Texture2D* tex = nullptr;
-    bool busy = false;
-    uint32_t frame = 0;   // the recording frame it holds
-};
-struct RecCrop {
-    uint32_t no = 0;
-    std::vector<uint8_t> bgr;   // bottom-up BMP rows, kCropPx wide, 24 bits
-};
-struct Rec {
-    bool running = false;
-    double startMs = 0;
-    uint32_t frames = 0, crops = 0, skipped = 0;
-    std::wstring dir;
-    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
-    ID3D11Device* dev = nullptr;
-    RecSlot ring[kRecRing];
-    int cropX = 0, cropY = 0;
-    bool cropOk = false;
-    std::vector<std::unique_ptr<RecCrop>> done;
-    std::vector<std::string> lines;
-};
-Rec g_rec;
-
-float halfToFloat(uint16_t h) {
-    const uint32_t s = (h >> 15) & 1u, e = (h >> 10) & 0x1Fu, m = h & 0x3FFu;
-    float v;
-    if (e == 0) v = float(m) / 1024.0f * 6.103515625e-5f;
-    else if (e == 31) v = m ? 0.0f : 65504.0f;
-    else v = (1.0f + float(m) / 1024.0f) * std::pow(2.0f, float(e) - 15.0f);
-    return s ? -v : v;
-}
-uint8_t toByte(float v, bool linear) {
-    if (!(v > 0.0f)) v = 0.0f;
-    if (v > 1.0f) v = 1.0f;
-    if (linear) v = v <= 0.0031308f ? 12.92f * v : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
-    return uint8_t(v * 255.0f + 0.5f);
-}
-// One mapped crop into BMP rows; false for a format it does not read (the lens's own list).
-bool convertCrop(const D3D11_MAPPED_SUBRESOURCE& ms, DXGI_FORMAT fmt, std::vector<uint8_t>& out) {
-    const uint32_t n = uint32_t(scz::kCropPx), rowBytes = (n * 3u + 3u) & ~3u;
-    out.assign(size_t(rowBytes) * n, 0);
-    for (uint32_t y = 0; y < n; ++y) {
-        const uint8_t* src = static_cast<const uint8_t*>(ms.pData) + size_t(y) * ms.RowPitch;
-        uint8_t* dst = out.data() + size_t(n - 1u - y) * rowBytes;
-        for (uint32_t x = 0; x < n; ++x) {
-            float r = 0, g = 0, b = 0;
-            bool linear = false;
-            switch (fmt) {
-                case DXGI_FORMAT_R8G8B8A8_TYPELESS:
-                case DXGI_FORMAT_R8G8B8A8_UNORM: r = src[x * 4] / 255.0f; g = src[x * 4 + 1] / 255.0f; b = src[x * 4 + 2] / 255.0f; break;
-                case DXGI_FORMAT_B8G8R8A8_TYPELESS:
-                case DXGI_FORMAT_B8G8R8A8_UNORM: b = src[x * 4] / 255.0f; g = src[x * 4 + 1] / 255.0f; r = src[x * 4 + 2] / 255.0f; break;
-                case DXGI_FORMAT_R10G10B10A2_TYPELESS:
-                case DXGI_FORMAT_R10G10B10A2_UNORM: {
-                    uint32_t v = 0;
-                    std::memcpy(&v, src + x * 4, 4);
-                    r = float(v & 1023u) / 1023.0f;
-                    g = float((v >> 10) & 1023u) / 1023.0f;
-                    b = float((v >> 20) & 1023u) / 1023.0f;
-                    break;
-                }
-                case DXGI_FORMAT_R16G16B16A16_TYPELESS:
-                case DXGI_FORMAT_R16G16B16A16_FLOAT: {
-                    uint16_t hv[3];
-                    std::memcpy(hv, src + x * 8, 6);
-                    r = halfToFloat(hv[0]); g = halfToFloat(hv[1]); b = halfToFloat(hv[2]);
-                    linear = true;
-                    break;
-                }
-                case DXGI_FORMAT_R16G16B16A16_UNORM: {
-                    uint16_t hv[3];
-                    std::memcpy(hv, src + x * 8, 6);
-                    r = hv[0] / 65535.0f; g = hv[1] / 65535.0f; b = hv[2] / 65535.0f;
-                    break;
-                }
-                default: return false;
-            }
-            dst[x * 3 + 0] = toByte(b, linear);
-            dst[x * 3 + 1] = toByte(g, linear);
-            dst[x * 3 + 2] = toByte(r, linear);
-        }
-    }
-    return true;
-}
-
-bool writeBmp(const std::wstring& path, const std::vector<uint8_t>& rows) {
-    const uint32_t n = uint32_t(scz::kCropPx), bytes = uint32_t(rows.size());
-    HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (f == INVALID_HANDLE_VALUE) return false;
-    BITMAPFILEHEADER fh{};
-    BITMAPINFOHEADER ih{};
-    fh.bfType = 0x4D42;
-    fh.bfOffBits = sizeof(fh) + sizeof(ih);
-    fh.bfSize = fh.bfOffBits + bytes;
-    ih.biSize = sizeof(ih);
-    ih.biWidth = LONG(n);
-    ih.biHeight = LONG(n);
-    ih.biPlanes = 1;
-    ih.biBitCount = 24;
-    ih.biCompression = BI_RGB;
-    ih.biSizeImage = bytes;
-    DWORD wrote = 0;
-    bool ok = WriteFile(f, &fh, sizeof(fh), &wrote, nullptr) != 0;
-    if (ok) ok = WriteFile(f, &ih, sizeof(ih), &wrote, nullptr) != 0;
-    if (ok) ok = WriteFile(f, rows.data(), bytes, &wrote, nullptr) != 0;
-    CloseHandle(f);
-    return ok;
-}
-
-void recRelease() {
-    for (RecSlot& s : g_rec.ring) {
-        if (s.tex) s.tex->Release();
-        s = RecSlot{};
-    }
-    if (g_rec.dev) g_rec.dev->Release();
-    g_rec.dev = nullptr;
-}
-
-// The end: the line, then the files on a thread of their own (the door never writes a file).
-void recFinish() {
-    char line[300];
-    scz::formatRecordEnd(g_rec.frames, g_rec.crops, g_rec.skipped, line, sizeof(line));
-    say(line);
-    recRelease();
-    auto crops = std::make_shared<std::vector<std::unique_ptr<RecCrop>>>(std::move(g_rec.done));
-    auto lines = std::make_shared<std::vector<std::string>>(std::move(g_rec.lines));
-    const std::wstring dir = g_rec.dir;
-    g_rec.done.clear();
-    g_rec.lines.clear();
-    g_rec.running = false;
-    g_recRunning.store(false, std::memory_order_release);
-    try {
-        std::thread([crops, lines, dir] {
-            uint32_t written = 0;
-            for (const auto& c : *crops) {
-                wchar_t name[64];
-                _snwprintf_s(name, 64, _TRUNCATE, L"\\crop_%03u.bmp", c->no);
-                if (writeBmp(dir + name, c->bgr)) ++written;
-            }
-            const std::wstring txt = dir + L"\\frames.txt";
-            if (FILE* f = _wfopen(txt.c_str(), L"wb")) {
-                for (const std::string& l : *lines) std::fprintf(f, "%s\n", l.c_str());
-                std::fclose(f);
-            }
-            Log::get().note("scope zoom: recording written: %u of %u crops and frames.txt into %ls", written, unsigned(crops->size()), dir.c_str());
-        }).detach();
-    } catch (...) {
-        say("scope zoom: recording NOT written: the writer thread would not start");
-    }
-}
-
-// Asks the copies in flight for their pixels, never waiting.
-void recPoll(ID3D11DeviceContext* ctx) {
-    for (RecSlot& s : g_rec.ring) {
-        if (!s.busy || g_rec.frames - s.frame < kRecMapAfter) continue;
-        D3D11_MAPPED_SUBRESOURCE ms{};
-        const HRESULT hr = ctx->Map(s.tex, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &ms);
-        if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
-            if (g_rec.frames - s.frame >= kRecGiveUp) { s.busy = false; ++g_rec.skipped; }
-            continue;
-        }
-        if (FAILED(hr) || !ms.pData) { s.busy = false; ++g_rec.skipped; continue; }
-        auto c = std::make_unique<RecCrop>();
-        c->no = s.frame;
-        const bool ok = convertCrop(ms, g_rec.format, c->bgr);
-        ctx->Unmap(s.tex, 0);
-        s.busy = false;
-        if (ok) { g_rec.done.push_back(std::move(c)); ++g_rec.crops; }
-        else ++g_rec.skipped;
-    }
-}
-
-void recBegin(ID3D11Texture2D* src, const uint32_t region[4], bool flipU, bool flipV, int eye) {
-    char line[400];
-    D3D11_TEXTURE2D_DESC sd{};
-    src->GetDesc(&sd);
-    const uint32_t w = region[2] - region[0], h = region[3] - region[1];
-    float tans[4] = {};
-    bool known = false;
-    {
-        std::lock_guard<std::mutex> lock(g_tanMutex);
-        known = g_tansKnown;
-        std::memcpy(tans, g_tans, sizeof(tans));
-    }
-    // The crop stands still around the aiming centre without the lag: the head aim's offset, the glass's reticle when a weapon has one.
-    const scz::Lens still = known ? lensNow(tans, w, h, false) : scz::Lens{};
-    const float cx = still.valid ? still.cx : 0.5f * float(w), cy = still.valid ? still.cy : 0.5f * float(h);
-    g_rec = Rec{};
-    if (!scz::cropOrigin(cx, cy, w, h, scz::kCropPx, &g_rec.cropX, &g_rec.cropY)) {
-        say("scope zoom: recording not begun: the eye is smaller than the crop");
-        return;
-    }
-    src->GetDevice(&g_rec.dev);
-    if (!g_rec.dev) { say("scope zoom: recording not begun: the eye has no device"); return; }
-    D3D11_TEXTURE2D_DESC td{};
-    td.Width = td.Height = UINT(scz::kCropPx);
-    td.MipLevels = 1;
-    td.ArraySize = 1;
-    td.Format = sd.Format;
-    td.SampleDesc.Count = 1;
-    td.Usage = D3D11_USAGE_STAGING;
-    td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    for (RecSlot& s : g_rec.ring) {
-        if (FAILED(g_rec.dev->CreateTexture2D(&td, nullptr, &s.tex)) || !s.tex) {
-            recRelease();
-            say("scope zoom: recording not begun: the staging copies could not be created");
-            return;
-        }
-    }
-    SYSTEMTIME stm{};
-    GetLocalTime(&stm);
-    wchar_t stamp[16];
-    _snwprintf_s(stamp, 16, _TRUNCATE, L"%02u%02u%02u", unsigned(stm.wHour), unsigned(stm.wMinute), unsigned(stm.wSecond));
-    const std::wstring root = Log::get().dir() + L"\\scope_zoom";
-    CreateDirectoryW(root.c_str(), nullptr);
-    g_rec.dir = root + L"\\" + stamp;
-    CreateDirectoryW(g_rec.dir.c_str(), nullptr);
-    g_rec.format = sd.Format;
-    g_rec.cropOk = true;
-    g_rec.running = true;
-    g_rec.startMs = qpcMs();
-    g_rec.lines.reserve(80);
-    g_recRunning.store(true, std::memory_order_release);
-    char dirUtf8[MAX_PATH * 2] = {};
-    WideCharToMultiByte(CP_UTF8, 0, g_rec.dir.c_str(), -1, dirUtf8, int(sizeof(dirUtf8)), nullptr, nullptr);
-    scz::formatRecordBegin(dirUtf8, eyeName(eye), w, h, int(sd.Format), flipU, flipV, line, sizeof(line));
-    say(line);
-    std::snprintf(line, sizeof(line), "region=%ux%u format=%d flip=%d,%d crop_at=%d,%d crop=%d", w, h, int(sd.Format), flipU ? 1 : 0, flipV ? 1 : 0,
-                  g_rec.cropX, g_rec.cropY, scz::kCropPx);
-    g_rec.lines.emplace_back(line);
-}
-
-void recFrame(ID3D11Texture2D* src, const uint32_t region[4], bool flipU, bool flipV) {
-    ID3D11DeviceContext* ctx = nullptr;
-    g_rec.dev->GetImmediateContext(&ctx);
-    if (!ctx) { recFinish(); return; }
-    recPoll(ctx);
-    const double now = qpcMs();
-    const double t = now - g_rec.startMs;
-    if (t < double(scz::kRecordMs)) {
-        const uint32_t w = region[2] - region[0], h = region[3] - region[1];
-        scz::RecordFrame r;
-        r.n = g_rec.frames;
-        r.tMs = t;
-        const double lt = g_ltDownMs.load(std::memory_order_relaxed);
-        r.ltMs = lt > 0.0 ? now - lt : -1.0;
-        const float fov = fovNowRad();
-        r.fovDeg = std::isfinite(fov) ? scz::radToDeg(fov) : 0.0f;
-        r.m = zoomNow();
-        r.lens = g_lensOn.load(std::memory_order_relaxed) && r.m > scz::kLensMinM;
-        float lagYaw = 0.0f, lagPitch = 0.0f;
-        if (g_pitchDownDeg.load(std::memory_order_relaxed) != 0.0f) headAimSightLag(&lagYaw, &lagPitch);
-        r.lagYawDeg = scz::radToDeg(lagYaw);
-        r.lagPitchDeg = scz::radToDeg(lagPitch);
-        HeadAimRecord ha{};
-        headAimRecordSample(&ha);
-        r.latchLast = ha.latchLast;
-        r.latchCam = ha.latchCam;
-        r.camLagKnown = ha.camLagKnown;
-        r.camLagYawDeg = scz::radToDeg(ha.camLagYawRad);
-        r.camLagPitchDeg = scz::radToDeg(ha.camLagPitchRad);
-        r.yawRateDps = scz::radToDeg(ha.yawRateRad);
-        r.pitchRateDps = scz::radToDeg(ha.pitchRateRad);
-        float tans[4] = {};
-        bool known = false;
-        {
-            std::lock_guard<std::mutex> lock(g_tanMutex);
-            known = g_tansKnown;
-            std::memcpy(tans, g_tans, sizeof(tans));
-        }
-        const scz::Lens l = known ? lensNow(tans, w, h) : scz::Lens{};
-        r.cx = l.valid ? l.cx : -1.0f;
-        r.cy = l.valid ? l.cy : -1.0f;
-        r.cropX = g_rec.cropX;
-        r.cropY = g_rec.cropY;
-        // The crop: a free staging copy, or a skip (all in flight).
-        RecSlot* slot = nullptr;
-        for (RecSlot& s : g_rec.ring)
-            if (!s.busy) { slot = &s; break; }
-        if (slot) {
-            // A mirrored region holds the crop mirrored; the box is taken where the mirror puts it (the line's flip says so).
-            const int x = flipU ? int(w) - g_rec.cropX - scz::kCropPx : g_rec.cropX;
-            const int y = flipV ? int(h) - g_rec.cropY - scz::kCropPx : g_rec.cropY;
-            D3D11_BOX box{};
-            box.left = region[0] + UINT(x);
-            box.top = region[1] + UINT(y);
-            box.right = box.left + UINT(scz::kCropPx);
-            box.bottom = box.top + UINT(scz::kCropPx);
-            box.front = 0;
-            box.back = 1;
-            ctx->CopySubresourceRegion(slot->tex, 0, 0, 0, 0, src, 0, &box);
-            slot->busy = true;
-            slot->frame = g_rec.frames;
-            r.crop = int(g_rec.frames);
-        } else {
-            ++g_rec.skipped;
-        }
-        char line[400];
-        scz::formatRecordFrame(r, line, sizeof(line));
-        say(line);
-        g_rec.lines.emplace_back(line);
-        ++g_rec.frames;
-    } else {
-        // Past the end: only the copies in flight are waited for (they age out by kRecGiveUp), then the files.
-        ++g_rec.frames;
-        bool busy = false;
-        for (const RecSlot& s : g_rec.ring) busy = busy || s.busy;
-        if (!busy) recFinish();
-    }
-    ctx->Release();
-}
-
-}  // namespace
-
-void scopeZoomRecord(uint32_t eye, ID3D11Texture2D* src, const uint32_t region[4], bool flipU, bool flipV) {
-    if (!g_recArm.load(std::memory_order_acquire) && !g_rec.running) return;
-    if (!src || !region || int(eye) != g_lensEye.load(std::memory_order_relaxed)) return;
-    if (region[2] <= region[0] || region[3] <= region[1]) return;
-    const bool ran = guarded("scope zoom/recording", [&] {
-        if (!g_rec.running) {
-            if (!g_recArm.exchange(false, std::memory_order_acq_rel)) return;
-            if (!g_keyOn.load(std::memory_order_acquire)) return;
-            recBegin(src, region, flipU, flipV, int(eye));
-            if (!g_rec.running) return;
-        }
-        D3D11_TEXTURE2D_DESC sd{};
-        src->GetDesc(&sd);
-        if (sd.Format != g_rec.format) { say("scope zoom: recording cut short: the eye's format changed"); recFinish(); return; }
-        recFrame(src, region, flipU, flipV);
-    });
-    if (!ran) {
-        g_rec.running = false;
-        g_recRunning.store(false, std::memory_order_release);
-        say("scope zoom: recording faulted and was dropped");
     }
 }
 
@@ -866,8 +498,8 @@ ID3D11Texture2D* lensInner(ID3D11Texture2D* src, const uint32_t region[4], bool 
         std::memcpy(tans, g_tans, sizeof(tans));
     }
     if (!known) { fail("the eye's tangents are not known (the temporal channel is closed)"); return nullptr; }
-    // The zoom the game is at (its FOV, narrowing as the weapon comes up): nothing to draw until it narrows.
-    const float m = zoomNow();
+    // The zoom the game is at (its FOV, narrowing as the weapon comes up), D late on the way up: nothing to draw until it narrows.
+    const float m = lensZoomNow();
     if (!(m > scz::kLensMinM)) return nullptr;
     g_lensM.store(m, std::memory_order_relaxed);
     scz::Lens l = lensNow(tans, w, h);
