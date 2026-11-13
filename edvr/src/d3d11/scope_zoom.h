@@ -8,9 +8,8 @@
 //   so the HUD is drawn over the lens and never magnified. Lines: the key, the weapon on a change, one per aim, a summary every 60 s with aims.
 //   A lens that cannot be drawn says so once and stands down until the key changes.
 //   With fix.temporal_aa = dlss the glass is sharp: a second DLSS feature gathers its area from several jittered frames S times larger, and
-//   the lens samples that (scopeZoomGatherGlass below); without DLSS, or when that feature fails, the lens stretches the eye as basic does,
-//   with one line saying why.
-// basic (TEMPORARY, on-foot-scope-sharpness): the lens stretching the eye, as 0.1.3 + the zoom drew it, for an A/B in F8.
+//   the lens samples that (scopeZoomGatherGlass below); without DLSS, or when that feature fails, the lens stretches the eye as 0.1.3 + the
+//   zoom did (the basic path), with one line saying why. basic, the A/B value of on-foot-scope-sharpness, reads as on (flight 14.11).
 // off: nothing -- no hook in the game's code, no GPU call, no line but the key's.
 //
 // The zoom comes D (260 ms) after the game's FOV on the way up, when the glass is at the eye, and goes with it on the way down; the lens

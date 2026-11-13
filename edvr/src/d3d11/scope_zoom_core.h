@@ -17,12 +17,11 @@ namespace edvr {
 namespace scz {
 
 // ---- the key ----------------------------------------------------------------------------------------------------------------------------------
-// experimental.native_vr_on_foot_scope_zoom: on (the default; the sharp lens), basic, off. Empty and unknown -- the probe's census and preview
-// among them -- read as on and are flagged (one line): a player who flew the probe has preview in the file and expects the lens.
-// basic is TEMPORARY (openspec change on-foot-scope-sharpness): the lens as 0.1.3 + the zoom drew it (the eye stretched), for Dima's A/B in F8 on
-// one stone. When the change closes it goes from the choices and reads as on.
-enum class Key : int { Off = 0, On = 1, Basic = 2 };
-inline const char* keyName(Key k) { return k == Key::On ? "on" : k == Key::Basic ? "basic" : "off"; }
+// experimental.native_vr_on_foot_scope_zoom: on (the default; the sharp lens), off. Empty and unknown -- the probe's census and preview among
+// them -- read as on and are flagged (one line): a player who flew the probe has preview in the file and expects the lens. So does basic: the
+// old stretched lens, an A/B value of on-foot-scope-sharpness, removed after its flight (Dima, 14.11: the glass "as sharp as around it").
+enum class Key : int { Off = 0, On = 1 };
+inline const char* keyName(Key k) { return k == Key::On ? "on" : "off"; }
 
 // Case-insensitive, trimmed. *valid is false for empty and for anything that is none of the words; a missing key (null) is on and valid.
 inline Key parseKey(const char* text, bool* valid = nullptr) {
@@ -43,7 +42,6 @@ inline Key parseKey(const char* text, bool* valid = nullptr) {
     if (n) {
         if (is("on")) return Key::On;
         if (is("off")) return Key::Off;
-        if (is("basic")) return Key::Basic;
     }
     if (valid) *valid = false;
     return Key::On;
@@ -511,8 +509,8 @@ inline void sharpMvShift(const SharpArea& now, const SharpArea& last, float* dx,
     *dy = float(now.y - last.y);
 }
 
-// Which lens is drawn (design, decisions 4 and 5): on gathers with DLSS where it can and stretches as basic where it cannot (one line with the
-// reason, on a change); basic stretches without a word (the key's line says it); off draws nothing.
+// Which lens is drawn (design, decisions 4 and 5): on gathers with DLSS where it can and stretches the eye where it cannot (the basic path, one
+// line with the reason, on a change); off draws nothing.
 enum class LensPath : int { None = 0, Sharp = 1, Basic = 2 };
 inline const char* pathName(LensPath p) { return p == LensPath::Sharp ? "sharp" : p == LensPath::Basic ? "basic" : "none"; }
 struct PathChoice {
@@ -525,7 +523,6 @@ struct PathChoice {
 inline PathChoice choosePath(Key key, bool dlss, bool eyeGathered, bool failed, const char* failReason) {
     PathChoice c;
     if (key == Key::Off) return c;
-    if (key == Key::Basic) { c.path = LensPath::Basic; return c; }
     c.path = LensPath::Basic;
     if (!dlss) c.reason = "the anti-aliasing is not DLSS (fix.temporal_aa)";
     else if (failed) c.reason = failReason && *failReason ? failReason : "the glass's DLSS failed";
@@ -583,7 +580,7 @@ inline int formatKey(Key k, char* out, size_t cap) {
     return std::snprintf(out, cap, "scope zoom: key=%s f_ref=%.1f deg", keyName(k), double(kFRefDeg));
 }
 inline int formatKeyUnknown(const char* raw, char* out, size_t cap) {
-    return std::snprintf(out, cap, "scope zoom: the key's value '%s' is not understood (on, basic, off); reading on", raw ? raw : "");
+    return std::snprintf(out, cap, "scope zoom: the key's value '%s' is not understood (on, off); reading on", raw ? raw : "");
 }
 // The weapon line: the name ("unknown" when Status.json has none), the mods ("none", or "unknown" when the loadout does not list the weapon),
 // and the cap on M, or "lens=no" for a weapon without one.

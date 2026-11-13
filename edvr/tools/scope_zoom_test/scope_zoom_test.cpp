@@ -38,11 +38,10 @@ void partKey() {
     check(parseKey("   ", &valid) == Key::On && !valid, "blanks read on and are flagged");
     check(parseKey("offf", &valid) == Key::On && !valid, "a longer word is not off");
     check(parseKey(nullptr, &valid) == Key::On && valid, "a missing key is on and valid");
-    check(parseKey("basic", &valid) == Key::Basic && valid, "basic is basic (the old lens, temporary)");
-    check(parseKey(" Basic\r\n", &valid) == Key::Basic && valid, "Basic with padding is basic");
-    check(parseKey("basics", &valid) == Key::On && !valid, "a longer word is not basic");
-    check(std::strcmp(keyName(Key::Basic), "basic") == 0 && std::strcmp(keyName(Key::On), "on") == 0 && std::strcmp(keyName(Key::Off), "off") == 0,
-          "the three names");
+    // basic (on-foot-scope-sharpness's A/B value) is gone: it reads as on, flagged, like the probe's values.
+    check(parseKey("basic", &valid) == Key::On && !valid, "basic (removed 14.11) reads on and is flagged");
+    check(parseKey(" Basic\r\n", &valid) == Key::On && !valid, "Basic with padding reads on and is flagged");
+    check(std::strcmp(keyName(Key::On), "on") == 0 && std::strcmp(keyName(Key::Off), "off") == 0, "the two names");
 }
 
 void partNames() {
@@ -236,9 +235,9 @@ void partLines() {
     formatKey(Key::Off, line, sizeof(line));
     check(std::strcmp(line, "scope zoom: key=off f_ref=56.3 deg") == 0, "the key line, off");
     formatKeyUnknown("preview", line, sizeof(line));
-    check(contains(line, "'preview' is not understood (on, basic, off); reading on"), "the unknown key line");
-    formatKey(Key::Basic, line, sizeof(line));
-    check(std::strcmp(line, "scope zoom: key=basic f_ref=56.3 deg") == 0, "the key line, basic");
+    check(contains(line, "'preview' is not understood (on, off); reading on"), "the unknown key line");
+    formatKeyUnknown("basic", line, sizeof(line));
+    check(std::strcmp(line, "scope zoom: the key's value 'basic' is not understood (on, off); reading on") == 0, "the removed basic's line");
     formatWeapon(kExecutioner, true, "", zoomFor(kExecutioner, ""), line, sizeof(line));
     check(std::strcmp(line, "scope zoom: weapon=wpn_m_sniper_plasma_charged mods=none lens=yes zoom_cap=1.70") == 0, "the weapon line, bare");
     formatWeapon(kExecutioner, true, "weapon_scope", zoomFor(kExecutioner, "weapon_scope"), line, sizeof(line));
@@ -374,11 +373,9 @@ void partSharp() {
     // The path (decisions 4 and 5): every combination.
     check(choosePath(Key::Off, true, true, false, nullptr).path == LensPath::None, "off: nothing");
     check(choosePath(Key::Off, false, false, true, "x").path == LensPath::None, "off: nothing, whatever else");
-    PathChoice c = choosePath(Key::Basic, true, true, false, nullptr);
-    check(c.path == LensPath::Basic && !*c.reason, "basic: the old lens, no reason (no line)");
-    check(choosePath(Key::Basic, false, false, true, "x").path == LensPath::Basic, "basic without DLSS: the old lens");
+    check(choosePath(parseKey("basic"), true, true, false, nullptr).path == LensPath::Sharp, "the removed basic is on: sharp with DLSS");
     check(choosePath(Key::On, true, true, false, nullptr).path == LensPath::Sharp, "on with DLSS gathering the eye: sharp");
-    c = choosePath(Key::On, false, true, false, nullptr);
+    PathChoice c = choosePath(Key::On, false, true, false, nullptr);
     check(c.path == LensPath::Basic && contains(c.reason, "not DLSS"), "on without DLSS: basic, the reason");
     c = choosePath(Key::On, true, false, false, nullptr);
     check(c.path == LensPath::Basic && contains(c.reason, "not gathering the aiming eye"), "on, DLSS not on the eye: basic, the reason");

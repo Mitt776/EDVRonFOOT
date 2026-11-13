@@ -389,7 +389,7 @@ void scopeZoomFrameBoundary() {
     g_glass.store(glass, std::memory_order_relaxed);
 
     // The lens's path (on-foot-scope-sharpness, decisions 4 and 5): sharp where DLSS gathers the aiming eye and the glass's own feature has not
-    // been refused, basic otherwise. A line on a change, said while aiming a weapon with a lens under on (basic says nothing: its key line did).
+    // been refused, basic otherwise. A line on a change, said while aiming a weapon with a lens under on.
     {
         const uint64_t gathered = g_eyeGatheredMs.load(std::memory_order_relaxed);
         const bool eyeGathered = gathered && now >= gathered && now - gathered < 1000;
