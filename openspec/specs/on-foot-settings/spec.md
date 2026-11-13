@@ -8,13 +8,14 @@
 ## Requirements
 
 ### Requirement: Страница On foot в меню F8
-Меню F8 SHALL иметь страницу **On foot**, видимую при выключенном Developer mode. На ней SHALL быть ровно пять строк,
-в этом порядке: Native VR on foot, On-foot interface, On-foot aiming eye, On-foot head aim, On-foot aim dot. Каждая
-строка SHALL менять свой ключ `experimental.native_vr_on_foot*` на лету, как сейчас на странице Experimental.
+Меню F8 SHALL иметь страницу **On foot**, видимую при выключенном Developer mode. На ней SHALL быть ровно шесть строк,
+в этом порядке: Native VR on foot, On-foot interface, On-foot aiming eye, On-foot head aim, On-foot aim dot, On-foot
+scope zoom. Каждая строка SHALL менять свой ключ `experimental.native_vr_on_foot*` на лету, как сейчас на странице
+Experimental.
 
 #### Scenario: Без режима разработчика
 - **WHEN** игрок с выключенным Developer mode открывает F8 и листает страницы Tab
-- **THEN** среди страниц есть On foot, на ней пять строк настроек на ногах; страниц Advanced, Experimental и
+- **THEN** среди страниц есть On foot, на ней шесть строк настроек на ногах; страниц Advanced, Experimental и
   Instruments нет
 
 #### Scenario: Изменение на лету
@@ -22,17 +23,22 @@
 - **THEN** точка прицела появляется без перезапуска игры, а в `edvr.ini` записано `native_vr_on_foot_aim_dot = show`
   в секции `[experimental]`
 
+#### Scenario: Зум в прицеле на лету
+- **WHEN** игрок на ногах на странице On foot ставит On-foot scope zoom в `off`
+- **THEN** при следующем прицеливании из Executioner линзы нет, а в `edvr.ini` записано
+  `native_vr_on_foot_scope_zoom = off` в секции `[experimental]`
+
 ### Requirement: Одна настройка — одна строка
-Пять настроек на ногах SHALL NOT показываться на странице Experimental: при включённом Developer mode они остаются
+Шесть настроек на ногах SHALL NOT показываться на странице Experimental: при включённом Developer mode они остаются
 только на странице On foot. Остальные ключи `[experimental]` SHALL остаться на Experimental, как были.
 
 #### Scenario: С режимом разработчика
 - **WHEN** игрок включает Developer mode и открывает страницу Experimental
-- **THEN** строк Native VR on foot, On-foot interface, On-foot aiming eye, On-foot head aim и On-foot aim dot на ней
-  нет; на странице On foot они есть
+- **THEN** строк Native VR on foot, On-foot interface, On-foot aiming eye, On-foot head aim, On-foot aim dot и On-foot
+  scope zoom на ней нет; на странице On foot они есть
 
 ### Requirement: Раздел в установщике
-Окно настроек установщика SHALL показывать те же пять настроек под заголовком «Native VR on foot (EDVRonFOOT)», с
+Окно настроек установщика SHALL показывать те же шесть настроек под заголовком «Native VR on foot (EDVRonFOOT)», с
 вариантами и описанием из `edvr.ini`. Значение SHALL записываться в секцию `[experimental]` файла `edvr.ini` и
 сохраняться при обновлении с включённым «Keep the settings I have changed».
 
@@ -48,8 +54,8 @@
 
 ### Requirement: Имена ключей не меняются
 Ключи SHALL остаться `native_vr_on_foot`, `native_vr_on_foot_hud`, `native_vr_on_foot_aim_eye`,
-`native_vr_on_foot_head_aim` и `native_vr_on_foot_aim_dot` в секции `[experimental]`. Файл `edvr.ini` от 0.1.0 и 0.1.1
-SHALL читаться без переноса.
+`native_vr_on_foot_head_aim`, `native_vr_on_foot_aim_dot` и `native_vr_on_foot_scope_zoom` в секции `[experimental]`.
+Файл `edvr.ini` от 0.1.0 и 0.1.1 SHALL читаться без переноса.
 
 #### Scenario: Старый файл настроек
 - **WHEN** игрок с `edvr.ini` от 0.1.1, где `native_vr_on_foot_head_aim = off`, ставит новую версию

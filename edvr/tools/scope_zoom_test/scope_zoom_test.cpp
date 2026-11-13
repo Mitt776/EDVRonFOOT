@@ -1,18 +1,17 @@
-// Build gate for the EDVRonFOOT on-foot scope zoom probe (src\d3d11\scope_zoom_probe_core.h, experimental.native_vr_on_foot_scope_zoom; openspec
-// change scope-zoom-probe).
+// Build gate for the EDVRonFOOT on-foot scope zoom (src\d3d11\scope_zoom_core.h, experimental.native_vr_on_foot_scope_zoom; openspec
+// change on-foot-scope-zoom).
 //
-// Drives the pure half: the key's reading (off, census, preview, empty, junk, case and padding), the weapon names out of Status.json and the
-// journal, the zoom table (the Executioner about 1.70 without the Scope mod and about 4.07 with it, the C-44 not in the table), the journal's
-// loadout lines (SuitLoadout replacing, LoadoutEquipModule replacing one slot, other events ignored), the aiming centre and the circle from the
-// eye's tangents (a symmetric field in the middle, an asymmetric one off it, the box clipped at the edge and never empty), the ramp of M at
-// 0, 0.5 and 1, the aiming tracker (LT edges, the game's flag and its delay), the FOV and snapshot gates, and the text of every line. Nothing here
-// touches the clock, the pad, the journal or a file, so --dry-run is the same run as --self-test.
-#include "../../src/d3d11/scope_zoom_probe_core.h"
+// Drives the pure half: the key's reading (on, off, the probe's census and preview, empty, junk, case and padding), the weapon names out of
+// Status.json and the journal, the zoom table (the Executioner capped at about 1.70 without the Scope mod and about 4.07 with it; the C-44, the
+// pistol and the fists without a lens), the journal's loadout lines, the aiming centre and the glass from the eye's tangents, the zoom from the
+// game's FOV, one aim's bookkeeping, the summary's gate, the zoom's delay, the sway's correction, and the text of every line. Nothing here touches the clock, the
+// pad, the journal or a file, so --dry-run is the same run as --self-test.
+#include "../../src/d3d11/scope_zoom_core.h"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 
-using namespace edvr::szp;
+using namespace edvr::scz;
 
 namespace {
 int g_checks = 0, g_failures = 0;
@@ -28,16 +27,16 @@ bool contains(const char* s, const char* sub) { return std::strstr(s, sub) != nu
 
 void partKey() {
     bool valid = false;
+    check(parseKey("on", &valid) == Key::On && valid, "on is on");
     check(parseKey("off", &valid) == Key::Off && valid, "off is off");
-    check(parseKey("census", &valid) == Key::Census && valid, "census is census");
-    check(parseKey("preview", &valid) == Key::Preview && valid, "preview is preview");
-    check(parseKey(" Preview \r\n", &valid) == Key::Preview && valid, "case and padding do not matter");
-    check(parseKey("CENSUS", &valid) == Key::Census && valid, "CENSUS is census");
-    check(parseKey("", &valid) == Key::Off && !valid, "empty reads off and is flagged");
-    check(parseKey("   ", &valid) == Key::Off && !valid, "blanks read off and are flagged");
-    check(parseKey("zoom", &valid) == Key::Off && !valid, "zoom reads off and is flagged");
-    check(parseKey("previews", &valid) == Key::Off && !valid, "a longer word is not preview");
-    check(parseKey(nullptr, &valid) == Key::Off && valid, "a missing key is off and valid");
+    check(parseKey(" OFF \r\n", &valid) == Key::Off && valid, "case and padding do not matter");
+    check(parseKey("On", &valid) == Key::On && valid, "On is on");
+    check(parseKey("preview", &valid) == Key::On && !valid, "the probe's preview reads on and is flagged");
+    check(parseKey("census", &valid) == Key::On && !valid, "the probe's census reads on and is flagged");
+    check(parseKey("", &valid) == Key::On && !valid, "empty reads on and is flagged");
+    check(parseKey("   ", &valid) == Key::On && !valid, "blanks read on and are flagged");
+    check(parseKey("offf", &valid) == Key::On && !valid, "a longer word is not off");
+    check(parseKey(nullptr, &valid) == Key::On && valid, "a missing key is on and valid");
 }
 
 void partNames() {
@@ -66,8 +65,15 @@ void partZoom() {
     check(z.inTable && near(z.adsDeg, 15.0f) && near(z.m, 4.07f, 0.01f), "the Executioner with the Scope mod: 15 degrees, about 4.07");
     z = zoomFor("wpn_m_assaultrifle_kinetic_fauto", "");
     check(!z.inTable && z.m == 1.0f, "the Karma C-44 is not in the table");
+    z = zoomFor("wpn_s_pistol_plasma_charged", "");
+    check(!z.inTable, "the pistol has no lens");
+    z = zoomFor("humanoid_fists", nullptr);
+    check(!z.inTable, "the fists have no lens");
     z = zoomFor(nullptr, nullptr);
     check(!z.inTable, "no weapon is not in the table");
+    check(near(zoomFromFov(degToRad(10.0f), zoomFor(kExecutioner, "weapon_scope").m), 4.07f, 0.01f) &&
+              near(zoomFromFov(degToRad(10.0f), zoomFor(kExecutioner, "").m), 1.70f, 0.01f),
+          "the game's FOV is capped at 4.07 with the Scope mod and 1.70 without");
     check(modsHaveScope("weapon_Scope") && !modsHaveScope("weapon_stability") && !modsHaveScope(nullptr) && !modsHaveScope("scop"),
           "the Scope mod is found by its name, any case");
 }
@@ -164,14 +170,26 @@ void partLens() {
               insideGlass(l, 836.0f, 1271.0f) < 0.0f,
           "above, right of, below and left of the glass is outside");
     check(insideGlass(l, 860.0f, 1215.0f) < 0.0f, "the upper left slant cuts its corner off");
-    check(glassFor("wpn_m_assaultrifle_kinetic_fauto") == nullptr && glassFor(nullptr) == nullptr, "only the Executioner has a glass");
-    // The barrel's lag in a turn moves the whole lens with it: 2 degrees right and 1 down.
+    check(glassFor("wpn_m_assaultrifle_kinetic_fauto") == nullptr && glassFor("wpn_s_pistol_plasma_charged") == nullptr &&
+              glassFor("humanoid_fists") == nullptr && glassFor(nullptr) == nullptr,
+          "only the Executioner has a glass (the C-44, the pistol and the fists none)");
+    // The barrel's lag in a turn moves the whole lens with it: 2 degrees right and 1 down, the yaw with the game's sway on top (kLagYawGain,
+    // kLagYawLift: further and up).
     const Lens still = l;
     l = lensFor(flight, 2448, 2672, kRadiusDeg, 11.0f, 2.0f, glassFor(kExecutioner));
-    const float dx = std::tan(degToRad(2.0f)) * 2448.0f / 2.2148f;
-    const float dy = (std::tan(degToRad(11.0f)) - std::tan(degToRad(10.0f))) * 2672.0f / 2.393f;
+    const float sx = 2448.0f / 2.2148f, sy = 2672.0f / 2.393f;
+    const float dx = kLagYawGain * std::tan(degToRad(2.0f)) * sx;
+    const float dy = (std::tan(degToRad(11.0f)) - std::tan(degToRad(10.0f)) + kLagYawLift * std::tan(degToRad(2.0f))) * sy;
     check(near(l.cx - still.cx, dx, 0.5f) && near(l.cy - still.cy, dy, 0.5f) && near(l.px[3] - still.px[3], dx, 0.5f),
-          "a lag of 2 degrees right and 1 down moves the zoom and the glass by its tangents");
+          "a lag of 2 degrees right and 1 down moves the zoom and the glass by its tangents, the yaw with the sway");
+    // Flight 1's turn: a yaw lag of 5 degrees right moves the lens 16% further than the lag alone and about 13 px up; 5 left, the mirror.
+    const Lens r5 = lensFor(flight, 2448, 2672, kRadiusDeg, 10.0f, 5.0f, glassFor(kExecutioner));
+    const Lens l5 = lensFor(flight, 2448, 2672, kRadiusDeg, 10.0f, -5.0f, glassFor(kExecutioner));
+    const float bare = std::tan(degToRad(5.0f)) * sx;
+    check(near((r5.cx - still.cx) / bare, 1.157f, 0.01f) && r5.cy < still.cy - 10.0f && r5.cy > still.cy - 16.0f,
+          "5 degrees of yaw lag right: the lens 16% further right and 10-16 px up");
+    check(near(l5.cx - still.cx, -(r5.cx - still.cx), 0.01f) && near(l5.cy - still.cy, -(r5.cy - still.cy), 0.01f),
+          "5 degrees left: the mirror (left and down)");
     check(!lensFor(flight, 2448, 2672, kRadiusDeg, 10.0f, 70.0f, nullptr).valid, "an absurd yaw: no lens");
     // The centre at the edge: clipped, never out of the region, never empty.
     const float edge[4] = {-0.0001f, 2.0f, -1.0f, 1.0f};
@@ -186,128 +204,130 @@ void partLens() {
     check(!lensFor(nullptr, 1000, 1000).valid, "no tangents: no lens");
 }
 
-void partAds() {
-    AdsTrack t;
-    AdsOut o = stepAds(t, false, true, false, 1000);
-    check(o.ev[0] == AdsEvent::None, "nothing at rest");
-    o = stepAds(t, true, true, false, 1100);
-    check(o.ev[0] == AdsEvent::LtDown && t.aims == 1, "LT pressed: begin, one aim");
-    o = stepAds(t, true, true, false, 1200);
-    check(o.ev[0] == AdsEvent::None, "LT held: no repeat");
-    o = stepAds(t, true, true, true, 1450);
-    check(o.ev[0] == AdsEvent::FlagUp && o.delayMs[0] == 350, "the game's flag 350 ms after LT");
-    o = stepAds(t, false, true, true, 2000);
-    check(o.ev[0] == AdsEvent::LtUp && o.ev[1] == AdsEvent::None, "LT released: end");
-    o = stepAds(t, false, true, false, 2600);
-    check(o.ev[0] == AdsEvent::FlagDown && o.delayMs[0] == 600, "the flag down 600 ms after the release");
-    // Both edges in one frame.
-    AdsTrack u;
-    o = stepAds(u, true, true, true, 5000);
-    check(o.ev[0] == AdsEvent::LtDown && o.ev[1] == AdsEvent::FlagUp && o.delayMs[1] == 0, "LT and the flag in one frame: both, delay 0");
-    // The flag without LT.
-    AdsTrack v;
-    o = stepAds(v, false, true, true, 7000);
-    check(o.ev[0] == AdsEvent::FlagUp && o.delayMs[0] == -1, "the flag without LT: no delay");
-    // An unknown flag reads down.
-    AdsTrack w;
-    stepAds(w, false, true, true, 100);
-    o = stepAds(w, false, false, true, 200);
-    check(o.ev[0] == AdsEvent::FlagDown, "a flag that stops being known reads down");
-}
-
-void partGates() {
-    check(fovChanged(false, 0.0f, 0.6f), "the first FOV is a line");
-    check(!fovChanged(true, degToRad(35.0f), degToRad(35.4f)), "0.4 degrees is no line");
-    check(fovChanged(true, degToRad(35.0f), degToRad(35.6f)), "0.6 degrees is a line");
-    check(!fovChanged(true, 0.0f, NAN) && !fovChanged(false, 0.0f, NAN), "NaN never");
-    check(fovChanged(true, degToRad(56.3f), -1.0f), "a -1 the stereo camera may hold is a line");
-    check(snapshotAllowed(false, 0, 0), "the first snapshot is allowed");
-    check(!snapshotAllowed(true, 1000, 2999) && snapshotAllowed(true, 1000, 3000), "two seconds between snapshots");
+void partAim() {
+    Aim a;
+    AimEnd e = stepAim(a, false, 0, 1.0f, 1000);
+    check(!e.ended && !a.active && a.aims == 0, "nothing at rest");
+    e = stepAim(a, true, 10, 1.0f, 1100);
+    check(!e.ended && a.active && a.aims == 1, "LT pressed: an aim begins");
+    e = stepAim(a, true, 11, 1.30f, 1200);
+    e = stepAim(a, true, 20, 1.70f, 1300);
+    e = stepAim(a, true, 30, 1.69f, 1400);
+    check(!e.ended && near(a.peakM, 1.70f), "the peak is kept while LT is held");
+    e = stepAim(a, false, 30, 1.69f, 1600);
+    check(e.ended && e.lensFrames == 20 && near(e.peakM, 1.70f) && e.ms == 500, "LT released: 20 frames with a lens, peak 1.70, 500 ms");
+    // An aim without a lens frame says zoom 1, whatever M the door drew last time.
+    e = stepAim(a, true, 30, 1.70f, 2000);
+    e = stepAim(a, false, 30, 1.70f, 2100);
+    check(e.ended && e.lensFrames == 0 && near(e.peakM, 1.0f) && a.aims == 2, "an aim with no lens frame: zoom 1");
+    check(!summaryDue(1000, 60999) && summaryDue(1000, 61000), "the summary every 60 s");
 }
 
 void partLines() {
     char line[512];
-    formatKey(Key::Census, line, sizeof(line));
-    check(std::strcmp(line, "scope zoom: key=census radius=5.0 deg f_ref=56.3 deg") == 0, "the key line");
-    formatKeyUnknown("zoom", line, sizeof(line));
-    check(contains(line, "'zoom' is not understood") && contains(line, "reading off"), "the unknown key line");
+    formatKey(Key::On, line, sizeof(line));
+    check(std::strcmp(line, "scope zoom: key=on f_ref=56.3 deg") == 0, "the key line");
+    formatKey(Key::Off, line, sizeof(line));
+    check(std::strcmp(line, "scope zoom: key=off f_ref=56.3 deg") == 0, "the key line, off");
+    formatKeyUnknown("preview", line, sizeof(line));
+    check(contains(line, "'preview' is not understood (on, off); reading on"), "the unknown key line");
     formatWeapon(kExecutioner, true, "", zoomFor(kExecutioner, ""), line, sizeof(line));
-    check(std::strcmp(line, "scope zoom: weapon=wpn_m_sniper_plasma_charged mods=none ads_fov=35.0 deg zoom=1.70") == 0, "the weapon line, bare");
+    check(std::strcmp(line, "scope zoom: weapon=wpn_m_sniper_plasma_charged mods=none lens=yes zoom_cap=1.70") == 0, "the weapon line, bare");
+    formatWeapon(kExecutioner, true, "weapon_scope", zoomFor(kExecutioner, "weapon_scope"), line, sizeof(line));
+    // tan(28.15) / tan(7.5) = 4.065, printed 4.06 or 4.07 by float rounding.
+    check(contains(line, "scope zoom: weapon=wpn_m_sniper_plasma_charged mods=weapon_scope lens=yes zoom_cap=4.0"),
+          "the weapon line, the Scope mod");
     formatWeapon("wpn_m_assaultrifle_kinetic_fauto", true, "weapon_stability", zoomFor("wpn_m_assaultrifle_kinetic_fauto", nullptr), line,
                  sizeof(line));
-    check(std::strcmp(line, "scope zoom: weapon=wpn_m_assaultrifle_kinetic_fauto mods=weapon_stability zoom=not in table") == 0,
-          "the weapon line, not in the table");
+    check(std::strcmp(line, "scope zoom: weapon=wpn_m_assaultrifle_kinetic_fauto mods=weapon_stability lens=no") == 0, "the weapon line, no lens");
     formatWeapon(nullptr, false, nullptr, Zoom{}, line, sizeof(line));
-    check(std::strcmp(line, "scope zoom: weapon=unknown mods=unknown zoom=not in table") == 0, "the weapon line, unknown");
+    check(std::strcmp(line, "scope zoom: weapon=unknown mods=unknown lens=no") == 0, "the weapon line, unknown");
     formatNoSelectedWeapon(line, sizeof(line));
     check(contains(line, "no SelectedWeapon"), "the missing SelectedWeapon line");
-    formatAds(AdsEvent::LtDown, -1, kExecutioner, 3, line, sizeof(line));
-    check(std::strcmp(line, "scope zoom: ads begin (LT pressed) weapon=wpn_m_sniper_plasma_charged aim=3") == 0, "the ads begin line");
-    formatAds(AdsEvent::FlagUp, 350, kExecutioner, 3, line, sizeof(line));
-    check(contains(line, "ads game flag up delay=350 ms after LT"), "the flag up line");
-    formatAds(AdsEvent::LtUp, -1, nullptr, 3, line, sizeof(line));
-    check(contains(line, "ads end (LT released) weapon=unknown"), "the ads end line");
-    formatAds(AdsEvent::FlagDown, -1, kExecutioner, 3, line, sizeof(line));
-    check(contains(line, "flag down (no LT release before it)"), "the flag down line without LT");
-    formatFov(true, true, degToRad(35.0f), line, sizeof(line));
-    check(contains(line, "fov mode=cinema aiming=yes value=35.00 deg (0.6109 rad)"), "the fov line");
+    AimEnd e;
+    e.ended = true;
+    e.ms = 2150;
+    e.lensFrames = 70;
+    e.peakM = 1.6985f;
+    formatAim(kExecutioner, e, line, sizeof(line));
+    check(std::strcmp(line, "scope zoom: aim weapon=wpn_m_sniper_plasma_charged zoom=1.70 lens_frames=70 held=2150 ms") == 0, "the aim line");
     formatFovUnread("the game's code at +0x10748D0 is not 334925's", line, sizeof(line));
     check(contains(line, "fov unread: the game's code"), "the fov unread line");
     formatFovHooked(line, sizeof(line));
     check(contains(line, "fov hooked") && contains(line, "read only"), "the fov hooked line");
-    const float sym[4] = {-1.0f, 1.0f, -1.0f, 1.0f};
-    Lens l = lensFor(sym, 2000, 2000);
-    formatSnapshot(kExecutioner, true, "right", l, 2000, 2000, true, 1.70f, line, sizeof(line));
-    check(contains(line, "snapshot weapon=wpn_m_sniper_plasma_charged aiming=yes eye=right centre=(1000.0, 1000.0) of 2000x2000") &&
-              contains(line, "shape=circle lens=yes zoom=1.70"),
-          "the snapshot line");
-    formatSnapshot(nullptr, false, "none", Lens{}, 0, 0, false, 1.0f, line, sizeof(line));
-    check(contains(line, "centre=unknown lens=no"), "the snapshot line without a centre");
-    formatSnapshotSkipped(2, line, sizeof(line));
-    check(contains(line, "skipped (2 presses inside 2 s"), "the skipped line");
     formatLensInert("the eye's format R8G8B8A8_UNORM_SRGB is not handled", line, sizeof(line));
     check(contains(line, "lens inert: the eye's format") && contains(line, "until the key changes"), "the lens inert line");
     formatLensNeedsEye(line, sizeof(line));
     check(contains(line, "needs the dominant eye"), "the needs-eye line");
     Summary s;
-    s.key = Key::Preview;
     s.aims = 4;
     s.lensFrames = 600;
-    s.snapshots = 2;
     s.weapon = kExecutioner;
-    s.zoom = zoomFor(kExecutioner, "");
-    s.fovCalls = 1800;
-    s.fovKnown = true;
-    s.fovRad = degToRad(56.3f);
     s.gpuSamples = 10;
     s.gpuMsSum = 0.5;
     s.gpuMsMax = 0.08;
     formatSummary(s, line, sizeof(line));
-    check(contains(line, "summary 30 s key=preview mode=stereo aims=4 lens_frames=600 snapshots=2 skipped=0 failures=0") &&
-              contains(line, "zoom=1.70 fov_calls=1800 fov=56.30 deg lens_gpu=0.050 ms avg 0.080 max (10)"),
+    check(std::strcmp(line, "scope zoom: summary 60 s aims=4 lens_frames=600 failures=0 weapon=wpn_m_sniper_plasma_charged "
+                            "lens_gpu=0.050 ms avg 0.080 max (10)") == 0,
           "the summary line");
     Summary z;
     formatSummary(z, line, sizeof(line));
-    check(contains(line, "key=off") && contains(line, "aims=0 lens_frames=0") && contains(line, "weapon=unknown zoom=not in table") &&
-              contains(line, "fov=unknown lens_gpu=none"),
-          "the summary with zeros");
+    check(contains(line, "aims=0 lens_frames=0 failures=0 weapon=unknown lens_gpu=none"), "the summary with zeros");
+}
+}  // namespace
+
+namespace {
+// The zoom held back D on the way up, at once on the way down (design, decision 4): flight 1's curve, the FOV's zoom from 1 at 135 ms to 1.70 at
+// 400 ms after LT, sampled every 13 ms.
+float riseZoom(double t) { return t <= 135.0 ? 1.0f : t >= 400.0 ? 1.70f : float(1.0 + 0.70 * (t - 135.0) / 265.0); }
+void partDelay() {
+    check(near(float(kZoomDelayMs), 260.0f, 0.01f), "D is 260 ms (flight 1)");
+    ZoomDelay z;
+    bool zeroUntilD = true, neverAbove = true;
+    float at660 = 0.0f, at390 = 0.0f;
+    double t = 0.0;
+    for (; t <= 1300.0; t += 13.0) {
+        const float now = riseZoom(t);
+        const float d = delayedZoom(z, now, t);
+        if (t < 135.0 + kZoomDelayMs - 13.0 && d > 1.0f) zeroUntilD = false;
+        if (d > now + 1e-6f) neverAbove = false;
+        if (t >= 390.0 && at390 == 0.0f) at390 = d;
+        if (t >= 400.0 + kZoomDelayMs + 13.0 && at660 == 0.0f) at660 = d;   // the FOV full plus D, a frame's sampling later
+    }
+    check(zeroUntilD, "no zoom until the FOV's first narrowing plus D");
+    check(neverAbove, "never more zoom than the game's FOV gives");
+    check(near(at390, riseZoom(390.0 - kZoomDelayMs), 0.03f) && at390 < 1.2f, "on the way up it is the FOV's zoom D ago");
+    check(near(at660, 1.70f, 0.001f), "full at the FOV's full plus D");
+    // LT let go: the FOV widens and the zoom follows the same frame.
+    check(near(delayedZoom(z, 1.40f, t), 1.40f, 0.001f) && near(delayedZoom(z, 1.0f, t + 13.0), 1.0f, 0.001f), "on the way down at once");
+    // A gap (the lens not asked for 200 ms): the old aim's zoom does not come back.
+    ZoomDelay g;
+    for (double s = 0.0; s <= 800.0; s += 13.0) delayedZoom(g, 1.70f, s);
+    check(near(delayedZoom(g, 1.70f, 1000.0), 1.0f, 0.001f) && near(delayedZoom(g, 1.70f, 1013.0), 1.0f, 0.001f),
+          "after a gap the history starts again: 1 until D has passed");
+    float late = 0.0f;
+    for (double s = 1026.0; s <= 1300.0; s += 13.0) late = delayedZoom(g, 1.70f, s);
+    check(near(late, 1.70f, 0.001f), "and full once D has passed");
+    // A clock that goes back starts the history again too; a NaN zoom reads as 1.
+    check(near(delayedZoom(g, 1.70f, 500.0), 1.0f, 0.001f), "a clock going back: the history starts again");
+    check(near(delayedZoom(g, NAN, 513.0), 1.0f, 0.001f), "a NaN zoom is 1");
 }
 }  // namespace
 
 int main(int argc, char** argv) {
     if (argc < 2 || (std::strcmp(argv[1], "--self-test") != 0 && std::strcmp(argv[1], "--dry-run") != 0)) {
-        std::printf("usage: scope_zoom_probe_test --self-test | --dry-run (the pure half only; --dry-run writes nothing, as does --self-test)\n");
+        std::printf("usage: scope_zoom_test --self-test | --dry-run (the pure half only; --dry-run writes nothing, as does --self-test)\n");
         return 2;
     }
     partKey();
     partNames();
     partZoom();
     partRamp();
+    partDelay();
     partLoadout();
     partLens();
-    partAds();
-    partGates();
+    partAim();
     partLines();
-    std::printf("%s: scope_zoom_probe_test, %d checks, %d failed\n", g_failures ? "FAIL" : "PASS", g_checks, g_failures);
+    std::printf("%s: scope_zoom_test, %d checks, %d failed\n", g_failures ? "FAIL" : "PASS", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

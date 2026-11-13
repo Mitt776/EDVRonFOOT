@@ -18,7 +18,7 @@
 #include "../common/runtime_profile.h"
 #include "../common/log.h"
 #include "../common/periodic_work.h"
-#include "scope_zoom_probe_core.h"   // EDVRonFOOT scope zoom probe: the weapon names and the loadout lines (szp::)
+#include "scope_zoom_core.h"   // EDVRonFOOT scope zoom: the weapon names and the loadout lines (scz::)
 
 namespace edvr {
 namespace {
@@ -128,13 +128,11 @@ struct Published {
     bool     supercruiseKnown = false;
     bool     supercruise = false;
     uint32_t statusSamples = 0;       // successful Status.json parses
-    // EDVRonFOOT scope zoom probe (scope_zoom_probe.h): Flags2 bit 5 (AimDownSight), Status.json's SelectedWeapon (normalised, the internal
-    // name), and the weapons of the last SuitLoadout / LoadoutEquipModule with their mods. Only the probe reads them.
-    bool     aimKnown = false;
-    bool     aim = false;
+    // EDVRonFOOT scope zoom (scope_zoom.h): Status.json's SelectedWeapon (normalised, the internal
+    // name), and the weapons of the last SuitLoadout / LoadoutEquipModule with their mods. Only the lens reads them.
     bool     weaponKnown = false;
     char     weapon[48] = {};
-    szp::Loadout loadout;
+    scz::Loadout loadout;
 };
 
 struct Visible {
@@ -156,15 +154,13 @@ struct Visible {
     std::atomic<bool>     supercruiseKnown{false};
     std::atomic<bool>     supercruise{false};
     std::atomic<uint32_t> statusSamples{0};
-    std::atomic<bool>     aimKnown{false};
-    std::atomic<bool>     aim{false};
 };
 Visible g_v;
-// The scope zoom probe's text fields: not atomics, so a mutex the tick (the writer) and the probe (the reader) both hold for a copy.
+// The scope zoom's text fields: not atomics, so a mutex the tick (the writer) and the lens (the reader) both hold for a copy.
 std::mutex g_textMutex;
 bool g_weaponKnown = false;
 char g_weapon[48] = {};
-szp::Loadout g_loadout;
+scz::Loadout g_loadout;
 
 template <class T>
 T peek(const std::atomic<T>& a) {
@@ -190,8 +186,6 @@ void applyPublished(const Published& p) {
     g_v.supercruiseKnown.store(p.supercruiseKnown, kRelaxed);
     g_v.supercruise.store(p.supercruise, kRelaxed);
     g_v.statusSamples.store(p.statusSamples, kRelaxed);
-    g_v.aimKnown.store(p.aimKnown, kRelaxed);
-    g_v.aim.store(p.aim, kRelaxed);
     {
         std::lock_guard<std::mutex> lock(g_textMutex);
         g_weaponKnown = p.weaponKnown;
@@ -415,13 +409,13 @@ void scanRange(Session& s, const char* p, uint32_t n) {
         while (end < n && p[end] != '"' && end - start < 40) ++end;
         if (end < n && p[end] == '"') {
             onEvent(s, p + start, end - start);
-            // EDVRonFOOT scope zoom probe: the loadout events are read beyond their name -- the weapon slots and their mods
-            // (szp::takeLoadoutLine), from the event token to the line's end. A line the read cut short is left alone.
+            // EDVRonFOOT scope zoom: the loadout events are read beyond their name -- the weapon slots and their mods
+            // (scz::takeLoadoutLine), from the event token to the line's end. A line the read cut short is left alone.
             const uint32_t len = end - start;
             if ((len == 11 && memcmp(p + start, "SuitLoadout", 11) == 0) || (len == 18 && memcmp(p + start, "LoadoutEquipModule", 18) == 0)) {
                 uint32_t eol = end;
                 while (eol < n && p[eol] != '\n') ++eol;
-                if (eol < n) szp::takeLoadoutLine(s.pub.loadout, p + i, eol - i);
+                if (eol < n) scz::takeLoadoutLine(s.pub.loadout, p + i, eol - i);
             }
         }
         i = end;
@@ -479,13 +473,13 @@ void pollStatus(Session& s) {
                 sawGui = true;
                 gui = static_cast<uint32_t>(strtoul(g + 11, nullptr, 10));
             }
-            // EDVRonFOOT scope zoom probe: the weapon in hand ("SelectedWeapon":"$wpn_..._name;"; the _Localised twin has a different
+            // EDVRonFOOT scope zoom: the weapon in hand ("SelectedWeapon":"$wpn_..._name;"; the _Localised twin has a different
             // key, so the quote-colon-quote pins this one).
             const char* w = strstr(buf, "\"SelectedWeapon\":\"");
             if (w) {
                 w += 18;
                 const char* e = strchr(w, '"');
-                sawWeapon = e && szp::normaliseWeapon(w, static_cast<size_t>(e - w), weapon, sizeof(weapon));
+                sawWeapon = e && scz::normaliseWeapon(w, static_cast<size_t>(e - w), weapon, sizeof(weapon));
             }
         }
         CloseHandle(f);
@@ -507,8 +501,6 @@ void pollStatus(Session& s) {
         s.pub.fsdJumpLive = sawFlags && (flags & 0x40000000u) != 0;
         s.pub.supercruiseKnown = sawFlags;
         s.pub.supercruise = sawFlags && (flags & 0x10u) != 0;
-        s.pub.aimKnown = sawFlags2;
-        s.pub.aim = sawFlags2 && (flags2 & szp::kFlags2AimDownSight) != 0;
         s.pub.weaponKnown = sawWeapon;
         std::memcpy(s.pub.weapon, weapon, sizeof(s.pub.weapon));
         const bool fss = sawGui && gui == 9;
@@ -540,8 +532,6 @@ void pollStatus(Session& s) {
         s.pub.fssFocusKnown = false;
         s.pub.fssFocus = false;
         s.pub.supercruiseKnown = false;
-        s.pub.aimKnown = false;
-        s.pub.aim = false;
         s.pub.weaponKnown = false;
     }
 }
@@ -1078,8 +1068,6 @@ bool journalOnFoot() { return !runtimeFlatProfile() && peek(g_v.onFoot); }
 bool journalSeatedKnown() { return journalWatchActive() && peek(g_v.seatedKnown); }
 bool journalSeated() { return !runtimeFlatProfile() && peek(g_v.seated); }
 uint32_t journalStatusSamples() { return runtimeFlatProfile() ? 0u : peek(g_v.statusSamples); }
-bool journalAimDownSightKnown() { return journalWatchActive() && peek(g_v.aimKnown); }
-bool journalAimDownSight() { return journalWatchActive() && peek(g_v.aim); }
 bool journalSelectedWeapon(char* out, size_t cap) {
     if (out && cap) out[0] = '\0';
     if (!journalWatchActive()) return false;
@@ -1096,7 +1084,7 @@ bool journalWeaponMods(const char* weapon, char* out, size_t cap) {
     if (!weapon || !journalWatchActive()) return false;
     std::lock_guard<std::mutex> lock(g_textMutex);
     const char* mods = nullptr;
-    if (!szp::modsOf(g_loadout, weapon, &mods)) return false;
+    if (!scz::modsOf(g_loadout, weapon, &mods)) return false;
     if (out && cap && mods) {
         std::strncpy(out, mods, cap - 1);
         out[cap - 1] = '\0';

@@ -11,7 +11,7 @@
 // READ ONLY, names only. The tail is polled twice a second, and the only
 // thing parsed out of it is which event happened; no payload is kept, with one
 // exception: the Music event's track MainMenu, compared whole and kept as a
-// flag (journalMainMenu); and, for EDVRonFOOT's scope zoom probe, the weapon
+// flag (journalMainMenu); and, for EDVRonFOOT's scope zoom, the weapon
 // slots and mods of the loadout events (journalWeaponMods). If the
 // folder cannot be found or the reads keep failing, this says so once and
 // stays off -- every consumer keeps its heuristic fallback, so a missing
@@ -159,9 +159,8 @@ bool journalSeated();
 // taken AFTER some event, since the previous one can be a second stale.
 uint32_t journalStatusSamples();
 
-// EDVRonFOOT, the scope zoom probe's only (scope_zoom_probe.h; temporary, goes
-// with the probe). Beyond names, three values are read for it:
-//   * Status.json Flags2 bit 5 (AimDownSight): known whenever Flags2 is;
+// EDVRonFOOT, the scope zoom's only (scope_zoom.h). Beyond names, two values
+// are read for it:
 //   * Status.json SelectedWeapon, normalised to the internal name
 //     ("$wpn_m_sniper_plasma_charged_name;" -> "wpn_m_sniper_plasma_charged");
 //     false when the file has none;
@@ -169,8 +168,6 @@ uint32_t journalStatusSamples();
 //     WeaponMods, comma-joined (journalWeaponMods: false when the weapon is not
 //     in the loadout, e.g. a journal tailed from its end).
 // The old fields above are read exactly as before.
-bool journalAimDownSightKnown();
-bool journalAimDownSight();
 bool journalSelectedWeapon(char* out, size_t cap);
 bool journalWeaponMods(const char* weapon, char* out, size_t cap);
 
