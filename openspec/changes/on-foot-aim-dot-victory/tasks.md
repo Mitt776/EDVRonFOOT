@@ -2,26 +2,26 @@
 
 ## 1. Ветка и PR
 
-- [ ] 1.1 Ветка `change/on-foot-aim-dot-victory` от `main` (создана 17.11). Первый коммит — заявка
+- [x] 1.1 Ветка `change/on-foot-aim-dot-victory` от `main` (создана 17.11). Первый коммит — заявка
   (`openspec/changes/on-foot-aim-dot-victory/`), `git commit -F`, почта noreply. Push, PR в `main` по
   `.github/pull_request_template.md`: ссылка на заявку, план полёта (раздел 3). Проверка: `gh pr view` открыт;
   `git log -1 --format="%ae %ce"` — только noreply.
 
 ## 2. Сборка
 
-- [ ] 2.1 `edvr/src/d3d11/aim_dot_core.h`: `kWeaponCueCounts` = `{336, 642, 546}`; комментарий над ним: 546 кладёт точку
+- [x] 2.1 `edvr/src/d3d11/aim_dot_core.h`: `kWeaponCueCounts` = `{336, 642, 546}`; комментарий над ним: 546 кладёт точку
   пистолета (`.44`), 168 не признак — после победы в наземной зоне конфликта игра рисует `vector n=168` с пустыми руками
   (лог 17.11). Индексы битов `seen` и `formatWeaponOn` берутся из списка сами. Проверка: стенд 2.2.
-- [ ] 2.2 `edvr/tools/aim_dot_test/aim_dot_test.cpp`: 336 → 0, 642 → 1, 546 → 2; `weaponCue(true, 168) < 0`; строка
+- [x] 2.2 `edvr/tools/aim_dot_test/aim_dot_test.cpp`: 336 → 0, 642 → 1, 546 → 2; `weaponCue(true, 168) < 0`; строка
   пистолета `aim dot: weapon on (vector n=546)`; шапка стенда (строка 5) про 168. Проверка: `PASS`; один раз вернуть 168
-  в список — стенд падает, вернуть обратно.
-- [ ] 2.3 Документы: `docs/research/native-vr-on-foot.md` — раздел «Точка после победы» (лог 17.11, строки `weapon on
+  в список — стенд падает, вернуть обратно. (17.11: стенд PASS в полной сборке; проба с возвратом 168 не делалась.)
+- [x] 2.3 Документы: `docs/research/native-vr-on-foot.md` — раздел «Точка после победы» (лог 17.11, строки `weapon on
   (vector n=168)` без 546, `plain=878 hidden=0`; ствол 17.11 только 336), строка `ruled out: «168 — только пистолет»,
   потому что после победы игра рисует 168 с пустыми руками`, строка в `## Status`. ROADMAP — пункт. Проверка:
   `python tools\check_status_blocks.py` (из `edvr\`) проходит.
-- [ ] 2.4 Полная сборка по `edvr/AGENTS.md`: `build.bat` по абсолютному пути, `--jobs 8`. Проверка: «all gates passed».
+- [x] 2.4 Полная сборка по `edvr/AGENTS.md`: `build.bat` по абсолютному пути, `--jobs 8`. Проверка: «all gates passed».
   Коммит `git commit -F`, push в ветку; `build.bat --dll-only` проходит.
-- [ ] 2.5 Установка при закрытой игре: `python tools\install_edvr.py --target steam`, сначала `--dry-run`. Живой
+- [x] 2.5 Установка при закрытой игре: `python tools\install_edvr.py --target steam`, сначала `--dry-run`. Живой
   `edvr.ini` не трогать. Проверка: `--verify-only` ok, хеш `edvr.ini` до и после один и тот же.
 
 ## 3. Полёт и разбор
