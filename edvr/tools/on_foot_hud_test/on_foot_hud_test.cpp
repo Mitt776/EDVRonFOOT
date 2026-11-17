@@ -241,7 +241,7 @@ void partLayers() {
                  {Layer::Answers, 1410, 245},  {Layer::Answers, 2083, 362},  {Layer::Dialog, 1410, 749},   {Layer::Dialog, 2083, 1107},
                  {Layer::Mission, 1410, 761},  {Layer::Trader, 2307, 1297},  {Layer::Trader, 3408, 1917},
                  {Layer::Biologist, 1399, 961}, {Layer::Arms, 1410, 878},    {Layer::Arms, 1761, 1096},  {Layer::Info, 1584, 938},
-                 {Layer::Stats, 1403, 845},    {Layer::Stats, 947, 570}};
+                 {Layer::Stats, 1403, 845},    {Layer::Stats, 947, 570},     {Layer::Side, 1274, 1201},  {Layer::Side, 1147, 1081}};
     int scaledWrong = 0;
     for (const auto& b : bases)
         for (int q = 50; q <= 100; ++q)
@@ -1115,8 +1115,8 @@ void partStats() {
     const float sb = specOf(Layer::Stats).y1 - specOf(Layer::Stats).y0;
     check(std::fabs((specOf(Layer::Stats).x1 - specOf(Layer::Stats).x0) * 3408.0f / sb / 1917.0f - 947.0f / 570.0f) < 0.005f,
           "stats: as high as their proportions give");
-    check(int(Layer::Stats) == kLayers - 1 && specOf(Layer::Stats).minDraws == 1 && specOf(Layer::Stats).widthAtHud == 1403,
-          "stats: the last layer, one draw, 1403 at 2412");
+    check(int(Layer::Stats) == kLayers - 2 && specOf(Layer::Stats).minDraws == 1 && specOf(Layer::Stats).widthAtHud == 1403,
+          "stats: the layer before the side choice, one draw, 1403 at 2412");
     char line[600];
     const Panel shown{&g_res[0], 947, 570, kFormatTypeless, 24};
     formatMenuShowing(Layer::Stats, shown, st, Mode::Body, line, sizeof(line));
@@ -1125,8 +1125,9 @@ void partStats() {
     // 2.1: the keep -- the info panel, the second dialog panel and the statistics; no other.
     int keeping = 0;
     for (int k = 0; k < kLayers; ++k) keeping += keepsPicture(Layer(k)) ? 1 : 0;
-    check(keeping == 3 && keepsPicture(Layer::Info) && keepsPicture(Layer::Dialog) && keepsPicture(Layer::Stats),
-          "the keep: info, dialog and stats only");
+    check(keeping == 4 && keepsPicture(Layer::Info) && keepsPicture(Layer::Dialog) && keepsPicture(Layer::Stats) &&
+              keepsPicture(Layer::Side),
+          "the keep: info, dialog, stats and the side choice only");
     // The recruiter's second panel: drawn 3 frames, then not drawn but pictured -- shown far past 30 frames; cleared: gone at once.
     DecisionIn in;
     in.onFoot = 1;
@@ -1169,7 +1170,75 @@ void partStats() {
     check(has(big, "stats shown=800 held=790]"), "the summary: stats drawn every frame, no kept");
     for (int k = 1; k < kLayers; ++k) sum.menus[k] = LayerCount{123456, 123456, 123456};
     formatSummary(sum, nullptr, 0, 0, 0, seen, big, sizeof(big));
-    check(has(big, "stats shown=123456 held=123456 kept=123456]"), "the summary: all nine menus, the bracket closed");
+    check(has(big, "stats shown=123456 held=123456 kept=123456, side shown=123456 held=123456 kept=123456]"),
+          "the summary: all ten menus, the bracket closed");
+}
+// on-foot-side-choice-panel (the flight of 18.11): the side choice on I, neutral in a ground conflict zone, 1147x1081 beside the HUD
+// 2171x1303 (19 draws, later 35) -- its own layer by shape and the HUD's share, kept by its picture, centred over all.
+void partSide() {
+    auto frame = [](std::initializer_list<std::array<uint32_t, 3>> panels) {
+        FrameTally t;
+        int i = 0;
+        for (const auto& p : panels) {
+            for (uint32_t d = 0; d < p[2]; ++d) t.note(&g_res[i], p[0], p[1], kFormatTypeless);
+            ++i;
+        }
+        return t;
+    };
+    check(isLayerShape(Layer::Side, 1147, 1081) && isLayerShape(Layer::Side, 1274, 1201), "side: 1147x1081 and 1274x1201 are its shape");
+    check(!isLayerShape(Layer::Lift, 1147, 1081) && !isLayerShape(Layer::Side, 1029, 949) && !isLayerShape(Layer::Side, 1020, 1012) &&
+              !isLayerShape(Layer::Side, 916, 1012),
+          "side: not the lift's shape, nor the 1020x1012 and 916x1012 the conflict zone draws");
+    int out[kLayers];
+    FrameTally t = frame({{2171, 1303, 30}, {1147, 1081, 19}, {2491, 2145, 20}, {1020, 1012, 5}});
+    findLayerPanels(t, out, 2171);
+    check(out[int(Layer::Hud)] >= 0 && out[int(Layer::Side)] >= 0 && t.panels[out[int(Layer::Side)]].w == 1147,
+          "the flight's frame: the HUD and the side choice, each found");
+    int others = 0;
+    for (int k = 0; k < kLayers; ++k)
+        if (k != int(Layer::Hud) && k != int(Layer::Side)) others += out[k] >= 0 ? 1 : 0;
+    check(others == 0, "the flight's frame: no other layer");
+    const Panel side{&g_res[0], 1147, 1081, kFormatTypeless, 19}, thin{&g_res[0], 1147, 1081, kFormatTypeless, 4};
+    check(findLayer(Layer::Side, &side, 1, 2171) == 0, "side with 19 draws beside the HUD 2171: found");
+    check(findLayer(Layer::Side, &thin, 1, 2171) == -1, "side with 4 draws: not found");
+    check(findLayer(Layer::Side, &side, 1, 0) == -1, "side before any HUD was seen: not found");
+    check(findLayer(Layer::Side, &side, 1, 2412) == -1, "side beside the HUD of another quality (2412): not found");
+    const Panel full{&g_res[0], 1274, 1201, kFormatTypeless, 35};
+    check(findLayer(Layer::Side, &full, 1, 2412) == 0, "side at HMD quality 1.0 (1274x1201 beside 2412): found");
+    // Every quality 0.50..1.00, both roundings: the side choice beside the HUD of the same quality is found.
+    int missed = 0;
+    for (int q = 50; q <= 100; ++q)
+        for (int nearest = 0; nearest < 2; ++nearest) {
+            const double f = q / 100.0, add = nearest ? 0.5 : 0.0;
+            const uint32_t hw = uint32_t(std::floor(2412 * f + add)), w = uint32_t(std::floor(1274 * f + add)),
+                           h = uint32_t(std::floor(1201 * f + add));
+            const Panel p{&g_res[0], w, h, kFormatTypeless, 19};
+            if (findLayer(Layer::Side, &p, 1, hw) != 0) ++missed;
+        }
+    check(missed == 0, "side at HMD quality 0.50..1.00 beside its HUD: found");
+    // The sheet: centred at the eyes, at the answers' density, as high as its proportions give, the last layer.
+    const Place answers = placeOf(Layer::Answers, 85), sd = placeOf(Layer::Side, 85);
+    check(std::fabs(sd.widthDeg - answers.widthDeg * 1274.0f / 1410.0f) < 0.1f, "side: as wide as its pixels at the answers' density");
+    check(std::fabs(sd.yawDeg) < 0.01f && std::fabs(sd.downM) < 0.002f && near(sd.curve, kMenuCurve), "side: straight ahead, at the eyes");
+    const float sb = specOf(Layer::Side).y1 - specOf(Layer::Side).y0;
+    check(std::fabs((specOf(Layer::Side).x1 - specOf(Layer::Side).x0) * 3408.0f / sb / 1917.0f - 1274.0f / 1201.0f) < 0.005f,
+          "side: as high as its proportions give");
+    check(int(Layer::Side) == kLayers - 1 && specOf(Layer::Side).minDraws == 5 && specOf(Layer::Side).widthAtHud == 1274,
+          "side: the last layer, five draws, 1274 at 2412");
+    char line[600];
+    formatMenuShowing(Layer::Side, side, sd, Mode::Body, line, sizeof(line));
+    check(has(line, "on-foot hud: showing the side choice (1147x1081"), "side: the showing line");
+    formatMenuKept(Layer::Side, line, sizeof(line));
+    check(has(line, "on-foot hud: the side choice is kept"), "side: the kept line");
+    Summary sum;
+    sum.frames = 900;
+    sum.menus[int(Layer::Side)].shown = 200;
+    sum.menus[int(Layer::Side)].held = 190;
+    sum.menus[int(Layer::Side)].kept = 180;
+    SeenSizes seen;
+    char big[1200];
+    formatSummary(sum, nullptr, 0, 0, 0, seen, big, sizeof(big));
+    check(has(big, "menus=[side shown=200 held=190 kept=180]"), "side: the summary");
 }
 }  // namespace
 
@@ -1198,6 +1267,7 @@ int main(int argc, char** argv) {
     partLines();
     partInfoKeep();  // .51
     partStats();     // conflict-zone-panels
+    partSide();      // on-foot-side-choice-panel
     std::printf("%s: on_foot_hud_test, %d checks, %d failed\n", g_failures ? "FAIL" : "PASS", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }
