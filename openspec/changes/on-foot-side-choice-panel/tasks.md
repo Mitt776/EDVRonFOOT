@@ -14,8 +14,8 @@
   качество 0.50..1.00, место, строки, сводка), размеры в таблице качеств, `partStats` (слой не последний, удержание у
   четырёх, сводка из десяти меню). PASS 800.
 - [x] 2.3 Документы: `docs/research/native-vr-on-foot.md` (запись), ROADMAP. `check_status_blocks.py` проходит.
-- [ ] 2.4 Полная сборка `--jobs 8` → «all gates passed»; коммит; `--dll-only`; установка (`--dry-run`, `--verify-only`,
-  хеш `edvr.ini` тот же).
+- [x] 2.4 Полная сборка `--jobs 8` → «all gates passed»; коммит; `--dll-only`; установка (`--dry-run`, `--verify-only`,
+  хеш `edvr.ini` тот же). (18.11: `55cd031`, PR #11, verify ok, хеш ini тот же.)
 
 ## 3. Полёт и разбор
 
