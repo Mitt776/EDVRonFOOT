@@ -1,5 +1,6 @@
 #include "aim_dot.h"
 #include "aim_dot_core.h"
+#include "aim_dot_probe.h"  // TEMP (on-foot-aim-dot-victory): aimDotMark on an empty centre
 #include "on_foot_hud_core.h"
 #include "../common/config.h"
 #include "../common/guard.h"
@@ -293,6 +294,9 @@ void decide(const uint8_t* strip, uint32_t pitch, bool weapon) {
     if (g_s.plainSaid && adh::sameSignature(read, g_s.said)) return;
     g_s.said = read;
     g_s.plainSaid = true;
+    // TEMP (on-foot-aim-dot-victory, the probe's flight): the centre's rows turned empty with no weapon -- after a won conflict zone
+    // the stats closed and the dot left them (log of 17.11, 22:48:24.932). The probe snapshots the whole atlas as on PAUSE (census).
+    if (read.why == adh::Why::Empty && !weapon) aimDotMark();
     if (g_centreLines.fetch_add(1, std::memory_order_relaxed) >= adh::kCentreLinesPerWindow) {
         g_cQuiet.fetch_add(1, std::memory_order_relaxed);
         return;

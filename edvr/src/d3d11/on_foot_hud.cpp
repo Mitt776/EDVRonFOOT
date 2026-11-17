@@ -1,6 +1,7 @@
 #include "on_foot_hud.h"
 #include "on_foot_hud_core.h"
 #include "aim_dot.h"
+#include "aim_dot_probe.h"  // TEMP .59 (on-foot-aim-dot-daylight): the atlas snapshot on PAUSE
 #include "binding_shadow.h"
 #include "draw_gate.h"
 #include "journal_watch.h"
@@ -235,7 +236,7 @@ bool onFootHudNoteDraw(ID3D11DeviceContext* ctx, bool eye, uint32_t count) {
     const uint64_t vs = bindingGet(BindSlot::Vs) ? bindingShaderHash(BindSlot::Vs) : 0;
     if (!vs) return false;
     if (ofh::isGameCompositeVs(vs)) {
-        const bool probe = eye && aimDotHideErases();
+        const bool probe = eye && (aimDotWants() || aimDotHideErases());
         const void* read[3] = {};
         guardedBudget(g_budget, [&] {
             const uint32_t reads = compositeReads(ctx, probe, read);
@@ -244,7 +245,9 @@ bool onFootHudNoteDraw(ID3D11DeviceContext* ctx, bool eye, uint32_t count) {
             g_cur.tally.composites |= reads;
         });
         // The aim dot (aim_dot.h): a quad out of its atlas into an eye reads the centre back and erases the plain dot before it draws.
-        if (probe) aimDotHideBeforeEyeComposite(ctx, read);
+        // The probe's snapshot first (TEMP .59: it sees the atlas before the erase), then the aim dot's erase of the centre.
+        if (probe && aimDotWants()) aimDotBeforeEyeComposite(ctx, read);
+        if (probe && aimDotHideErases()) aimDotHideBeforeEyeComposite(ctx, read);
         return false;
     }
     if (vs == ofh::kEyePanelVs) {
@@ -260,6 +263,7 @@ bool onFootHudNoteDraw(ID3D11DeviceContext* ctx, bool eye, uint32_t count) {
             resolveTarget();
         }
         if (!g_rtvPanel) return;
+        if (aimDotWants()) aimDotNoteGuiDraw(ctx, vs, count, g_rtvId, g_rtvW, g_rtvH, g_rtvFmt);  // TEMP .59: the probe
         if (aimDotHideWants()) aimDotHideNoteGuiDraw(ctx, vs, count, g_rtvId, g_rtvW, g_rtvH);  // the atlas is one of the panels
         int slot = -1;
         {
@@ -311,6 +315,7 @@ void onFootHudFrameBoundary() {
     if (!wants) detail::g_onFootMenuHeld.store(false, std::memory_order_relaxed);   // the door does not run its decision then: no stale menu
     const bool hudCensus =
         ofh::Mode(g_mode.load(std::memory_order_relaxed)) != ofh::Mode::Off && g_nativeOnFoot.load(std::memory_order_relaxed);
+    aimDotFrameBoundary(hudCensus, wants);      // TEMP .59: the aim dot probe (aim_dot_probe.h)
     aimDotHideFrameBoundary(hudCensus, wants);  // the aim dot (aim_dot.h): its key, the weapon cue's lines, its summary
 
     const uint64_t now = GetTickCount64();
