@@ -86,10 +86,12 @@ inline Rect centreOf(uint32_t w, uint32_t h) {
 }
 
 // The weapon cue: a vector draw into the atlas with one of these index counts. One is enough. 336 and 642: both rifles flown (.42);
-// 168 and 546: the pistol (.44, the probe's census: 546 lays its dot, which in teal is the plain dot's picture to the byte). A weapon
-// whose teal dot is erased goes here: the probe (aim_dot_probe.cpp, removed in .45 and again in .61; the tag
-// v0.19.1-edvronfoot.59 has it) names the draw that lays it.
-constexpr uint32_t kWeaponCueCounts[] = {336, 642, 168, 546};
+// 546: the pistol (.44, the probe's census: 546 lays its dot, which in teal is the plain dot's picture to the byte). The pistol's
+// other draw, 168, is not a cue: after a won ground conflict zone the game draws a vector 168 into the atlas with empty hands
+// (on-foot-aim-dot-victory, the log of 17.11), and the plain dot stayed until the dropship. A weapon whose teal dot is erased goes
+// here: the probe (aim_dot_probe.cpp, removed in .45 and again in .61; the tag v0.19.1-edvronfoot.59 has it) names the draw that
+// lays it.
+constexpr uint32_t kWeaponCueCounts[] = {336, 642, 546};
 constexpr int kWeaponCueN = int(sizeof(kWeaponCueCounts) / sizeof(kWeaponCueCounts[0]));
 // The cue's index in kWeaponCueCounts, or -1.
 inline int weaponCue(bool vectorShader, uint32_t count) {
