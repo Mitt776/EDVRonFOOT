@@ -206,7 +206,7 @@ void nativeVrOnFootFrameBoundary() {
         hudRva = nativeVrHudSwitchFind(reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)), &logSink, nullptr);
     }
     if (!tried) return;
-    // The main menu after gameplay is the game's (nvf::mainMenuStep): both switches step as with the key off until the next LoadGame.
+    // The main menu after gameplay is the game's (nvf::mainMenuStep): both switches step as with the key off until the game goes on.
     static nvf::MainMenuState menuState;
     const nvf::MainMenuStep menu = nvf::mainMenuStep(menuState, onFootKey, journalMainMenu());
     if (menu.kind != nvf::kMenuNone) {

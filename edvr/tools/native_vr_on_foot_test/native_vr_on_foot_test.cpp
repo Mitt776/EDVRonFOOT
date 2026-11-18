@@ -564,11 +564,13 @@ void partI() {
         check(!m.held && !m.menu && m.kind == nvf::kMenuNone, "menu step: key off in the menu is the key's line, not LoadGame's");
         char line[200];
         nvf::formatMainMenu(nvf::kMenuEnter, line, sizeof(line));
-        check(std::strcmp(line, "native-vr-on-foot: main menu (journal Music: MainMenu): both switches back to the game until the next "
-                                "LoadGame") == 0,
+        check(std::strcmp(line, "native-vr-on-foot: main menu (journal Music: MainMenu): both switches back to the game until the game goes "
+                                "on (LoadGame, other music or Resurrect)") == 0,
               "text: the main menu's line");
         nvf::formatMainMenu(nvf::kMenuLeave, line, sizeof(line));
-        check(std::strcmp(line, "native-vr-on-foot: LoadGame (journal): both switches ours again") == 0, "text: the LoadGame line");
+        check(std::strcmp(line, "native-vr-on-foot: the game goes on (journal: LoadGame, other music or Resurrect): both switches "
+                                "ours again") == 0,
+              "text: the game-goes-on line");
         check(nvf::formatMainMenu(nvf::kMenuNone, line, sizeof(line)) == 0, "text: no change, no line");
     }
 
@@ -587,7 +589,7 @@ void partI() {
     g_lines.clear();
     r.frame(true, false);
     check(r.cinema == 0 && r.hud == 1, "glue menu: LoadGame: both ours again (0 and 1)");
-    check(countLines("LoadGame (journal): both switches ours again") == 1 && keyLines() == 0 && g_lines.size() == 1,
+    check(countLines("the game goes on (journal: LoadGame, other music or Resurrect): both switches ours again") == 1 && keyLines() == 0 && g_lines.size() == 1,
           "glue menu: ...one LoadGame line, no on lines");
     g_lines.clear();
     r.frame(true, false);

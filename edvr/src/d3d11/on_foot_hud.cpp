@@ -301,7 +301,7 @@ void onFootHudFrameBoundary() {
     }
     const int onFoot = journalOnFootKnown() ? (journalOnFoot() ? 1 : 0) : -1;
     g_onFoot.store(onFoot, std::memory_order_relaxed);
-    // The main menu after gameplay is the game's: nothing withheld, no layer shown (ofh::Reason::MainMenu), until the next LoadGame.
+    // The main menu after gameplay is the game's: nothing withheld, no layer shown (ofh::Reason::MainMenu), until the game goes on.
     const bool mainMenu = journalMainMenu();
     g_mainMenu.store(mainMenu, std::memory_order_relaxed);
     const bool wants = ofh::Mode(g_mode.load(std::memory_order_relaxed)) != ofh::Mode::Off &&

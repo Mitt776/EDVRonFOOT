@@ -119,7 +119,9 @@ bool journalGameplay();
 
 // The main menu after gameplay: the journal's Music event with the track
 // MainMenu (written the moment the commander leaves to the menu), until the
-// next LoadGame or Shutdown. False at the first menu after launch (no such
+// next LoadGame, Shutdown, Resurrect or Music event with another track: the
+// game also plays that track mid-game (a taxi's supercruise 18.11, after a
+// death), and gameplay goes on from there. False at the first menu after launch (no such
 // event), in flat, and when the watcher is off. The one value read from the
 // journal beyond event names; kept as this flag only. native_vr_on_foot.cpp
 // hands its two switches back to the game while it is true.
