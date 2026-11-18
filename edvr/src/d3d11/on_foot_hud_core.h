@@ -518,7 +518,7 @@ struct DecisionIn {
     Mode mode = Mode::Body;
     bool gameComposites = false;
     int panels = 0;
-    bool mainMenu = false;     // the journal's main menu after gameplay, until the next LoadGame
+    bool mainMenu = false;     // the journal's main menu after gameplay, until the game goes on
 };
 inline Reason decide(const DecisionIn& in) {
     if (in.mode == Mode::Off || !in.nativeOnFoot) return Reason::KeyOff;

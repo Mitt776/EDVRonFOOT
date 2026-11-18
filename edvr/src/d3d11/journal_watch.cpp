@@ -86,7 +86,9 @@ struct Published {
     bool     gameplay = false;
     // The main menu after gameplay: the journal's Music event with the track
     // MainMenu, written the moment the commander leaves to the menu. Cleared by
-    // the next LoadGame and by Shutdown. The first menu after launch has no such
+    // the next LoadGame, by Shutdown, by Resurrect and by any Music event whose
+    // track is not MainMenu (the game plays that track mid-game too: a taxi's
+    // supercruise 18.11, after a death). The first menu after launch has no such
     // event, so this stays false there. Kept as this flag, never as text.
     bool     mainMenu = false;
     uint32_t disembarks = 0;
@@ -349,7 +351,7 @@ std::wstring newestJournal(const Session& s, bool& ours, size_t& enumerated) {
 }
 
 void onEvent(Session& s, const char* name, uint32_t len) {
-    // The five that matter. Everything else in the stream is somebody else's
+    // The ones that matter. Everything else in the stream is somebody else's
     // business, and not keeping it is the privacy posture: names only, and
     // only these names do anything. The one value read beyond a name is the
     // Music event's track MainMenu (scanRange, kMainMenuTok): one fixed string,
@@ -366,6 +368,18 @@ void onEvent(Session& s, const char* name, uint32_t len) {
         ++s.pub.disembarks;
     } else if (len == 6 && memcmp(name, "Embark", 6) == 0) {
         ++s.pub.embarks;
+    } else if (len == 5 && memcmp(name, "Music", 5) == 0) {
+        // Any Music event ends the main menu; the MainMenu track itself, later
+        // in the same line, sets it again in the same in-order pass
+        // (scanRange). The game writes that track mid-game too -- in a taxi's
+        // supercruise (18.11), after a death -- and the next track says
+        // gameplay went on. After the real menu the next event was always
+        // Shutdown or the LoadGame sequence (every journal 2023-2026).
+        s.pub.mainMenu = false;
+    } else if (len == 9 && memcmp(name, "Resurrect", 9) == 0) {
+        // A death writes the MainMenu track and then Resurrect, with no
+        // LoadGame: gameplay goes on.
+        s.pub.mainMenu = false;
     } else if (len == 8 && memcmp(name, "Shutdown", 8) == 0) {
         // The game is leaving. Gameplay ends with it; a relaunch gets a new
         // journal and a fresh LoadGame.
@@ -971,7 +985,8 @@ void journalWatchConfigure() {
                     "(LoadGame), on-foot sessions beginning (Disembark), and "
                     "jumps (StartJump, resolved by FSDJump or "
                     "SupercruiseEntry) for the witchspace star fix, and the "
-                    "main menu (Music: MainMenu, cleared by LoadGame). Event "
+                    "main menu (Music: MainMenu, cleared by LoadGame, any "
+                    "other Music track or Resurrect). Event "
                     "names only, plus that one track; nothing else is read or "
                     "kept.");
 }

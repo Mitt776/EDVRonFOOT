@@ -362,14 +362,14 @@ inline int formatHudSwitch(const ValueStep& step, const SwitchState& s, bool rea
 // THE MAIN MENU AFTER GAMEPLAY (journalMainMenu). Leaving to the menu on foot, the game is still in its own on-foot state, and
 // with both switches held it places the menu where the headset cannot see it (05.11, .52); handing both back, as the key going off
 // does, shows it at once. So while the key is on and the journal says main menu, the switches step as with the key off, and the
-// next LoadGame takes them back. `in` is "key on and main menu"; a change of it because the key changed is the key's own line.
+// game going on (LoadGame, another Music track, Resurrect -- journalMainMenu) takes them back. `in` is "key on and main menu"; a change of it because the key changed is the key's own line.
 struct MainMenuState {
     bool in = false;
 };
 enum : uint8_t {
     kMenuNone = 0,
     kMenuEnter = 1,  // key on, the journal's main menu began: both switches back to the game
-    kMenuLeave = 2,  // key on, LoadGame ended it: both ours again
+    kMenuLeave = 2,  // key on, the game went on (LoadGame, other music, Resurrect): both ours again
 };
 struct MainMenuStep {
     bool held = false;   // the key as the switch steps see it: on, and not the main menu
@@ -390,10 +390,11 @@ inline int formatMainMenu(uint8_t kind, char* out, size_t cap) {
     switch (kind) {
         case kMenuEnter:
             return std::snprintf(out, cap,
-                                 "native-vr-on-foot: main menu (journal Music: MainMenu): both switches back to the game until the next "
-                                 "LoadGame");
+                                 "native-vr-on-foot: main menu (journal Music: MainMenu): both switches back to the game until the game goes "
+                                 "on (LoadGame, other music or Resurrect)");
         case kMenuLeave:
-            return std::snprintf(out, cap, "native-vr-on-foot: LoadGame (journal): both switches ours again");
+            return std::snprintf(out, cap, "native-vr-on-foot: the game goes on (journal: LoadGame, other music or Resurrect): both switches "
+                                 "ours again");
         default:
             return 0;
     }

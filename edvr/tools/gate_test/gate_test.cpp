@@ -1303,6 +1303,18 @@ int journalWorkerChecks() {
             verify(tickUntil([] { return journalMainMenu(); }, 10000),
                    "a MainMenu track cut between two reads is found whole");
         }
+        // The MainMenu track mid-game (on-foot-menu-signal-clear): a taxi's supercruise 18.11 wrote it and then Supercruise;
+        // a death writes it and then Resurrect. Gameplay goes on from either. After the real menu the next event is Shutdown
+        // or the LoadGame sequence, so another event (a friend coming online) leaves the menu alone.
+        verify(readThrough(ev("Friends")) && journalMainMenu(), "another event in the menu (Friends) leaves the main menu");
+        verify(readThrough(music("Supercruise")) && !journalMainMenu(),
+               "another Music track ends the main menu (the taxi's supercruise, 18.11)");
+        verify(readThrough(music("MainMenu")) && journalMainMenu(), "the MainMenu track sets it again");
+        verify(readThrough(ev("Resurrect")) && !journalMainMenu(), "Resurrect ends the main menu (a death)");
+        verify(readThrough(music("MainMenu") + music("Supercruise")) && !journalMainMenu(),
+               "MainMenu and another track in one read end on the later: not the main menu");
+        verify(readThrough(music("Supercruise") + music("MainMenu")) && journalMainMenu(),
+               "another track and MainMenu in one read end on the later: the main menu");
 
         // 0x40000010: the FSD-jump bit and the supercruise bit; Flags2 1: on foot.
         writeWhole(statusFile, statusText(0x40000010u, 1, 9));

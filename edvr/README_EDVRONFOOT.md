@@ -105,8 +105,9 @@ native_vr_on_foot = 0
 ```
 
 Главное меню (с `.53`): когда ты выходишь из игры в главное меню, EDVR на это время отдаёт игре оба переключателя
-(кинотеатр и HUD), как будто ключ выключен, — иначе после выхода с ног меню в шлеме не видно. На следующей загрузке
-EDVR забирает их снова. Сам ключ при этом не меняется. Узнаёт EDVR это по журналу игры (событие `Music` с треком
+(кинотеатр и HUD), как будто ключ выключен, — иначе после выхода с ног меню в шлеме не видно. Когда игра идёт дальше
+(загрузка, другая музыка или возрождение после смерти), EDVR забирает их снова: игра иногда включает «музыку меню» и
+посреди игры, например в суперкруизе такси, и это больше не оставляет кинотеатр до перезахода. Сам ключ при этом не меняется. Узнаёт EDVR это по журналу игры (событие `Music` с треком
 `MainMenu`). Первое меню после запуска игры не трогается — там меню и так видно. С `.54` в главном меню молчит и лист
 HUD (раздел «Интерфейс на ногах»): ничего своего не показывает и меню игры не прячет — строка остановки листа с причиной
 `main menu (journal Music: MainMenu): the game's menu is left to the game`. С `.55` в главном меню выключены и метки
@@ -131,9 +132,10 @@ places its menu itself)`.
 - `native-vr-on-foot: head camera: the game put its cinema-on-foot switch back to 1; 0 again (N time(s))` — игра сама
   вернула кинотеатр, EDVR снова его выключил. Пишется на 1-м, 10-м, 100-м… разе.
 - `native-vr-on-foot: head camera off: the cinema-on-foot switch is the game's 1 again; ...` — ключ выключен.
-- `native-vr-on-foot: main menu (journal Music: MainMenu): both switches back to the game until the next LoadGame` —
-  ты вышел в главное меню, оба переключателя отданы игре. `native-vr-on-foot: LoadGame (journal): both switches ours
-  again` — новая загрузка, переключатели снова у EDVR. Строк `head camera off` / `game HUD off` при этом нет.
+- `native-vr-on-foot: main menu (journal Music: MainMenu): both switches back to the game until the game goes on
+  (LoadGame, other music or Resurrect)` — ты вышел в главное меню (или игра включила «музыку меню»), оба переключателя
+  отданы игре. `native-vr-on-foot: the game goes on (journal: LoadGame, other music or Resurrect): both switches ours
+  again` — загрузка, другая музыка или возрождение, переключатели снова у EDVR. Строк `head camera off` / `game HUD off` при этом нет.
 - `native-vr-on-foot: head camera cannot work (...)` — переключатель не тронут (не найден или в нём неожиданное
   значение); игра работает с обычным кинотеатром.
 - `native-vr-on-foot: game HUD switch found at EliteDangerous64.exe+0x5E85B94 (read at +0x288A055, ...)` — число HUD
