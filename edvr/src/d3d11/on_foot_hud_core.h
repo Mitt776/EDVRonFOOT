@@ -93,10 +93,13 @@ constexpr float kMenuCurve = 0.4f;
 // conflict-zone-panels (the flight of 10.11): the battle statistics on I after a conflict zone's battle, 947x570 beside the HUD's
 // 1628x977 -- 1.661, inside the HUD's 1.665 +- 0.01, so the shape alone took it for a second HUD panel and the larger won. Its own
 // layer, told from the HUD by its share of the HUD's width (1403 at 2412); centred like the info panel, over all.
+// on-foot-side-choice-panel (the flight of 18.11): the side choice on I, neutral in a ground conflict zone (after a reconnect), 1147x1081
+// beside the HUD's 2171x1303 -- 1.061, no layer's shape, so nothing showed it in the headset (the cinema showed it). Its own layer by
+// shape and its share of the HUD's width (1274 at 2412); held by its picture like the statistics; centred, over all.
 enum class Layer : int {
-    Hud = 0, Lift = 1, Answers = 2, Dialog = 3, Mission = 4, Trader = 5, Biologist = 6, Arms = 7, Info = 8, Stats = 9
+    Hud = 0, Lift = 1, Answers = 2, Dialog = 3, Mission = 4, Trader = 5, Biologist = 6, Arms = 7, Info = 8, Stats = 9, Side = 10
 };
-constexpr int kLayers = 10;
+constexpr int kLayers = 11;
 struct LayerSpec {
     double aspect;
     float x0, x1, y0, y1;
@@ -130,6 +133,9 @@ constexpr LayerSpec kLayerSpecs[kLayers] = {
     // the battle statistics: stereo 947x570 at HUD 1628 (1403 at 2412); 0.66 * 1403 / 1410 = 0.6567 wide, 0.7027 high; the HUD's
     // shape, so the HUD's share is what tells it (isStatsPanel)
     {947.0 / 570.0, 0.1716f, 0.8284f, 0.1487f, 0.8513f, kMenuCurve, "the battle statistics", "stats", 1, 1403},
+    // the side choice: stereo 1147x1081 at HUD 2171 (1274x1201 at 2412, HMD quality 0.9 on 18.11; drawn with 19 and 35 draws);
+    // 0.66 * 1274 / 1410 = 0.5963 wide, 0.9994 high (nearly the frame's height); at least 5 draws
+    {1274.0 / 1201.0, 0.2018f, 0.7982f, 0.0003f, 0.9997f, kMenuCurve, "the side choice", "side", 5, 1274},
 };
 inline const LayerSpec& specOf(Layer l) { return kLayerSpecs[int(l)]; }
 inline bool isLayerShape(Layer l, uint32_t w, uint32_t h) {
@@ -344,8 +350,9 @@ inline bool panelHasPicture(const uint8_t* data, uint32_t pitch, uint32_t w, uin
     return false;
 }
 // conflict-zone-panels: the layers with a keep -- the info panel (.51), the second dialog panel (the conflict zone's recruiter after
-// the side is chosen: drawn once, then held by the game, gone after 0.9 s on 10.11) and the battle statistics.
-inline bool keepsPicture(Layer l) { return l == Layer::Info || l == Layer::Dialog || l == Layer::Stats; }
+// the side is chosen: drawn once, then held by the game, gone after 0.9 s on 10.11), the battle statistics and the side choice
+// (on-foot-side-choice-panel).
+inline bool keepsPicture(Layer l) { return l == Layer::Info || l == Layer::Dialog || l == Layer::Stats || l == Layer::Side; }
 // The keep's state: armed by a fresh draw, a read due every kKeepPeriodMs while not drawn, its verdict for the hold.
 struct PanelKeep {
     bool armed = false, saidKept = false, cleared = false;
@@ -684,7 +691,7 @@ inline int formatSummary(const Summary& s, const Panel* p, int count, uint32_t d
         e += std::snprintf(extra + e, sizeof(extra) - size_t(e), " changes-unwritten=%u", unwritten);
     if (seen.unrecorded && e >= 0 && size_t(e) < sizeof(extra))
         std::snprintf(extra + e, sizeof(extra) - size_t(e), " new-panels-unrecorded=%u", seen.unrecorded);
-    char menus[480] = "";
+    char menus[560] = "";
     int m = 0;
     for (int k = 1; k < kLayers && m >= 0 && size_t(m) < sizeof(menus); ++k) {
         const LayerCount& c = s.menus[k];
