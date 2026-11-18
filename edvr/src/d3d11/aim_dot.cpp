@@ -36,6 +36,7 @@ std::atomic<uint32_t> g_atlasW{0}, g_atlasH{0};
 // The draw thread counts, the boundary takes them every 30 s.
 std::atomic<uint64_t> g_cAtlasFrames{0}, g_cWeaponFrames{0}, g_cHidden{0}, g_cRewrites{0}, g_cFailures{0};
 std::atomic<uint64_t> g_cPlain{0}, g_cOther{0}, g_cUnread{0}, g_cQuiet{0};
+std::atomic<uint64_t> g_cFarSearches{0}, g_cFarFound{0};  // on-foot-aim-dot-victory: the whole atlas searched, the dot found
 std::atomic<int> g_centreLines{0};  // the decision's lines in this summary window
 
 void say(const char* line) { Log::get().note("%s", line); }
@@ -59,9 +60,19 @@ struct State {
     uint64_t ringFrame[kRing] = {};
     uint32_t ringCue[kRing] = {};  // .63: the weapon cue of the frame each copy was taken in (the learning skips those)
     uint32_t rw = 0, rh = 0, rfmt = 0;
+    uint32_t ringY[kRing] = {};  // the rows' top each copy was taken from (victory: the rows move with the dot)
     int ringNext = 0;
     bool plain = false, plainSaid = false;
-    uint32_t plainAt = 0;
+    uint32_t plainAt = 0, plainY = 0;
+    // The rows read (on-foot-aim-dot-victory): their top, the centre's (noteSize) until the far search finds the dot elsewhere.
+    // The far search: the whole atlas copied when the newest read was empty with no weapon, every
+    // kFarSearchMs, one copy in flight (`farFrame` its frame, 0 none), read without waiting.
+    uint32_t rowY = 0;
+    bool emptyNoWeapon = false, farMissSaid = false;
+    ID3D11Texture2D* farTex = nullptr;
+    uint32_t fw = 0, fh = 0, ffmt = 0;
+    uint64_t farFrame = 0, farAt = 0;
+    std::vector<uint8_t> farSeen;
     adh::CentreRead said;  // the read last said in a decision line (.58: a line on any change of it)
     uint64_t nowAt = 0;    // when the last `centre now` line was written (GetTickCount64)
     // This frame's.
@@ -72,7 +83,7 @@ struct State {
     bool weapon = false, weaponSaid = false;
 
     void releaseAll() {
-        for (ID3D11Texture2D** t : {&atlas, &zero, &ring[0], &ring[1], &ring[2]})
+        for (ID3D11Texture2D** t : {&atlas, &zero, &ring[0], &ring[1], &ring[2], &farTex})
             if (*t) {
                 (*t)->Release();
                 *t = nullptr;
@@ -84,7 +95,13 @@ struct State {
         for (uint64_t& f : ringFrame) f = 0;
         ringNext = 0;
         plain = false;
-        plainAt = 0;
+        plainAt = plainY = 0;
+        rowY = 0;
+        emptyNoWeapon = farMissSaid = false;
+        fw = fh = ffmt = 0;
+        farFrame = farAt = 0;
+        farSeen.clear();
+        farSeen.shrink_to_fit();
         learner.reset();
         for (uint32_t& c : ringCue) c = 0;
         g_holding.store(false, std::memory_order_relaxed);
@@ -133,6 +150,7 @@ void noteSize(uint32_t w, uint32_t h, uint32_t fmt) {
     g_s.h = h;
     g_s.fmt = fmt;
     g_s.centre = adh::centreOf(w, h);
+    g_s.rowY = g_s.centre.y0;  // a new atlas or size: the rows are the centre's again
     if (g_s.pattern.atlasW != w || g_s.pattern.atlasH != h) {
         g_s.pattern = adh::patternOf(w, h);
         g_s.learner.reset();  // a new size: learned again
@@ -257,8 +275,9 @@ bool ringReady() {
 // mapped: `rgba`, `pitch` are its bytes, the strip from the atlas's x 0 (.60: the plain dot is looked for along it; the pixels line is
 // the window the read names, `at`); `weapon`: the cue of the frame the copy was taken in. Until the plain dot is learned (.63, not at
 // 2076x1787) the read goes by the scaled pattern and feeds the learning; one line when it learns or first refuses.
-void decide(const uint8_t* strip, uint32_t pitch, bool weapon) {
-    const bool learning = !g_s.learner.learned;
+// `y`: the top of the rows the copy holds (victory: the far search moves them); the learning only at the centre's own rows.
+void decide(const uint8_t* strip, uint32_t pitch, bool weapon, uint32_t y) {
+    const bool learning = !g_s.learner.learned && y == g_s.centre.y0;
     const adh::Pattern& pat = adh::activePattern(g_s.learner, g_s.pattern);
     const adh::CentreRead read = adh::readRow(strip, pitch, g_s.rw, g_s.centre.x0, pat);
     const uint8_t* rgba = strip ? strip + size_t(read.at) * 4 : nullptr;
@@ -278,6 +297,9 @@ void decide(const uint8_t* strip, uint32_t pitch, bool weapon) {
     (plain ? g_cPlain : g_cOther).fetch_add(1, std::memory_order_relaxed);
     g_s.plain = plain;
     g_s.plainAt = read.at;
+    g_s.plainY = y;
+    g_s.emptyNoWeapon = read.why == adh::Why::Empty && !weapon;
+    if (read.why != adh::Why::Empty) g_s.farMissSaid = false;  // the next run of empty reads says its first miss again
     const uint64_t now = GetTickCount64();
     if (!g_s.nowAt || now - g_s.nowAt >= adh::kCentreNowMs) {
         g_s.nowAt = now;
@@ -304,6 +326,87 @@ void decide(const uint8_t* strip, uint32_t pitch, bool weapon) {
     char text[adh::kPixelsLineCap];
     adh::formatCentrePixels(rgba, pitch, pat.w, pat.h, text, sizeof(text));
     say(text);
+}
+
+// The whole atlas's staging copy for the far search, the atlas's size and format; remade on a new size.
+bool farReady() {
+    if (g_s.farTex && g_s.fw == g_s.w && g_s.fh == g_s.h && g_s.ffmt == g_s.fmt) return true;
+    if (g_s.farTex) g_s.farTex->Release();
+    g_s.farTex = nullptr;
+    g_s.farFrame = 0;
+    ID3D11Device* device = nullptr;
+    g_s.atlas->GetDevice(&device);
+    if (!device) return false;
+    D3D11_TEXTURE2D_DESC d{};
+    d.Width = g_s.w;
+    d.Height = g_s.h;
+    d.MipLevels = 1;
+    d.ArraySize = 1;
+    d.Format = DXGI_FORMAT(g_s.fmt);
+    d.SampleDesc.Count = 1;
+    d.Usage = D3D11_USAGE_STAGING;
+    d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    const HRESULT hr = device->CreateTexture2D(&d, nullptr, &g_s.farTex);
+    device->Release();
+    if (FAILED(hr) || !g_s.farTex) {
+        g_s.farTex = nullptr;
+        return false;
+    }
+    g_s.fw = g_s.w;
+    g_s.fh = g_s.h;
+    g_s.ffmt = g_s.fmt;
+    return true;
+}
+
+// The far search (on-foot-aim-dot-victory): a copy in flight is read when ready, without waiting, and the rows move to the dot it
+// finds; otherwise, while the newest read is empty with no weapon in this frame, the whole atlas is copied every kFarSearchMs. Before
+// the erase, as the rows' copy. False: the module stood down.
+bool farStep(ID3D11DeviceContext* ctx) {
+    if (g_s.farFrame) {
+        D3D11_MAPPED_SUBRESOURCE m{};
+        const HRESULT hr = ctx->Map(g_s.farTex, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
+        if (hr == DXGI_ERROR_WAS_STILL_DRAWING) return true;
+        if (FAILED(hr)) {
+            standDown("the atlas's copy for the far search could not be read");
+            return false;
+        }
+        LARGE_INTEGER f, t0, t1;
+        QueryPerformanceFrequency(&f);
+        QueryPerformanceCounter(&t0);
+        const adh::Pattern& pat = adh::activePattern(g_s.learner, g_s.pattern);
+        const adh::AtlasRead a = adh::readAtlas(static_cast<const uint8_t*>(m.pData), m.RowPitch, g_s.fw, g_s.fh, pat, g_s.centre.x0,
+                                                g_s.centre.y0, g_s.farSeen);
+        ctx->Unmap(g_s.farTex, 0);
+        QueryPerformanceCounter(&t1);
+        g_s.farFrame = 0;
+        g_cFarSearches.fetch_add(1, std::memory_order_relaxed);
+        const double ms = double(t1.QuadPart - t0.QuadPart) * 1000.0 / double(f.QuadPart);
+        char line[400];
+        if (a.found && a.y + g_s.centre.h() <= g_s.h) {
+            g_cFarFound.fetch_add(1, std::memory_order_relaxed);
+            adh::formatFarFound(a, g_s.rowY, ms, line, sizeof(line));
+            say(line);
+            g_s.rowY = a.y;
+            g_s.emptyNoWeapon = false;  // the rows' next read decides
+            g_s.farMissSaid = false;
+        } else if (!g_s.farMissSaid) {
+            adh::formatFarMissed(a, g_s.rowY, ms, line, sizeof(line));
+            say(line);
+            g_s.farMissSaid = true;
+        }
+        return true;
+    }
+    if (!g_s.emptyNoWeapon || g_s.cue) return true;
+    const uint64_t now = GetTickCount64();
+    if (g_s.farAt && now - g_s.farAt < adh::kFarSearchMs) return true;
+    if (!farReady()) {
+        standDown("a texture to read the atlas back for the far search could not be made");
+        return false;
+    }
+    ctx->CopyResource(g_s.farTex, g_s.atlas);
+    g_s.farFrame = g_s.frame ? g_s.frame : 1;
+    g_s.farAt = now;
+    return true;
 }
 
 // The ring's ready copies, the oldest first, without waiting: the newest read decides. Then this frame's centre into the next slot
@@ -334,17 +437,20 @@ bool readAndCopy(ID3D11DeviceContext* ctx) {
             standDown("the centre's copy could not be read");
             return false;
         }
-        decide(static_cast<const uint8_t*>(m.pData), m.RowPitch, g_s.ringCue[oldest] != 0);
+        decide(static_cast<const uint8_t*>(m.pData), m.RowPitch, g_s.ringCue[oldest] != 0, g_s.ringY[oldest]);
         ctx->Unmap(g_s.ring[oldest], 0);
         g_s.ringFrame[oldest] = 0;
     }
+    if (!farStep(ctx)) return false;
     const int slot = g_s.ringNext;
     if (g_s.ringFrame[slot]) g_cUnread.fetch_add(1, std::memory_order_relaxed);
     const adh::Rect& r = g_s.centre;
-    D3D11_BOX box{0, r.y0, 0, g_s.w, r.y1, 1};
+    if (g_s.rowY + r.h() > g_s.h) g_s.rowY = r.y0;  // set by noteSize on adopt; never past the edge
+    D3D11_BOX box{0, g_s.rowY, 0, g_s.w, g_s.rowY + r.h(), 1};
     ctx->CopySubresourceRegion(g_s.ring[slot], 0, 0, 0, 0, g_s.atlas, 0, &box);
     g_s.ringFrame[slot] = g_s.frame ? g_s.frame : 1;
     g_s.ringCue[slot] = g_s.cue;
+    g_s.ringY[slot] = g_s.rowY;
     g_s.ringNext = (slot + 1) % State::kRing;
     return true;
 }
@@ -396,8 +502,9 @@ void aimDotHideBeforeEyeComposite(ID3D11DeviceContext* ctx, const void* const re
             standDown("a transparent texture for the centre could not be made");
             return;
         }
-        if (g_s.plainAt + r.w() > g_s.w) return;  // a read from another size: never past the edge
-        ctx->CopySubresourceRegion(g_s.atlas, 0, g_s.plainAt, r.y0, 0, g_s.zero, 0, nullptr);  // where the read found it (.60)
+        if (g_s.plainAt + r.w() > g_s.w || g_s.plainY + r.h() > g_s.h) return;  // a read from another size: never past the edge
+        // Where the read found it: along the rows (.60), the rows where the far search put them (victory).
+        ctx->CopySubresourceRegion(g_s.atlas, 0, g_s.plainAt, g_s.plainY, 0, g_s.zero, 0, nullptr);
         (g_s.erased ? g_cRewrites : g_cHidden).fetch_add(1, std::memory_order_relaxed);
         g_s.erased = true;
         g_s.rewrote = false;
@@ -451,6 +558,8 @@ void aimDotHideFrameBoundary(bool hudCensus, bool onFoot) {
         s.other = g_cOther.exchange(0, std::memory_order_relaxed);
         s.unread = g_cUnread.exchange(0, std::memory_order_relaxed);
         s.quietLines = g_cQuiet.exchange(0, std::memory_order_relaxed);
+        s.farSearches = g_cFarSearches.exchange(0, std::memory_order_relaxed);
+        s.farFound = g_cFarFound.exchange(0, std::memory_order_relaxed);
         g_centreLines.store(0, std::memory_order_relaxed);
         if (frames && (s.atlasFrames || s.failures)) {
             char line[600];

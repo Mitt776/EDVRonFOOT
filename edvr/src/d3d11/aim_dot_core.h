@@ -18,6 +18,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
+#include <vector>
 
 namespace edvr {
 namespace adh {
@@ -86,10 +88,12 @@ inline Rect centreOf(uint32_t w, uint32_t h) {
 }
 
 // The weapon cue: a vector draw into the atlas with one of these index counts. One is enough. 336 and 642: both rifles flown (.42);
-// 168 and 546: the pistol (.44, the probe's census: 546 lays its dot, which in teal is the plain dot's picture to the byte). A weapon
-// whose teal dot is erased goes here: the probe (aim_dot_probe.cpp, removed in .45 and again in .61; the tag
-// v0.19.1-edvronfoot.59 has it) names the draw that lays it.
-constexpr uint32_t kWeaponCueCounts[] = {336, 642, 168, 546};
+// 546: the pistol (.44, the probe's census: 546 lays its dot, which in teal is the plain dot's picture to the byte). The pistol's
+// other draw, 168, is not a cue: after a won ground conflict zone the game draws a vector 168 into the atlas with empty hands
+// (on-foot-aim-dot-victory, the log of 17.11), and the plain dot stayed until the dropship. A weapon whose teal dot is erased goes
+// here: the probe (aim_dot_probe.cpp, removed in .45 and again in .61; the tag v0.19.1-edvronfoot.59 has it) names the draw that
+// lays it.
+constexpr uint32_t kWeaponCueCounts[] = {336, 642, 546};
 constexpr int kWeaponCueN = int(sizeof(kWeaponCueCounts) / sizeof(kWeaponCueCounts[0]));
 // The cue's index in kWeaponCueCounts, or -1.
 inline int weaponCue(bool vectorShader, uint32_t count) {
@@ -345,6 +349,103 @@ inline CentreRead readRow(const uint8_t* rgba, uint32_t pitch, uint32_t stripW, 
     r.at = best;
     return r;
 }
+// The plain dot anywhere in the atlas (on-foot-aim-dot-victory, 18.11). After a won ground conflict zone, as the battle statistics
+// close, the game lays the plain dot far from the centre's rows: the probe's snapshot (2491x2145) had it alone at x 2073..2077,
+// y 1105..1109, the centre's rows empty over the whole width; the eye still shows it in the middle. So when the rows read empty
+// without a weapon the glue copies the whole atlas and this finds the dot: each 8-connected spot of pixels kCorePeak or brighter
+// whose box is the pattern's spot limit or less each way is a candidate (a marker's ring, text or a bar is larger and never tried);
+// around it every window that holds the spot off its edge is tried, the one closest to the pattern's brightness read as readCentre
+// reads the centre. Of the plain ones the closest wins (a tie: the nearer the centre). `seen`: scratch, w * h bytes, resized here.
+// `x`, `y`: the window's top left, where the rows go and the erase lands.
+struct AtlasRead {
+    bool found = false;
+    uint32_t x = 0, y = 0;
+    uint32_t spots = 0;  // spots small enough to be tried
+    CentreRead read;     // the winner's read (at = x)
+};
+inline AtlasRead readAtlas(const uint8_t* rgba, uint32_t pitch, uint32_t w, uint32_t h, const Pattern& pat, uint32_t centreX0,
+                           uint32_t centreY0, std::vector<uint8_t>& seen) {
+    AtlasRead out;
+    if (!rgba || !pat.valid || w < pat.w || h < pat.h) return out;
+    seen.assign(size_t(w) * h, 0);
+    std::vector<uint32_t> stack;
+    int bestD = 1 << 30;
+    const auto dist2 = [&](uint32_t x, uint32_t y) {
+        const int64_t dx = int64_t(x) - centreX0, dy = int64_t(y) - centreY0;
+        return dx * dx + dy * dy;
+    };
+    for (uint32_t y = 0; y < h; ++y)
+        for (uint32_t x = 0; x < w; ++x) {
+            const size_t i = size_t(y) * w + x;
+            if (seen[i] || brightnessOf(rgba + size_t(y) * pitch + size_t(x) * 4) < kCorePeak) continue;
+            uint32_t x0 = x, x1 = x, y0 = y, y1 = y;
+            seen[i] = 1;
+            stack.assign(1, uint32_t(i));
+            while (!stack.empty()) {
+                const uint32_t k = stack.back();
+                stack.pop_back();
+                const uint32_t px = k % w, py = k / w;
+                if (px < x0) x0 = px;
+                if (px > x1) x1 = px;
+                if (py < y0) y0 = py;
+                if (py > y1) y1 = py;
+                for (int dy = -1; dy <= 1; ++dy)
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const int64_t nx = int64_t(px) + dx, ny = int64_t(py) + dy;
+                        if (nx < 0 || ny < 0 || nx >= int64_t(w) || ny >= int64_t(h)) continue;
+                        const size_t j = size_t(ny) * w + size_t(nx);
+                        if (seen[j] || brightnessOf(rgba + size_t(ny) * pitch + size_t(nx) * 4) < kCorePeak) continue;
+                        seen[j] = 1;
+                        stack.push_back(uint32_t(j));
+                    }
+            }
+            if (x1 - x0 + 1 > pat.spotMax || y1 - y0 + 1 > pat.spotMax) continue;
+            ++out.spots;
+            // Windows holding the spot one pixel off each edge, inside the atlas.
+            const int64_t sx0 = std::max<int64_t>(0, int64_t(x1) + 2 - pat.w), sx1 = std::min<int64_t>(int64_t(x0) - 1, w - pat.w);
+            const int64_t sy0 = std::max<int64_t>(0, int64_t(y1) + 2 - pat.h), sy1 = std::min<int64_t>(int64_t(y0) - 1, h - pat.h);
+            int localD = 1 << 30;
+            uint32_t bx = 0, by = 0;
+            bool any = false;
+            for (int64_t sy = sy0; sy <= sy1; ++sy)
+                for (int64_t sx = sx0; sx <= sx1; ++sx) {
+                    const int d = windowDistance(rgba + size_t(sy) * pitch, pitch, uint32_t(sx), pat, localD);
+                    if (d < localD) {
+                        localD = d;
+                        bx = uint32_t(sx);
+                        by = uint32_t(sy);
+                        any = true;
+                    }
+                }
+            if (!any) continue;
+            CentreRead r = readCentre(rgba + size_t(by) * pitch + size_t(bx) * 4, pitch, pat);
+            if (!r.plain) continue;
+            if (!out.found || localD < bestD || (localD == bestD && dist2(bx, by) < dist2(out.x, out.y))) {
+                out.found = true;
+                bestD = localD;
+                out.x = bx;
+                out.y = by;
+                r.at = bx;
+                out.read = r;
+            }
+        }
+    return out;
+}
+// Every kFarSearchMs while the rows read empty with no weapon (the glue copies the whole atlas then; at most one copy in flight).
+constexpr uint64_t kFarSearchMs = 1000;
+inline void formatFarFound(const AtlasRead& a, uint32_t fromY, double ms, char* out, size_t cap) {
+    std::snprintf(out, cap,
+                  "aim dot: far search: the plain dot at x%u y%u (the rows %u -> %u; the centre's rows were empty, no weapon; %u small spot(s) "
+                  "tried, %.1f ms)",
+                  a.x, a.y, fromY, a.y, a.spots, ms);
+}
+inline void formatFarMissed(const AtlasRead& a, uint32_t rowY, double ms, char* out, size_t cap) {
+    std::snprintf(out, cap,
+                  "aim dot: far search: no plain dot in the atlas (the rows at y%u stay; %u small spot(s) tried, %.1f ms; again every %llu ms "
+                  "while empty)",
+                  rowY, a.spots, ms, (unsigned long long)kFarSearchMs);
+}
+
 // The learned pattern (.63, on-foot-aim-dot-any-size, design 3 and 5). Only on a size that is not 2076x1787: right after stepping out
 // the game lays the plain dot in the centre (.59: the shift is reset). kLearnReads reads in a row with no weapon cue, the read's window
 // at the centre's left edge (+-1) and dot-like (spotOk: bright, the spot within the limit, off the window's edge -- the sum is not
@@ -511,15 +612,17 @@ inline void formatInert(const char* why, char* out, size_t cap) {
 
 struct Summary {
     uint64_t atlasFrames = 0, weaponFrames = 0, hidden = 0, rewrites = 0, plain = 0, other = 0, unread = 0, quietLines = 0, failures = 0;
+    uint64_t farSearches = 0, farFound = 0;  // on-foot-aim-dot-victory: whole-atlas searches, of them the dot found
     void clear() { *this = Summary{}; }
 };
 inline void formatSummary(Mode m, uint32_t w, uint32_t h, const Summary& s, char* out, size_t cap) {
     std::snprintf(out, cap,
                   "aim dot: summary (%s, 30 s on foot): atlas %ux%u, atlas_frames=%llu, weapon_frames=%llu, hidden=%llu, rewrites=%llu, "
-                  "plain=%llu, other=%llu, unread=%llu, quiet_lines=%llu, failures=%llu",
+                  "plain=%llu, other=%llu, unread=%llu, quiet_lines=%llu, failures=%llu, far_searches=%llu, far_found=%llu",
                   modeName(m), w, h, (unsigned long long)s.atlasFrames, (unsigned long long)s.weaponFrames, (unsigned long long)s.hidden,
                   (unsigned long long)s.rewrites, (unsigned long long)s.plain, (unsigned long long)s.other, (unsigned long long)s.unread,
-                  (unsigned long long)s.quietLines, (unsigned long long)s.failures);
+                  (unsigned long long)s.quietLines, (unsigned long long)s.failures, (unsigned long long)s.farSearches,
+                  (unsigned long long)s.farFound);
 }
 
 }  // namespace adh

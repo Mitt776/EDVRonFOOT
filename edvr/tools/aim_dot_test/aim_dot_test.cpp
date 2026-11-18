@@ -2,8 +2,8 @@
 //
 // Drives the pure half: the key's every value, rubbish and empty (both hide); the atlas by its 1.161 proportions; the centre in pixels
 // (2076x1787 -> x 1032..1044, y 456..467 with .42's dot x 1035..1041, y 459..464 inside; 2768x2383 -> x 1377..1391, y 608..623),
-// rounded outward, inside a tiny atlas and never empty; the weapon cue (vector 336 or 642 yes, each alone, the pistol's 168 and 546
-// too; .42's other vector counts and text or icons of 336 no); the plain dot by its shape, any colour (.57), on real centres (.42's
+// rounded outward, inside a tiny atlas and never empty; the weapon cue (vector 336 or 642 yes, each alone, the pistol's 546 too;
+// 168, .42's other vector counts and text or icons of 336 no); the plain dot by its shape, any colour (.57), on real centres (.42's
 // plain dots and .56's red plain dot yes; the weapon's dot and the tool's own red dot in the hand no) and made ones (blue, 40 dimmer
 // yes; a rim 60 brighter, an empty or dim centre, a dot at the window's edge and another atlas size no); and the text of every line,
 // the signature and the pixels line; .58's signature compare (a line on any change of it) and the centre now line; .60's search along
@@ -15,7 +15,9 @@
 // 1868 and 1245 plain, the tool's dots other), and the lines: pattern for, the 7x8 pixels line whole and the 14x15 one cut; .63's
 // learning (five dot-like reads at the centre learn, four or a break do not, nor a weapon's frames or a dot right of the centre; the
 // real plain dots learned and read plain by the learned pattern, moved too; the tool's dot refused by the 25% guard; never at
-// 2076x1787; reset learns again) and its lines.
+// 2076x1787; reset learns again) and its lines; on-foot-aim-dot-victory's search of the whole atlas (the plain dot far from the
+// centre's rows found at its window, in a corner and at an edge, any colour; a bar not a spot; the tool's and the weapon's dots, an
+// empty atlas, no pattern, no pixels not found; the nearer of two) and its lines, the summary's far counts.
 #include "../../src/d3d11/aim_dot_core.h"
 #include "aim_dot_samples.h"
 #include <algorithm>
@@ -80,7 +82,8 @@ void partCentre() {
 void partCue() {
     check(weaponCue(true, 336) == 0, "vector 336");
     check(weaponCue(true, 642) == 1, "vector 642");
-    check(weaponCue(true, 168) == 2 && weaponCue(true, 546) == 3, "the pistol's vector 168 and 546 (.44)");
+    check(weaponCue(true, 546) == 2, "the pistol's vector 546 (.44)");
+    check(weaponCue(true, 168) < 0, "vector 168 is not the cue (a won conflict zone draws it with empty hands, 17.11)");
     const uint32_t others[] = {3, 21, 66, 120, 138, 141, 186, 231, 0, 6};
     bool none = true;
     for (uint32_t n : others) none = none && weaponCue(true, n) < 0;
@@ -584,8 +587,8 @@ void partLines() {
     check(std::strcmp(line, "aim dot: weapon on (vector n=336,642)") == 0, "weapon on, both");
     formatWeaponOn(2u, line, sizeof(line));
     check(std::strcmp(line, "aim dot: weapon on (vector n=642)") == 0, "weapon on, one");
-    formatWeaponOn(12u, line, sizeof(line));
-    check(std::strcmp(line, "aim dot: weapon on (vector n=168,546)") == 0, "weapon on, the pistol");
+    formatWeaponOn(4u, line, sizeof(line));
+    check(std::strcmp(line, "aim dot: weapon on (vector n=546)") == 0, "weapon on, the pistol");
     formatWeaponOff(line, sizeof(line));
     check(std::strcmp(line, "aim dot: weapon off") == 0, "weapon off");
     {
@@ -672,6 +675,86 @@ void partLines() {
     s.clear();
     formatSummary(Mode::Show, 0, 0, s, line, sizeof(line));
     check(has(line, "(show, 30 s on foot): atlas 0x0, atlas_frames=0"), "a summary of zeros");
+    s.clear();
+    s.farSearches = 5;
+    s.farFound = 1;
+    formatSummary(Mode::Hide, 2491, 2145, s, line, sizeof(line));
+    check(has(line, "failures=0, far_searches=5, far_found=1"), "summary: the far search's counts (victory)");
+}
+
+// on-foot-aim-dot-victory: the plain dot anywhere in the atlas. A made atlas (600x400, 4 bytes a pixel, a pitch wider than the row),
+// .42's samples put with their window's top left at x, y; the pattern .42's own (readAtlas does not ask the atlas's size of it).
+constexpr uint32_t kAtlasW = 600, kAtlasH = 400, kAtlasPitch = kAtlasW * 4 + 32;
+std::vector<uint8_t> g_atlas(size_t(kAtlasPitch) * kAtlasH);
+void atlasClear() { std::fill(g_atlas.begin(), g_atlas.end(), uint8_t(0)); }
+void atlasPut(const uint8_t* rgb, uint32_t x0, uint32_t y0) {
+    for (uint32_t y = 0; y < kPatternH; ++y)
+        for (uint32_t x = 0; x < kPatternW; ++x) {
+            uint8_t* p = g_atlas.data() + size_t(y0 + y) * kAtlasPitch + size_t(x0 + x) * 4;
+            for (uint32_t c = 0; c < 3; ++c) p[c] = rgb[(y * kPatternW + x) * 3 + c];
+            p[3] = 255;
+        }
+}
+std::vector<uint8_t> g_atlasSeen;
+AtlasRead atlasRead(uint32_t cx = 300, uint32_t cy = 100) {
+    std::vector<uint8_t> seen;
+    return readAtlas(g_atlas.data(), kAtlasPitch, kAtlasW, kAtlasH, P2076(), cx, cy, seen);
+}
+
+void partFar() {
+    atlasClear();
+    AtlasRead a = atlasRead();
+    check(!a.found && a.spots == 0, "far: an empty atlas: nothing, no spot");
+    atlasPut(kPlainDot, 450, 300);
+    a = atlasRead();
+    check(a.found && a.x == 450 && a.y == 300 && a.read.plain && a.read.at == 450 && a.spots == 1,
+          "far: the plain dot far from the centre's rows (as after a victory): found at its window");
+    for (uint32_t y = 50; y < 57; ++y)
+        for (uint32_t x = 100; x < 160; ++x) {
+            uint8_t* p = g_atlas.data() + size_t(y) * kAtlasPitch + size_t(x) * 4;
+            p[0] = p[1] = p[2] = 220;
+            p[3] = 255;
+        }
+    a = atlasRead();
+    check(a.found && a.x == 450 && a.y == 300 && a.spots == 1, "far: a marker's bright bar is not a spot; the dot still found");
+    atlasClear();
+    atlasPut(kTool43, 450, 300);
+    a = atlasRead();
+    check(!a.found, "far: the tool's own red dot alone: not the plain dot");
+    atlasClear();
+    atlasPut(kWeapon42, 200, 200);
+    a = atlasRead();
+    check(!a.found, "far: the weapon's dot alone: not the plain dot");
+    atlasClear();
+    atlasPut(kRed56, 20, 380);
+    a = atlasRead();
+    check(a.found && a.x == 20 && a.y == 380, ".56's red plain dot near the bottom edge: found (any colour)");
+    atlasClear();
+    atlasPut(kPlainDot, 0, 0);
+    a = atlasRead();
+    check(a.found && a.x == 0 && a.y == 0, "far: the plain dot in the top left corner: found");
+    atlasClear();
+    atlasPut(kPlainDot, 500, 300);
+    atlasPut(kPlainDot, 320, 120);
+    a = atlasRead();
+    check(a.found && a.x == 320 && a.y == 120 && a.spots == 2, "far: two plain dots: the nearer the centre");
+    check(!readAtlas(nullptr, kAtlasPitch, kAtlasW, kAtlasH, P2076(), 0, 0, g_atlasSeen).found, "far: no pixels");
+    std::vector<uint8_t> seen;
+    check(!readAtlas(g_atlas.data(), kAtlasPitch, kAtlasW, kAtlasH, patternOf(0, 0), 0, 0, seen).found, "far: no pattern");
+    check(!readAtlas(g_atlas.data(), kAtlasPitch, 8, 8, P2076(), 0, 0, seen).found, "far: an atlas smaller than the window");
+    // The lines.
+    char line[400];
+    a = atlasRead();
+    formatFarFound(a, 456, 9.8, line, sizeof(line));
+    check(has(line, "aim dot: far search: the plain dot at x320 y120 (the rows 456 -> 120; the centre's rows were empty, no weapon; "
+                    "2 small spot(s) tried, 9.8 ms)"),
+          "far: the found line");
+    atlasClear();
+    a = atlasRead();
+    formatFarMissed(a, 456, 10.1, line, sizeof(line));
+    check(has(line, "aim dot: far search: no plain dot in the atlas (the rows at y456 stay; 0 small spot(s) tried, 10.1 ms; again "
+                    "every 1000 ms while empty)"),
+          "far: the missed line");
 }
 }  // namespace
 
@@ -689,6 +772,7 @@ int main(int argc, char** argv) {
     partScaled();
     partLearn();
     partLines();
+    partFar();
     std::printf("%s: aim_dot_test, %d checks, %d failed\n", g_failures ? "FAIL" : "PASS", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }
