@@ -18,8 +18,8 @@
 - [x] 2.4 Стенд `native_vr_on_foot_test`: новые тексты строк.
 - [x] 2.5 README (`edvr/README_EDVRONFOOT.md`, «Главное меню» и строки лога); `docs/research/native-vr-on-foot.md` —
   раздел «Ложная музыка меню» и строка в `## Status`; ROADMAP. `check_status_blocks.py` проходит.
-- [ ] 2.6 Полная сборка `--jobs 8` → «all gates passed»; коммит; `--dll-only`; установка (`--dry-run`, затем установка,
-  `--verify-only`, хеш `edvr.ini` тот же).
+- [x] 2.6 Полная сборка `--jobs 8` → «all gates passed»; коммит; `--dll-only`; установка (`--dry-run`, затем установка,
+  `--verify-only`, хеш `edvr.ini` тот же). (18.11: `2992017`, gate_test и native_vr_on_foot_test в полной сборке, verify`n  ok, хеш ini тот же.)
 
 ## 3. Полёт и разбор
 
