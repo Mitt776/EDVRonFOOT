@@ -654,7 +654,7 @@ POSE_GAP_RE = re.compile(
     r"(?:mean (?P<gm>[-+0-9.]+) ms \(min (?P<gmin>[-+0-9.]+) max (?P<gmax>[-+0-9.]+)\)|n/a) "
     r"angle-to-drawn (?:mean (?P<am>[-+0-9.]+) max (?P<amax>[-+0-9.]+) deg|n/a) "
     r"head (?:(?P<head>[-+0-9.]+) deg/s|n/a) waitgetposes (?P<waits>\d+) failed (?P<failed>\d+)(?: fallback (?P<fb>\d+))?(?: mode (?P<mode>next|frame))?")
-MARKER_POSE_RE = re.compile(r"\] (?P<text>marker pose: .*?)\s*$")
+MARKER_POSE_RE = re.compile(r"(?:^|[\] ])(?P<text>marker pose: .*?)\s*$")
 POSE_GAP_MORE_RE = re.compile(r"pose gap: more than (?P<limit>\d+) callers in a window; (?P<dropped>\d+) calls not counted")
 
 
@@ -753,8 +753,9 @@ def print_pose_tally(text):
           "game's image, shows the true lag (before the fix Elite's was 41-44 ms and up to 4.1 degrees, r = +0.98).")
     markers = [m.group("text") for m in (MARKER_POSE_RE.search(l) for l in text.splitlines()) if m]
     if markers:
-        print("[edvr] on-foot marker pose probe (%d line(s)); in mode frame the gap reads about the measured step (+22 ms at 45 fps) and a lower "
-              "angle-to-drawn only confirms the mode acted -- whether the hints stuck is the pilot's call:" % len(markers))
+        print("[edvr] on-foot marker pose probe (%d line(s)); in mode frame the gap reads about the measured step (+22 ms at 45 fps) and "
+              "angle-to-drawn grows with it (the answer is a step ahead of the frame being drawn) -- that only confirms the mode acted; "
+              "whether the hints stuck is the pilot's call:" % len(markers))
         for line in text.splitlines():
             m = MARKER_POSE_RE.search(line)
             if m:
@@ -10523,7 +10524,8 @@ def self_test_pose():
     if len(fw) != 25 or fw[-1]["mode"] != "frame" or sorted(r["mode"] for r in frows) != ["frame", "next"] \
             or [r for r in frows if r["mode"] == "frame"][0]["calls"] != 100 or [r for r in frows if r["mode"] == "next"][0]["calls"] != 1440:
         fail("a mode frame line is not a row of its own -> %r" % (frows,))
-    marker_text = framed + "[00:14:00.000] marker pose: frame (on foot, measured frame step)\n" \
+    # The runtime log's own prefix (date, UTC, pid, tid) as well as the bracketed one.
+    marker_text = framed + "2026-11-20 12:56:40.862 UTC pid=26848 tid=38344 marker pose: frame (on foot, measured frame step)\n" \
         "[00:14:30.000] marker pose: frame, step p50 22.22 ms max 22.22 ms, answered 812\n"
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
