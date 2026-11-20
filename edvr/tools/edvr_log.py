@@ -637,7 +637,8 @@ def _mean_sd_cell(ms, signed, digits):
 #   pose gap: more than 16 callers in a window; N calls not counted
 #   marker pose: frame (on foot, measured frame step) | next (<reason>) | frame, step p50 X ms max Y ms, answered N
 #
-# The ` mode` field (on-foot-marker-pose, TEMPORARY probe) says which instant Elite's "now" was answered at: next = one display period after the
+# The ` mode` field and the `marker pose:` lines come only from the on-foot-marker-pose probe build (3de1b7b, flight 20.11; the probe was ruled out and removed,
+# current builds write neither). The field says which instant Elite's "now" was answered at: next = one display period after the
 # display time (the 0.1.5 answer), frame = the measured step between frames. A line without it is from an older build and reads as next; rows are
 # split by mode, and the probe's own `marker pose:` lines are listed as they stand.
 #

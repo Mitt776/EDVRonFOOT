@@ -11,7 +11,6 @@
 #include "native_render_labels.h"
 
 #include <algorithm>
-#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -45,23 +44,6 @@ struct State {
     bool lastWeaponStability = true;
     EdvrNativeFrameDecision cachedDecision{};
 };
-
-// experimental.native_vr_on_foot_marker_pose: next (empty and unknown too) or
-// frame, case and surrounding blanks ignored.
-struct MarkerPoseKey { bool frame = false; bool unknown = false; };
-MarkerPoseKey parseMarkerPoseKey(const std::string& raw) {
-    size_t b = 0, e = raw.size();
-    while (b < e && (raw[b] == ' ' || raw[b] == '\t')) ++b;
-    while (e > b && (raw[e - 1] == ' ' || raw[e - 1] == '\t')) --e;
-    std::string v = raw.substr(b, e - b);
-    for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    MarkerPoseKey k;
-    if (v == "frame") k.frame = true;
-    else if (!v.empty() && v != "next") k.unknown = true;
-    return k;
-}
-// The last unknown value said (under g_mutex), so each is said once.
-std::string g_markerUnknownNoted;
 
 State g_pool[kPoolSize];
 unsigned g_used = 0;
@@ -263,14 +245,9 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     // existed. Each gets exactly the fields it knows about, and whatever it
     // cannot carry stays out of its struct entirely. wantsProbe covers version
     // 7 and 8 (both carry the turn), wantsAim version 6 to 8 (all carry the aim).
-    // wantsMarker is version 9 only (the on-foot marker pose probe); wantsFeature
-    // covers version 8 and 9 (both carry the tilt).
-    const bool wantsMarker = output &&
-        output->version == EDVR_NATIVE_FRAME_VERSION_9 &&
+    const bool wantsFeature = output &&
+        output->version == EDVR_NATIVE_FRAME_VERSION_8 &&
         output->size == sizeof(*output);
-    const bool wantsFeature = output && (wantsMarker ||
-        (output->version == EDVR_NATIVE_FRAME_VERSION_8 &&
-         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_8));
     const bool wantsProbe = output && (wantsFeature ||
         (output->version == EDVR_NATIVE_FRAME_VERSION_7 &&
          output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_7));
@@ -300,8 +277,7 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
         input->valid > 1 || (input->valid && !rigidPose(input->physicalHead))) return E_INVALIDARG;
 
     EdvrNativeFrameOutput result{};
-    result.size = wantsMarker ? sizeof(result)
-                 : wantsFeature ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_8
+    result.size = wantsFeature ? sizeof(result)
                  : wantsProbe ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_7
                  : wantsAim ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_6
                  : wantsFade ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_5
@@ -309,8 +285,7 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
                  : wantsPacing ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_3
                  : wantsTrim  ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_2
                               : EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
-    result.version = wantsMarker ? EDVR_NATIVE_FRAME_VERSION_9
-                    : wantsFeature ? EDVR_NATIVE_FRAME_VERSION_8
+    result.version = wantsFeature ? EDVR_NATIVE_FRAME_VERSION_8
                     : wantsProbe ? EDVR_NATIVE_FRAME_VERSION_7
                     : wantsAim ? EDVR_NATIVE_FRAME_VERSION_6
                     : wantsFade ? EDVR_NATIVE_FRAME_VERSION_5
@@ -385,23 +360,6 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
             "submit while on foot).", weaponStability ? "on" : "off");
         state->weaponStabilityNoted = true;
         state->lastWeaponStability = weaponStability;
-    }
-    // experimental.native_vr_on_foot_marker_pose (TEMPORARY probe, openspec
-    // change on-foot-marker-pose): only a version 9 caller has the slot.
-    // 1 = frame and on foot by the journal, 2 = frame but not on foot, 0 =
-    // next (also empty or unknown; an unknown value is said once).
-    if (wantsMarker) {
-        const std::string markerKey = edvr::Config::get().getString(
-            "experimental.native_vr_on_foot_marker_pose", "next");
-        const MarkerPoseKey parsed = parseMarkerPoseKey(markerKey);
-        if (parsed.unknown && markerKey != g_markerUnknownNoted) {
-            edvr::Log::get().note("on-foot marker pose: '%s' is not next or frame: read as next",
-                                  markerKey.c_str());
-            g_markerUnknownNoted = markerKey;
-        }
-        if (!parsed.unknown) g_markerUnknownNoted.clear();
-        result.markerPoseFrame = !parsed.frame ? 0u
-            : (edvr::journalOnFootKnown() && edvr::journalOnFoot()) ? 1u : 2u;
     }
     if (weaponStability && !state->pacingNoted && !edvr::journalWatchActive()) {
         edvr::Log::get().note(

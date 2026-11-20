@@ -44,12 +44,6 @@
 // caller never learns of them, and a runtime that asks version 8 of a
 // d3d11.dll that refuses the shape steps down and reads "no tilt" (0).
 #define EDVR_NATIVE_FRAME_VERSION_8 8u
-// Version 9 adds markerPoseFrame to the END and nothing else (the on-foot
-// marker pose probe, openspec change on-foot-marker-pose), under the same
-// hand-copied-DLLs rule: a version 1 to 8 caller never learns of it, and a
-// runtime that asks version 9 of a d3d11.dll that refuses the shape steps
-// down and reads "next" (0), the 0.1.5 behaviour.
-#define EDVR_NATIVE_FRAME_VERSION_9 9u
 
 // The game producer owns the device and generation passed at acquire. The
 // methods in the table are CPU-only and are called by the XR owner after the
@@ -133,15 +127,6 @@ struct EdvrNativeFrameOutput {
     // the frame, for the runtime's summary line.
     float headAimPitchRad;
     uint32_t headAimFeature;
-    // Version 9 and later. The on-foot marker pose probe
-    // (experimental.native_vr_on_foot_marker_pose): 0 the key says next (or
-    // is empty/unknown, the only value an older provider can mean), 1 the key
-    // says frame AND the journal says on foot -- the runtime answers the
-    // game's "now" and the gameplay pose at the drawn frame plus the measured
-    // frame step instead of one display period --, 2 the key says frame but
-    // the journal does not say on foot (the runtime stays at next and names
-    // the reason). Any other value reads as 0.
-    uint32_t markerPoseFrame;
 };
 
 // The size the fields through resubmitEnabled occupy, which is what a
@@ -175,10 +160,6 @@ struct EdvrNativeFrameOutput {
 // caller's struct is, with no tail padding before headAimPitchRad.
 #define EDVR_NATIVE_FRAME_OUTPUT_SIZE_7 \
     ((uint32_t)offsetof(EdvrNativeFrameOutput, headAimPitchRad))
-// The size the fields through headAimFeature occupy, which is what a version 8
-// caller's struct is, with no tail padding before markerPoseFrame.
-#define EDVR_NATIVE_FRAME_OUTPUT_SIZE_8 \
-    ((uint32_t)offsetof(EdvrNativeFrameOutput, markerPoseFrame))
 
 struct EdvrNativeFrameDecision {
     uint32_t size, version;

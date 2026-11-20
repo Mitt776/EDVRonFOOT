@@ -89,7 +89,7 @@ void runPoseGapCases(Check&& check) {
     stats.flushIfDue(60999,lines);
     check(lines.v.empty(),"a window 59999 ms old writes nothing");
     stats.flushIfDue(61000,lines);
-    check(lines.v.size()==1&&lines.v[0]=="pose gap: tid 24212 calls 4 from exe+0x4E3881 prediction 0.0 ms target-minus-display mean 12.00 ms (min 10.00 max 14.00) angle-to-drawn mean 2.000 max 3.000 deg head 30.0 deg/s waitgetposes 5 failed 0 mode next",
+    check(lines.v.size()==1&&lines.v[0]=="pose gap: tid 24212 calls 4 from exe+0x4E3881 prediction 0.0 ms target-minus-display mean 12.00 ms (min 10.00 max 14.00) angle-to-drawn mean 2.000 max 3.000 deg head 30.0 deg/s waitgetposes 5 failed 0",
           "at 60 s the window writes one line per caller: calls, the return RVA, the prediction, the gap mean and range, the angle mean and max, the head speed, the waits, the failures (the exact line)");
     stats.flushIfDue(121000,lines);
     check(lines.v.size()==1&&stats.callers()==0&&stats.waits()==0,"...and the next window starts empty: no calls, no line, the wait count back to 0");
@@ -101,7 +101,7 @@ void runPoseGapCases(Check&& check) {
     stats.note(sample(5,0x4E3881,-0.011f,-3.5,0.5,10.0));
     stats.note(sample(5,0x4E3881,-0.011f,-1.5,1.5,20.0));
     stats.flushIfDue(60001,lines);
-    check(lines.v.size()==1&&lines.v[0]=="pose gap: tid 5 calls 2 from exe+0x4E3881 prediction -11.0 ms target-minus-display mean -2.50 ms (min -3.50 max -1.50) angle-to-drawn mean 1.000 max 1.500 deg head 15.0 deg/s waitgetposes 0 failed 0 mode next",
+    check(lines.v.size()==1&&lines.v[0]=="pose gap: tid 5 calls 2 from exe+0x4E3881 prediction -11.0 ms target-minus-display mean -2.50 ms (min -3.50 max -1.50) angle-to-drawn mean 1.000 max 1.500 deg head 15.0 deg/s waitgetposes 0 failed 0",
           "the prediction is a mean in milliseconds (-11 for -0.011 s) and a negative gap keeps its sign");
   }
   {
@@ -112,12 +112,12 @@ void runPoseGapCases(Check&& check) {
     auto good=sample(9,0x4E3881,0.0f,1.0,1.0,1.0);good.fallback=true;
     stats.note(good);
     stats.flushNow(900,lines);
-    check(lines.v.size()==1&&lines.v[0]=="pose gap: tid 9 calls 3 from exe+0x4E3881 prediction 0.0 ms target-minus-display mean 1.00 ms (min 1.00 max 1.00) angle-to-drawn mean 1.000 max 1.000 deg head 1.0 deg/s waitgetposes 0 failed 2 fallback 1 mode next",
+    check(lines.v.size()==1&&lines.v[0]=="pose gap: tid 9 calls 3 from exe+0x4E3881 prediction 0.0 ms target-minus-display mean 1.00 ms (min 1.00 max 1.00) angle-to-drawn mean 1.000 max 1.000 deg head 1.0 deg/s waitgetposes 0 failed 2 fallback 1",
           "calls that failed count in `failed` and are left out of every mean; a fallback adds ` fallback n` to the end of the line");
     PoseGapStats::Sample onlyFailed;onlyFailed.thread=3;onlyFailed.rva=0xFFFFFFFEu;
     stats.note(onlyFailed);
     stats.flushNow(1000,lines);
-    check(lines.v.size()==2&&lines.v[1]=="pose gap: tid 3 calls 1 from ? prediction 0.0 ms target-minus-display n/a angle-to-drawn n/a head n/a waitgetposes 0 failed 1 mode next",
+    check(lines.v.size()==2&&lines.v[1]=="pose gap: tid 3 calls 1 from ? prediction 0.0 ms target-minus-display n/a angle-to-drawn n/a head n/a waitgetposes 0 failed 1",
           "a caller with nothing measured says n/a for the gap, the angle and the head speed, and `from ?` when the return address was not captured");
     stats.note(sample(4,0xFFFFFFFFu,0.0f,2.0,0.1,5.0));
     stats.flushNow(1100,lines);
@@ -162,26 +162,6 @@ void runPoseGapCases(Check&& check) {
     Lines lines;
     stats.flushNow(1,lines);
     check(lines.v.size()==1&&lines.v[0].find(" calls 4000 ")!=std::string::npos&&lines.v[0].find(" waitgetposes 400 ")!=std::string::npos,"four threads noting 1000 calls each lose none");
-  }
-  // ---- the marker pose probe's mode (on-foot-marker-pose) -------------------------------------------------------------------------------------
-  {
-    PoseGapStats stats;
-    Lines lines;
-    stats.flushIfDue(1000,lines);
-    stats.note(sample(24212,0x4E3881,0.0f,11.11,0.5,30.0));
-    stats.setMode(false,2000,lines);
-    check(lines.v.empty()&&!stats.frameMode(),"setting the mode it already has writes nothing and keeps the window");
-    stats.setMode(true,5000,lines);
-    check(lines.v.size()==1&&lines.v[0].size()>10&&lines.v[0].compare(lines.v[0].size()-10,10," mode next")==0&&stats.frameMode()&&stats.callers()==0,
-          "A CHANGE TO frame closes the window: its line is written under the mode that ends (` mode next`) and the next window starts empty");
-    stats.note(sample(24212,0x4E3881,0.0f,22.22,0.1,30.0));
-    stats.flushIfDue(64999,lines);
-    check(lines.v.size()==1,"...the new window runs its 60 s from the change");
-    stats.setMode(false,30000,lines);
-    check(lines.v.size()==2&&lines.v[1].compare(lines.v[1].size()-11,11," mode frame")==0&&lines.v[1].find("mean 22.22 ms")!=std::string::npos,
-          "...and a change back to next writes the frame window's line, ending ` mode frame`");
-    stats.setMode(true,31000,lines);
-    check(lines.v.size()==2,"an empty window closes without a line");
   }
   // ---- the fixture the log tool reads -----------------------------------------------------------------------------------------------------
   {
