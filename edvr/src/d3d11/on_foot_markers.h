@@ -51,6 +51,10 @@ void onFootMarkersSetOn(bool on);
 // The hooks' counters, cumulative.
 ofm::Counts onFootMarkersCounts();
 bool onFootMarkersDisabled();
+// The marker lag probe (TEMPORARY, openspec change on-foot-marker-lag): experimental.native_vr_on_foot_marker_lag's raw value, read by
+// the frame boundary when the config's generation changes. A changed mode says one line and makes the hook forget its poses; an unknown
+// value is off and said once per value. Frame thread.
+void onFootMarkersSetLag(const char* raw, OnFootMarkersSink sink, void* ctx);
 // The frame step: the search the first time `native` is on, the decision, one install attempt per process the first time the decision
 // is on, whether to correct published, the on and off lines, the disabled line once, the end-of-frame check and the 30-second summary.
 // `onFoot` is the journal's answer (-1 unknown, 0, 1); `base`, `sections` and `count` as onFootMarkersFind takes them; `mainMenu`
