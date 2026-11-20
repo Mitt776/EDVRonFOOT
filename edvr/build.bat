@@ -344,6 +344,7 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrAcquireNativeFrame ^
     --extra-export edvrAcquireNativeFss ^
     --extra-export edvrAcquireNativeTiming ^
+    --extra-export edvrAcquireNativeDesktopView ^
     --extra-export edvrReadNativePresentTrace ^
     --extra-export "edvrNativeStartupRouting DATA" ^
     --extra-export edvrQueryOculusRouting ^
@@ -540,6 +541,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\on_foot_aim_eye.cpp" ^
     "src\d3d11\head_aim.cpp" ^
     "src\d3d11\scope_zoom.cpp" ^
+    "src\d3d11\desktop_view.cpp" ^
     "src\d3d11\on_foot_markers.cpp" ^
     "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" "src\d3d11\vscreen_footprint.cpp" ^
     "src\d3d11\binding_shadow.cpp" ^
@@ -3149,6 +3151,21 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     "tools\scope_zoom_test\scope_zoom_test.cpp" /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: scope zoom test build failed & exit /b 1 )
 "%BUILD%\scope_zoom_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_desktop_view_test
+echo [edvr] === desktop_view_test.exe ===
+REM EDVRonFOOT: build gate for the desktop eye view (src\d3d11\desktop_view_core.h, experimental.native_vr_desktop_view and
+REM experimental.native_vr_desktop_view_fit; openspec change desktop-eye-mirror). Drives the pure half: the keys' reading (right, left, off,
+REM crop, whole, empty, junk, case and padding), the picture's place in the window (2688x2944 in 1920x1080 cropped and whole, odd sizes, the
+REM window resized), the texture coordinates through flipped and double-wide bounds, the colour path per pair of formats, the Present's
+REM verdict (drawn, no eye, stale) and the 30 s line's text.
+if not exist "%OBJ%\desktopview" mkdir "%OBJ%\desktopview"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\desktopview"\ /Fe"%BUILD%\desktop_view_test.exe" ^
+    "tools\desktop_view_test\desktop_view_test.cpp" /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: desktop view test build failed & exit /b 1 )
+"%BUILD%\desktop_view_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_head_aim_test

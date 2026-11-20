@@ -2,43 +2,43 @@
 
 ## 1. Расчёт и тест-стенд
 
-- [ ] 1.1 `edvr\src\d3d11\desktop_view_core.h`: чистые функции — разбор ключей (`off|right|left`, `crop|whole`,
+- [x] 1.1 `edvr\src\d3d11\desktop_view_core.h`: чистые функции — разбор ключей (`off|right|left`, `crop|whole`,
   пустое и неизвестное → `off` / `crop`), прямоугольник глаза в окне для `crop` и `whole` (без искажения пропорций,
   по центру), выбор цветового пути по паре форматов, решение «рисовать или пропустить и почему» по номеру кадра, текст
   30-с строки лога. Проверка: стенд 1.2 проходит.
-- [ ] 1.2 Стенд `edvr\tools\desktop_view_test\desktop_view_test.cpp` на функции 1.1 (в т.ч. 2688×2944 в 1920×1080 для
+- [x] 1.2 Стенд `edvr\tools\desktop_view_test\desktop_view_test.cpp` на функции 1.1 (в т.ч. 2688×2944 в 1920×1080 для
   обоих режимов, нечётные размеры, смена размера окна, рассинхрон номера кадра) и его запуск в гейте `build.bat`.
   Проверка: полный `build.bat` по абсолютному пути зелёный, стенд в его выводе.
 
 ## 2. Передача кадра глаза из рантайма
 
-- [ ] 2.1 `edvr\src\common\`: заголовок таблицы `EdvrNativeDesktopView` (версия 1: `noteEye`, `close`), экспорт
+- [x] 2.1 `edvr\src\common\`: заголовок таблицы `EdvrNativeDesktopView` (версия 1: `noteEye`, `close`), экспорт
   `edvrAcquireNativeDesktopView` из `d3d11.dll` (+ `.def`, если нужен). Проверка: сборка; `dumpbin /exports` показывает
   экспорт.
-- [ ] 2.2 `edvr\src\openxr\`: клиент таблицы по образцу `native_menu_client.h`, подключение рядом с меню в
+- [x] 2.2 `edvr\src\openxr\`: клиент таблицы по образцу `native_menu_client.h`, подключение рядом с меню в
   `native_runtime_host.h`; после `finishCapturedEye` (и для отложенного FSS-глаза) вызов `noteEye` с итоговой
   текстурой и областью только для выбранного глаза. Без таблицы — одна строка в логе рантайма и дальше ничего.
   Проверка: сборка; трасса `native_desktop_view,provider_acquired=1` в логе рантайма при включённом ключе.
 
 ## 3. Отрисовка в окно игры
 
-- [ ] 3.1 `edvr\src\d3d11\desktop_view.cpp/.h`: держит ссылку на текстуру глаза до `Present`, в хуке `Present`
+- [x] 3.1 `edvr\src\d3d11\desktop_view.cpp/.h`: держит ссылку на текстуру глаза до `Present`, в хуке `Present`
   (`device_hook.cpp`, до `realPresent`, только VR-профиль, не `DXGI_PRESENT_TEST`) рисует область глаза в задний буфер
   своим шейдером по прямоугольнику из 1.1, с сохранением и возвратом состояния конвейера; при `off` — ни одного вызова к
   видеокарте. Метки времени видеокарты для строки лога. Проверка: полный `build.bat` зелёный.
-- [ ] 3.2 30-с строка `desktop view: …` в логе `edvr_gfx`, в том числе при `off` и при `drawn 0`. Проверка: стенд
+- [x] 3.2 30-с строка `desktop view: …` в логе `edvr_gfx`, в том числе при `off` и при `drawn 0`. Проверка: стенд
   1.2 проверяет текст; после облёта строка находится `tools\edvr_log.py --grep "desktop view"`.
 
 ## 4. Настройки и документы
 
-- [ ] 4.1 `edvr\edvr.ini`: ключи `native_vr_desktop_view` (строка `# ui: Desktop eye view | choices off, right, left |
+- [x] 4.1 `edvr\edvr.ini`: ключи `native_vr_desktop_view` (строка `# ui: Desktop eye view | choices off, right, left |
   live | menu on_foot`) и `native_vr_desktop_view_fit` в `[experimental]` с описанием простыми словами. Страница On
   foot в F8 и установщик показывают седьмую строку; страница Experimental её не показывает. Проверка:
   самотесты меню/установщика в `build.bat` зелёные (обновить ожидаемое число строк с 6 на 7, где оно зашито).
-- [ ] 4.2 `README_EDVRONFOOT.md`: раздел «Запись ролика»: включить Desktop eye view, в OBS «Захват игры» →
+- [x] 4.2 `README_EDVRONFOOT.md`: раздел «Запись ролика»: включить Desktop eye view, в OBS «Захват игры» →
   `EliteDangerous64.exe`, FPS записи 60, звук «Захват звука приложения» → `EliteDangerous64.exe`. Проверка: раздел
   читается, ключи в нём совпадают с `edvr.ini`.
-- [ ] 4.3 Запись в `docs\research\native-vr-on-foot.md` (`## Status` и датированная запись): замеры зеркала Oculus
+- [x] 4.3 Запись в `docs\research\native-vr-on-foot.md` (`## Status` и датированная запись): замеры зеркала Oculus
   21.11 (1–10 кадров на станции), выбор пути. Проверка: `## Status` упоминает заявку.
 
 ## 5. Облёт (Дима)

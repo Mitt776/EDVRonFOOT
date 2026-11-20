@@ -27,6 +27,7 @@
 #include "../../src/d3d11/ui_resolve.h"
 #include "../../src/d3d11/night_vision_shader.h"
 #include "../../src/d3d11/scope_zoom_shader.h"   // EDVRonFOOT: the scope zoom's lens
+#include "../../src/d3d11/desktop_view_shader.h" // EDVRonFOOT: the desktop eye view's draw into the window
 #include "../../src/d3d11/stellar_coverage.h"
 #include "../../src/d3d11/supercruise_bars_shader.h"
 #include "../../src/openxr/stereo_shader_source.h"
@@ -317,6 +318,9 @@ static std::vector<Variant> fixedVariants(const std::string& core) {
     variants.push_back({"kScopeZoomLensBytecode", "scope zoom lens", "main", nullptr, {}, false, edvr::kScopeZoomLensCs});
     // EDVRonFOOT: the sharp lens's motion vectors for the glass's area (the same header).
     variants.push_back({"kScopeZoomMvBytecode", "scope zoom area vectors", "main", nullptr, {}, false, edvr::kScopeZoomMvCs});
+    // EDVRonFOOT: the desktop eye view's draw of the eye into the game's window (src\d3d11\desktop_view_shader.h).
+    variants.push_back({"kDesktopViewVsBytecode", "desktop view vs", "main", nullptr, {}, false, edvr::kDesktopViewVsHlsl, "vs_5_0"});
+    variants.push_back({"kDesktopViewPsBytecode", "desktop view ps", "main", nullptr, {}, false, edvr::kDesktopViewPsHlsl, "ps_5_0"});
     return variants;
 }
 
@@ -577,13 +581,19 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 28 && originalExtra.size() == 14 && coreFixed.size() == 65 && coreLegacy.size() + 16 == coreFixed.size(),
-          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the scope zoom's lens and its area's vectors are registered");
-    check(!std::strcmp(coreFixed[coreFixed.size() - 2].symbol, "kScopeZoomLensBytecode") &&
+    check(originalCore.size() == 28 && originalExtra.size() == 14 && coreFixed.size() == 67 && coreLegacy.size() + 18 == coreFixed.size(),
+          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the scope zoom's lens and its area's vectors, and the desktop eye view's two are registered");
+    check(!std::strcmp(coreFixed[coreFixed.size() - 4].symbol, "kScopeZoomLensBytecode") &&
+              compile(compiler.fn, coreFixed[coreFixed.size() - 4].alternate, coreFixed[coreFixed.size() - 4], true),
+          "the scope zoom's lens is fourth to last and compiles");
+    check(!std::strcmp(coreFixed[coreFixed.size() - 3].symbol, "kScopeZoomMvBytecode") &&
+              compile(compiler.fn, coreFixed[coreFixed.size() - 3].alternate, coreFixed[coreFixed.size() - 3], true),
+          "the scope zoom's area vectors are third to last and compile");
+    check(!std::strcmp(coreFixed[coreFixed.size() - 2].symbol, "kDesktopViewVsBytecode") &&
               compile(compiler.fn, coreFixed[coreFixed.size() - 2].alternate, coreFixed[coreFixed.size() - 2], true),
-          "the scope zoom's lens is second to last and compiles");
-    check(!std::strcmp(coreFixed.back().symbol, "kScopeZoomMvBytecode") && compile(compiler.fn, coreFixed.back().alternate, coreFixed.back(), true),
-          "the scope zoom's area vectors are last and compile");
+          "the desktop eye view's vertex shader is second to last and compiles");
+    check(!std::strcmp(coreFixed.back().symbol, "kDesktopViewPsBytecode") && compile(compiler.fn, coreFixed.back().alternate, coreFixed.back(), true),
+          "the desktop eye view's pixel shader is last and compiles");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);

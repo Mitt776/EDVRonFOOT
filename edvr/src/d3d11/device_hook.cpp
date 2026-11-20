@@ -94,6 +94,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "transition_flash_eye_base.h"
 #include "vscreen_res.h"
 #include "celestial_motion.h"
+#include "desktop_view.h"   // EDVRonFOOT: the desktop eye view, before the real Present
 
 namespace edvr {
 namespace {
@@ -1741,6 +1742,9 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     if (runtimeFlatProfile()) flatRuntimeBeforePresent();
     if (runtimeFlatProfile()) menuFlatBeforePresent(self, flags);
     if (runtimeFlatProfile()) flatRuntimeWeaponFootprintBeforePresent(self, flags);
+    // EDVRonFOOT desktop eye view (desktop_view.h): the wanted eye's final picture into the window's back buffer, before the real
+    // Present and so before every overlay and capture that hooks it. Off (the default): a key check and two counters, no GPU work.
+    if (!runtimeFlatProfile()) desktopViewBeforePresent(self, g_state->device, flags);
     // The flat HDR route's crash-safe breadcrumbs (flat_hdr_crumbs.h): for the first frames that reach the resolver, the
     // real Present is bracketed, its result and the device's removed reason written. Both crumbs fall outside the clock
     // reads below, which time the call alone. The gate is one relaxed load.
