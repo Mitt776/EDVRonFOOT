@@ -633,8 +633,13 @@ def _mean_sd_cell(ms, signed, digits):
 # script's --self-test reads, to exactly what it writes). The lines are in the RUNTIME log, one per caller every 60 s:
 #
 #   pose gap: tid T calls n from exe+0xRVA prediction p ms target-minus-display mean a ms (min b max c) angle-to-drawn mean d max e deg
-#       head f deg/s waitgetposes w failed k[ fallback f]
+#       head f deg/s waitgetposes w failed k[ fallback f][ mode next|frame]
 #   pose gap: more than 16 callers in a window; N calls not counted
+#   marker pose: frame (on foot, measured frame step) | next (<reason>) | frame, step p50 X ms max Y ms, answered N
+#
+# The ` mode` field (on-foot-marker-pose, TEMPORARY probe) says which instant Elite's "now" was answered at: next = one display period after the
+# display time (the 0.1.5 answer), frame = the measured step between frames. A line without it is from an older build and reads as next; rows are
+# split by mode, and the probe's own `marker pose:` lines are listed as they stand.
 #
 # One line is one caller (thread, return RVA) over a window of WaitGetPoses; "target-minus-display" is the instant its pose was located at less the
 # latest frame's predictedDisplayTime, "angle-to-drawn" the angle between the pose it got and the pose that frame was drawn with, "head" the render
@@ -648,7 +653,8 @@ POSE_GAP_RE = re.compile(
     r"prediction (?P<pred>[-+0-9.]+) ms target-minus-display "
     r"(?:mean (?P<gm>[-+0-9.]+) ms \(min (?P<gmin>[-+0-9.]+) max (?P<gmax>[-+0-9.]+)\)|n/a) "
     r"angle-to-drawn (?:mean (?P<am>[-+0-9.]+) max (?P<amax>[-+0-9.]+) deg|n/a) "
-    r"head (?:(?P<head>[-+0-9.]+) deg/s|n/a) waitgetposes (?P<waits>\d+) failed (?P<failed>\d+)(?: fallback (?P<fb>\d+))?")
+    r"head (?:(?P<head>[-+0-9.]+) deg/s|n/a) waitgetposes (?P<waits>\d+) failed (?P<failed>\d+)(?: fallback (?P<fb>\d+))?(?: mode (?P<mode>next|frame))?")
+MARKER_POSE_RE = re.compile(r"\] (?P<text>marker pose: .*?)\s*$")
 POSE_GAP_MORE_RE = re.compile(r"pose gap: more than (?P<limit>\d+) callers in a window; (?P<dropped>\d+) calls not counted")
 
 
@@ -666,7 +672,8 @@ def parse_pose_gap(text):
             windows.append({
                 "tid": int(m.group("tid")), "calls": int(m.group("calls")), "frm": m.group("frm"), "pred": float(m.group("pred")),
                 "gm": num("gm"), "gmin": num("gmin"), "gmax": num("gmax"), "am": num("am"), "amax": num("amax"), "head": num("head"),
-                "waits": int(m.group("waits")), "failed": int(m.group("failed")), "fb": int(m.group("fb") or 0)})
+                "waits": int(m.group("waits")), "failed": int(m.group("failed")), "fb": int(m.group("fb") or 0),
+                "mode": m.group("mode") or "next"})
             continue
         if POSE_GAP_MORE_RE.search(line):
             notes.append(line.split("pose gap:", 1)[1].strip())
@@ -693,13 +700,13 @@ def tally_pose(windows):
     of a window's mean angle with its head speed (None when it cannot be told)."""
     groups = {}
     for w in windows:
-        groups.setdefault((w["tid"], w["frm"]), []).append(w)
+        groups.setdefault((w["tid"], w["frm"], w.get("mode", "next")), []).append(w)
     rows = []
     for key in sorted(groups):
         ws = groups[key]
         angles = [w["am"] for w in ws if w["am"] is not None]
         rows.append({
-            "tid": key[0], "frm": key[1], "n": len(ws), "calls": sum(w["calls"] for w in ws),
+            "tid": key[0], "frm": key[1], "mode": key[2], "n": len(ws), "calls": sum(w["calls"] for w in ws),
             "failed": sum(w["failed"] for w in ws), "fallbacks": sum(w["fb"] for w in ws),
             "gap": _mean_sd([w["gm"] for w in ws if w["gm"] is not None]),
             "angle": _mean_sd(angles), "angle_range": (min(angles), max(angles)) if angles else None,
@@ -720,12 +727,12 @@ def print_pose_tally(text):
     rows = tally_pose(windows)
     print("[edvr] tally pose: %d window line(s) over %d caller row(s)" % (len(windows), len(rows)))
     print("[edvr] per caller (thread, return address), mean +/- sd over that caller's windows of each window's mean:")
-    print("%7s %-14s %4s %7s %6s  %-20s %-22s %-11s %s"
-          % ("tid", "from", "n", "calls", "failed", "gap ms (target-disp)", "angle deg (to drawn)", "head deg/s", "r(angle,head)"))
+    print("%7s %-14s %4s %7s %6s  %-20s %-22s %-11s %-13s %s"
+          % ("tid", "from", "n", "calls", "failed", "gap ms (target-disp)", "angle deg (to drawn)", "head deg/s", "r(angle,head)", "mode"))
     for r in rows:
-        print("%7d %-14s %4d %7d %6d  %-20s %-22s %-11s %s"
+        print("%7d %-14s %4d %7d %6d  %-20s %-22s %-11s %-13s %s"
               % (r["tid"], r["frm"], r["n"], r["calls"], r["failed"], _mean_sd_cell(r["gap"], True, 2), _mean_sd_cell(r["angle"], False, 3),
-                 ("%.1f" % r["head"][0]) if r["head"][0] is not None else "n/a", ("%+.2f" % r["r"]) if r["r"] is not None else "n/a"))
+                 ("%.1f" % r["head"][0]) if r["head"][0] is not None else "n/a", ("%+.2f" % r["r"]) if r["r"] is not None else "n/a", r["mode"]))
     for r in rows:
         if r["fallbacks"]:
             print("[edvr] tid %d: %d call(s) could not be given a target one display period after the display time (no frame yet, a stale frame, no "
@@ -736,14 +743,22 @@ def print_pose_tally(text):
         spread = ""
         if r["angle_range"] is not None:
             spread = " (%.3f to %.3f across windows)" % r["angle_range"]
-        print("[edvr] %s, tid %d: its pose is located %+.2f ms from the drawn frame's display time, and is turned %s deg from the drawn pose%s; "
+        print("[edvr] %s, tid %d%s: its pose is located %+.2f ms from the drawn frame's display time, and is turned %s deg from the drawn pose%s; "
               "angle against head speed r = %s over %d window(s)."
-              % (r["frm"], r["tid"], r["gap"][0], ("%.3f" % r["angle"][0]) if r["angle"][0] is not None else "n/a", spread,
+              % (r["frm"], r["tid"], ", mode frame" if r["mode"] == "frame" else "", r["gap"][0], ("%.3f" % r["angle"][0]) if r["angle"][0] is not None else "n/a", spread,
                  ("%+.2f" % r["r"]) if r["r"] is not None else "n/a", r["n"]))
     print("[edvr] Elite's own \"now\" request should read a gap of about one display period (+11 ms at 90 Hz, +14 ms at 72 Hz) and an angle to the "
           "drawn pose of about head speed times that period (r near +1: it is one period ahead by design). A gap near 0 means the answer is not "
           "acting (or is the earlier display-time answer); +40 ms or more is the lag it replaced. A caller with a real prediction, or outside the "
           "game's image, shows the true lag (before the fix Elite's was 41-44 ms and up to 4.1 degrees, r = +0.98).")
+    markers = [m.group("text") for m in (MARKER_POSE_RE.search(l) for l in text.splitlines()) if m]
+    if markers:
+        print("[edvr] on-foot marker pose probe (%d line(s)); in mode frame the gap reads about the measured step (+22 ms at 45 fps) and a lower "
+              "angle-to-drawn only confirms the mode acted -- whether the hints stuck is the pilot's call:" % len(markers))
+        for line in text.splitlines():
+            m = MARKER_POSE_RE.search(line)
+            if m:
+                print("[edvr]   %s" % line.strip())
     return 0
 
 # --tally cover: the terrain cull cover (src/d3d11/terrain_cull_cover_core.h writes every line; tools\terrain_cover_test holds tools\terrain_cover_fixture.log, which this script's
@@ -10493,6 +10508,33 @@ def self_test_pose():
     mw, mn = parse_pose_gap(more)
     if len(mw) != 24 or mn != ["more than 16 callers in a window; 4 calls not counted"]:
         fail("the over-the-limit line -> %d windows, notes %r" % (len(mw), mn))
+    # The marker pose probe's ` mode` field (on-foot-marker-pose): every fixture line carries ` mode next`; a line without the field (an older
+    # build) reads as next; a ` mode frame` line is a row of its own.
+    if any(w["mode"] != "next" for w in windows):
+        fail("the fixture's windows are not all mode next: %r" % sorted(set(w["mode"] for w in windows)))
+    old = "\n".join(l[:-len(" mode next")] if l.endswith(" mode next") else l for l in text.splitlines()) + "\n"
+    ow, _ = parse_pose_gap(old)
+    if len(ow) != 24 or any(w["mode"] != "next" for w in ow) or tally_pose(ow) != tally_pose(windows):
+        fail("lines without the mode field (an older build) do not read as next, or tally differently")
+    framed = text + ("[00:15:00.000] pose gap: tid 24212 calls 100 from exe+0x4E3881 prediction 0.0 ms target-minus-display mean 22.22 ms "
+                     "(min 22.22 max 22.22) angle-to-drawn mean 0.050 max 0.090 deg head 30.0 deg/s waitgetposes 2700 failed 0 mode frame\n")
+    fw, _ = parse_pose_gap(framed)
+    frows = [r for r in tally_pose(fw) if r["tid"] == 24212]
+    if len(fw) != 25 or fw[-1]["mode"] != "frame" or sorted(r["mode"] for r in frows) != ["frame", "next"] \
+            or [r for r in frows if r["mode"] == "frame"][0]["calls"] != 100 or [r for r in frows if r["mode"] == "next"][0]["calls"] != 1440:
+        fail("a mode frame line is not a row of its own -> %r" % (frows,))
+    marker_text = framed + "[00:14:00.000] marker pose: frame (on foot, measured frame step)\n" \
+        "[00:14:30.000] marker pose: frame, step p50 22.22 ms max 22.22 ms, answered 812\n"
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = print_pose_tally(marker_text)
+    mout = buf.getvalue()
+    for want in ("exe+0x4E3881, tid 24212, mode frame: its pose is located +22.22 ms", "on-foot marker pose probe (2 line(s))",
+                 "marker pose: frame, step p50 22.22 ms max 22.22 ms, answered 812", " frame\n"):
+        if want not in mout:
+            fail("--tally pose with a frame row and probe lines lacks %r:\n%s" % (want, mout))
+    if rc != 0:
+        fail("--tally pose with a frame row exited %d" % rc)
     # Through main(), on a directory the tool discovers on its own: the runtime log is read by default.
     tmp = tempfile.mkdtemp(prefix="edvr_pose_selftest_")
     try:

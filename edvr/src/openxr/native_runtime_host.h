@@ -210,7 +210,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   NativeFrameClient features;
   NativeFssClient fss;
   NativeFovTrim fovTrim;
-  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_8};
+  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_9};
   EdvrNativeFrameDecision featureDecision{sizeof(featureDecision),EDVR_NATIVE_FRAME_VERSION_1};
   bool featureFrameKnown=false;
   // The aiming eye (aim_eye_shift.h): this frame's offset of the game's head pose, in head axes and metres, which the frame's render and game poses
@@ -411,8 +411,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     float orientation[4]{0,0,0,1};
     double speedDegPerSec=0;
   } latestPoseFrame;
+  // The on-foot marker pose probe (head_pose_time.h; TEMPORARY, openspec change on-foot-marker-pose): the differences between the display times
+  // the game was handed, and the mode in force with its log lines. Owner thread only.
+  FrameStepHistory frameSteps;
+  MarkerPoseLog markerPose;
   void dropPoseFrame() {
-    latestPoseFrame=PoseFrame{};aimEyeHead[0]=aimEyeHead[1]=aimEyeHead[2]=0;aimEyeHeadKnown=false;
+    latestPoseFrame=PoseFrame{};frameSteps.reset();aimEyeHead[0]=aimEyeHead[1]=aimEyeHead[2]=0;aimEyeHeadKnown=false;
     aimSnapTracking[0]=aimSnapTracking[1]=aimSnapTracking[2]=0;aimSnapTrackingKnown=false;headAimYaw=0;headAimPitch=0;
   }
   // The clock Elite's "now" pose calls read (a rig substitutes its own so "now" is a number it chooses), and the explicit-time locates the runtime
@@ -1142,6 +1146,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     Frame frame=boundary.frame();
     if(!applyFrameSequence(frame)){boundary.clear();return fail(XR_ERROR_LIMIT_REACHED);}
     if(state.terminal()){boundary.clear();return fail(XR_SESSION_LOSS_PENDING);}
+    frameSteps.note(frame.predictedDisplayTime);   // the display time the game draws with (after admitFrame), for the marker pose probe's step
     uint64_t applied=0;
     if(!changes.advance(frame.predictedDisplayTime,applied)){boundary.clear();return fail(XR_ERROR_TIME_INVALID);}
     if(applied){referenceChanges+=applied;if(!invalidateOrigin()){boundary.clear();return fail(XR_ERROR_LIMIT_REACHED);}}
@@ -1154,7 +1159,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       {boundary.clear();return fail(XR_ERROR_POSE_INVALID);}
     render.time=frame.predictedDisplayTime;game.pose=invalidHeadPose(true);
     XrTime gameplayTime=0;
-    if(nextPredictionTime(frame.predictedDisplayTime,frame.predictedDisplayPeriod,gameplayTime)&&
+    // The marker pose probe moves the gameplay pose with the "now" answer: the measured step instead of the period while frame is in force. The
+    // mode is the previous frame's (this frame's d3d11 answer comes below); with next it is the period, exactly as before.
+    const XrDuration gameplayStep=markerPose.active()?XrDuration(frameSteps.step(frame.predictedDisplayPeriod)):frame.predictedDisplayPeriod;
+    if(nextPredictionTime(frame.predictedDisplayTime,gameplayStep,gameplayTime)&&
        !changes.crosses(frame.predictedDisplayTime,gameplayTime)) {
       r=locateHeadAt(api.locateSpace,view,frameSpace,gameplayTime,true,game);
       // A runtime may not locate an additional frame ahead. Leave that
@@ -1175,7 +1183,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       gameGeometry.width[eye]=dims.width;gameGeometry.height[eye]=dims.height;
     }
     if(features.acquired()) {
-      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_8};
+      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_9};
       if(features.begin(located,poses.read().originGeneration,next)!=S_OK) {
         boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);
       }
@@ -1249,6 +1257,14 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // The position snap rides the same blend: the wander is kept from the real (unshifted) pose, and while the eye shift acts the game's head is
     // also moved back by blend times it. Neither touches the layer, located.headPose or frameViews. While the head aim feature acts the wander is taken
     // from this frame's pose, not the press's (AimSnap::frame, follow), so the game's eye stays at the origin the character turns about.
+    {
+      // The marker pose probe's mode for this frame (and the "now" answers until the next one); a change closes the pose-gap window.
+      const uint64_t markerNowMs=GetTickCount64();
+      const auto markerSink=[](const char* markerLine){nativeTracePuts(markerLine);};
+      if(markerPose.frame(features.acquired()&&featureFrameKnown,features.providerVersion(),featureFrameKnown?featureFrame.markerPoseFrame:0u,
+                          frameSteps.step(frame.predictedDisplayPeriod),markerNowMs,markerSink))
+        poseGap.setMode(markerPose.active(),markerNowMs,markerSink);
+    }
     aimEyeHead[0]=aimEyeHead[1]=aimEyeHead[2]=0;aimEyeHeadKnown=false;
     aimSnapTracking[0]=aimSnapTracking[1]=aimSnapTracking[2]=0;aimSnapTrackingKnown=false;
     headAimYaw=0;headAimPitch=0;
@@ -2334,7 +2350,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // display time and the target -- and the call is located at now + prediction as it always was.
   bool poseTargetFor(bool display,XrTime now,XrTime& target) {
     if(!display||!latestPoseFrame.valid)return false;
-    return answerTime(latestPoseFrame.displayTime,latestPoseFrame.period,now,
+    // The marker pose probe: while frame is in force, the measured step stands for the period (target and freshness tolerance alike).
+    const int64_t step=markerPose.active()?frameSteps.step(latestPoseFrame.period):int64_t(latestPoseFrame.period);
+    return answerTime(latestPoseFrame.displayTime,step,now,
       [](int64_t shown,int64_t period,int64_t& out){return nextPredictionTime(shown,period,out);},
       [&](int64_t from,int64_t to){return changes.crosses(from,to);},&target);
   }
@@ -2393,6 +2411,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     }
     // Said when the fix acts, and for each further distinct Elite caller (a new one after a game update shows up here).
     if(explicitTime)poseSightings.note(call.rva,[](const char* sighting){nativeTracePuts(sighting);});
+    if(explicitTime)markerPose.noteAnswered();   // counted only while frame is in force (MarkerPoseLog)
     vr::TrackedDevicePose_t pose{};pose.bDeviceIsConnected=true;
     pose.mDeviceToAbsoluteTracking.m[0][0]=pose.mDeviceToAbsoluteTracking.m[1][1]=pose.mDeviceToAbsoluteTracking.m[2][2]=1;
     constexpr auto valid=XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;

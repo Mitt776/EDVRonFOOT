@@ -23,6 +23,7 @@
 // as they always were, at the wall clock plus the prediction.
 #include "exe_module.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -88,6 +89,119 @@ inline bool answerTime(int64_t latestDisplayTime, int64_t periodNs, int64_t now,
   *out = target;
   return true;
 }
+
+// ---- THE ON-FOOT MARKER POSE PROBE (TEMPORARY; openspec change on-foot-marker-pose) --------------------------------------------------------------
+// On foot the game draws at 45 fps on a 90 Hz display, so the next frame is shown TWO periods after the drawn one, and the answer above (one
+// period) trails the next drawn pose by a period. With experimental.native_vr_on_foot_marker_pose = frame (the d3d11 half's markerPoseFrame 1:
+// the key says frame and the journal says on foot) the "now" answer and the gameplay pose of WaitGetPoses use the MEASURED step between the
+// display times the game was handed instead of the period: answerTime(display, step, ...) -- the target display + step, and the freshness
+// tolerance the step (capped at 50 ms as before). Everywhere else, and with the key at next, the period: exactly the 0.1.5 answer.
+
+// How many display-time differences the step is the median of.
+constexpr unsigned kFrameStepHistory = 16;
+constexpr int64_t kFrameStepMaxNs = 50000000;
+
+// The step, ns: the median of `n` differences (the upper middle one for an even count), held to at least one period and at most
+// min(4 periods, 50 ms) (never below one period). No period (<= 0) is 0, which no instant can be formed from; no history is one period.
+inline int64_t frameStepNs(const int64_t* diffs, unsigned n, int64_t periodNs) {
+  if (periodNs <= 0) return 0;
+  if (!diffs || n == 0) return periodNs;
+  if (n > kFrameStepHistory) n = kFrameStepHistory;
+  int64_t sorted[kFrameStepHistory];
+  for (unsigned i = 0; i < n; ++i) sorted[i] = diffs[i];
+  for (unsigned i = 1; i < n; ++i)                                   // insertion sort: sixteen values at most
+    for (unsigned j = i; j > 0 && sorted[j - 1] > sorted[j]; --j) { const int64_t t = sorted[j]; sorted[j] = sorted[j - 1]; sorted[j - 1] = t; }
+  int64_t step = sorted[n / 2];
+  int64_t hi = periodNs > kFrameStepMaxNs / 4 ? kFrameStepMaxNs : periodNs * 4;
+  if (hi > kFrameStepMaxNs) hi = kFrameStepMaxNs;
+  if (hi < periodNs) hi = periodNs;
+  if (step < periodNs) step = periodNs;
+  if (step > hi) step = hi;
+  return step;
+}
+
+// The last kFrameStepHistory differences between the display times the game was handed (frame.predictedDisplayTime after admitFrame). A time that
+// is not positive is ignored; one that does not move forward is kept as the new base and adds no difference. reset() on a new session, origin or
+// geometry (the host's dropPoseFrame).
+class FrameStepHistory {
+ public:
+  void note(int64_t displayTime) {
+    if (displayTime <= 0) return;
+    if (last_ > 0 && displayTime > last_) {
+      diffs_[next_] = displayTime - last_;
+      next_ = (next_ + 1) % kFrameStepHistory;
+      if (count_ < kFrameStepHistory) ++count_;
+    }
+    last_ = displayTime;
+  }
+  void reset() { count_ = 0; next_ = 0; last_ = 0; }
+  unsigned count() const { return count_; }
+  int64_t step(int64_t periodNs) const { return frameStepNs(diffs_, count_, periodNs); }
+
+ private:
+  int64_t diffs_[kFrameStepHistory]{};
+  unsigned count_ = 0, next_ = 0;
+  int64_t last_ = 0;
+};
+
+// The probe's log lines (runtime log), written from WaitGetPoses:
+//   marker pose: frame (on foot, measured frame step)      -- on each change of the mode in force, with the reason
+//   marker pose: next (key next) | (not on foot) | (d3d11.dll without the field) | (no d3d11 half)
+//   marker pose: frame, step p50 22.22 ms max 22.22 ms, answered 1234   -- every 30 s while frame is in force, and once more as it ends
+// `answered` counts the "now" answers that were located by the step; 0 while frame is in force means the probe never acted.
+class MarkerPoseLog {
+ public:
+  static constexpr uint64_t kWindowMs = 30000;
+  static constexpr unsigned kSteps = 4096;   // 30 s at 90 Hz is 2700
+  // One WaitGetPoses frame. `flag` is the d3d11 half's markerPoseFrame (0 next, 1 frame on foot, 2 frame not on foot), `stepNs` the step this
+  // frame would use. Returns true when the mode in force changed (the pose-gap window closes then).
+  template <class Sink>
+  bool frame(bool acquired, uint32_t providerVersion, uint32_t flag, int64_t stepNs, uint64_t nowMs, Sink&& sink) {
+    const bool frameMode = acquired && providerVersion >= 9 && flag == 1;
+    bool changed = false;
+    if (frameMode != active_) {
+      if (active_) flush(sink);                                      // the partial window of the mode that ends
+      active_ = frameMode;
+      changed = true;
+      const char* reason = frameMode ? "on foot, measured frame step"
+                         : !acquired ? "no d3d11 half"
+                         : providerVersion < 9 ? "d3d11.dll without the field"
+                         : flag == 2 ? "not on foot" : "key next";
+      char line[128];
+      std::snprintf(line, sizeof(line), "marker pose: %s (%s)", frameMode ? "frame" : "next", reason);
+      sink(static_cast<const char*>(line));
+      if (frameMode) { startMs_ = nowMs; steps_ = 0; answered_ = 0; }
+    }
+    if (active_) {
+      if (stepNs > 0 && steps_ < kSteps) step_[steps_++] = stepNs;
+      if (nowMs - startMs_ >= kWindowMs) { flush(sink); startMs_ = nowMs; }
+    }
+    return changed;
+  }
+  void noteAnswered() { if (active_) ++answered_; }
+  bool active() const { return active_; }
+
+ private:
+  template <class Sink>
+  void flush(Sink&& sink) {
+    char line[160];
+    if (steps_ == 0) {
+      std::snprintf(line, sizeof(line), "marker pose: frame, step n/a, answered %llu", (unsigned long long)answered_);
+    } else {
+      static int64_t sorted[kSteps];                                  // owner thread only
+      for (unsigned i = 0; i < steps_; ++i) sorted[i] = step_[i];
+      std::sort(sorted, sorted + steps_);
+      std::snprintf(line, sizeof(line), "marker pose: frame, step p50 %.2f ms max %.2f ms, answered %llu",
+                    double(sorted[steps_ / 2]) / 1e6, double(sorted[steps_ - 1]) / 1e6, (unsigned long long)answered_);
+    }
+    sink(static_cast<const char*>(line));
+    steps_ = 0; answered_ = 0;
+  }
+  bool active_ = false;
+  uint64_t startMs_ = 0, answered_ = 0;
+  unsigned steps_ = 0;
+  int64_t step_[kSteps]{};
+};
 
 // The log lines that say the fix is acting, and for whom. The first caller to qualify writes one line; each further DISTINCT return RVA that
 // qualifies writes one more, up to kFurtherCap, so a caller that turns up after a game update is named. One more line says the cap was reached.

@@ -86,8 +86,42 @@ template<class Check> void runHeadPoseCases(Check&& check) {
   std::string line;
   flushLine(line);
   char want[512];
-  std::snprintf(want, sizeof(want), "pose gap: tid %lu calls 3 from exe+0x4E3881 prediction -0.3 ms target-minus-display mean 11.11 ms (min 11.11 max 11.11) angle-to-drawn mean 0.000 max 0.000 deg head 30.0 deg/s waitgetposes 1 failed 0", (unsigned long)me);
+  std::snprintf(want, sizeof(want), "pose gap: tid %lu calls 3 from exe+0x4E3881 prediction -0.3 ms target-minus-display mean 11.11 ms (min 11.11 max 11.11) angle-to-drawn mean 0.000 max 0.000 deg head 30.0 deg/s waitgetposes 1 failed 0 mode next", (unsigned long)me);
   check(line == want, "the diagnostic records the CALLER's thread (the hop to the owner does not lose it), the return RVA, the mean prediction, a gap of one period (+11.11 ms), an angle of 0 and the wait the publish point counted (the exact line)");
+  // ---- the on-foot marker pose probe (on-foot-marker-pose): frame in force answers at display + the measured step ---------------------------------
+  {
+    lineCount = 0;
+    bool active = false;
+    f.owner.invoke([&] {
+      h.frameSteps.reset();
+      for (int i = 0; i <= 16; ++i) h.frameSteps.note(display - (16 - i) * 2 * period);   // sixteen frames two periods apart, the last at `display`
+      if (h.markerPose.frame(true, 9, 1, h.frameSteps.step(period), 2000, collect)) h.poseGap.setMode(h.markerPose.active(), 2000, collect);
+      active = h.markerPose.active() && h.poseGap.frameMode();
+    });
+    check(active && lineCount == 1 && std::string(lines[0]) == "marker pose: frame (on foot, measured frame step)",
+          "MARKER POSE: the d3d11 flag 1 puts frame in force, says so, and switches the pose-gap mode (the empty window writes no line)");
+    check(locateAs(true, 0.0f) && f.fake.lastTime == display + 2 * period && h.lastHeadTime == display + 2 * period,
+          "...an Elite \"now\" call is located at the display time plus the measured step: two periods at 45 fps");
+    check(locateAs(false, 0.0f) && f.fake.lastTime == now, "...a call that is not Elite's \"now\" is untouched by it");
+    lineCount = 0;
+    bool back = false;
+    f.owner.invoke([&] {
+      if (h.markerPose.frame(true, 9, 0, h.frameSteps.step(period), 3000, collect)) h.poseGap.setMode(h.markerPose.active(), 3000, collect);
+      back = !h.markerPose.active() && !h.poseGap.frameMode();
+    });
+    bool frameLine = false, answered = false, nextLine = false;
+    for (unsigned i = 0; i < lineCount; ++i) {
+      const std::string l = lines[i];
+      if (l.rfind("pose gap: ", 0) == 0 && l.find("max 22.22)") != std::string::npos && l.size() > 11 && l.compare(l.size() - 11, 11, " mode frame") == 0) frameLine = true;
+      if (l == "marker pose: frame, step p50 22.22 ms max 22.22 ms, answered 1") answered = true;
+      if (l == "marker pose: next (key next)") nextLine = true;
+    }
+    check(back && frameLine && answered && nextLine,
+          "...the key back to next: the frame window's pose-gap line (its Elite call at +22.22 ms, ` mode frame`), the probe's line with one answer, and `marker pose: next (key next)`");
+    check(locateAs(true, 0.0f) && f.fake.lastTime == display + period, "...and the next call is at display + one period again, exactly as before");
+    flushLine(line);
+    f.owner.invoke([&] { h.frameSteps.reset(); });
+  }
   // ---- everything else: today's answer ------------------------------------------------------------------------------------------------
   check(locateAs(false, 0.0f) && f.fake.lastTime == now && f.fake.lastTime != display + period, "a call that is not flagged (outside the image, or with a real prediction) is located on the wall clock as always, not at the display time plus a period");
   flushLine(line);

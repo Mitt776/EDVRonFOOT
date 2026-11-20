@@ -93,13 +93,27 @@ class PoseGapStats {
     }
     for(unsigned i=0;i<out.count;++i)sink(out.lines[i]);
   }
+  // The on-foot marker pose probe's mode (head_pose_time.h MarkerPoseLog): every line ends ` mode next|frame`, and a change closes the window
+  // (its lines are written under the mode that ends), so one line is about one mode.
+  template<class Sink>
+  void setMode(bool frameMode,uint64_t nowMs,Sink&& sink) {
+    Out out;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if(frameMode==frameMode_)return;
+      if(started_)collect(out);
+      frameMode_=frameMode;startMs_=nowMs;started_=true;
+    }
+    for(unsigned i=0;i<out.count;++i)sink(out.lines[i]);
+  }
+  bool frameMode() const {std::lock_guard<std::mutex> lock(mutex_);return frameMode_;}
   unsigned callers() const {std::lock_guard<std::mutex> lock(mutex_);return used_;}
   uint64_t waits() const {std::lock_guard<std::mutex> lock(mutex_);return waits_;}
 
   // The line for one caller. `from` reads exe+0xRVA, outside (the caller is not in the game''s image) or ? (not captured).
   static const char* line(char (&buffer)[352],uint32_t thread,uint32_t rva,uint64_t calls,double predictionMs,
                           bool gapKnown,double gapMean,double gapMin,double gapMax,bool angleKnown,double angleMean,double angleMax,
-                          bool speedKnown,double speed,uint64_t waits,uint64_t failed,uint64_t fallbacks) {
+                          bool speedKnown,double speed,uint64_t waits,uint64_t failed,uint64_t fallbacks,bool frameMode=false) {
     char from[32],gap[96],angle[80],head[40],tail[40]="";
     if(rva==0xFFFFFFFFu)std::snprintf(from,sizeof(from),"outside");
     else if(rva==0xFFFFFFFEu)std::snprintf(from,sizeof(from),"?");
@@ -109,8 +123,8 @@ class PoseGapStats {
     if(speedKnown)std::snprintf(head,sizeof(head),"%.1f deg/s",speed);else std::snprintf(head,sizeof(head),"n/a");
     if(fallbacks)std::snprintf(tail,sizeof(tail)," fallback %llu",(unsigned long long)fallbacks);
     std::snprintf(buffer,sizeof(buffer),
-      "pose gap: tid %lu calls %llu from %s prediction %.1f ms target-minus-display %s angle-to-drawn %s head %s waitgetposes %llu failed %llu%s",
-      (unsigned long)thread,(unsigned long long)calls,from,predictionMs,gap,angle,head,(unsigned long long)waits,(unsigned long long)failed,tail);
+      "pose gap: tid %lu calls %llu from %s prediction %.1f ms target-minus-display %s angle-to-drawn %s head %s waitgetposes %llu failed %llu%s mode %s",
+      (unsigned long)thread,(unsigned long long)calls,from,predictionMs,gap,angle,head,(unsigned long long)waits,(unsigned long long)failed,tail,frameMode?"frame":"next");
     return buffer;
   }
 
@@ -126,7 +140,7 @@ class PoseGapStats {
       const Key& k=keys_[i];
       line(out.lines[out.count++],k.thread,k.rva,k.calls,k.calls?k.predictionSum/double(k.calls)*1000.0:0.0,
         k.gapN!=0,k.gapN?k.gapSum/double(k.gapN):0.0,k.gapMin,k.gapMax,k.angleN!=0,k.angleN?k.angleSum/double(k.angleN):0.0,k.angleMax,
-        k.speedN!=0,k.speedN?k.speedSum/double(k.speedN):0.0,waits_,k.failed,k.fallbacks);
+        k.speedN!=0,k.speedN?k.speedSum/double(k.speedN):0.0,waits_,k.failed,k.fallbacks,frameMode_);
     }
     if(dropped_&&out.count<kPoseGapKeys+1)
       std::snprintf(out.lines[out.count++],sizeof(out.lines[0]),"pose gap: more than %u callers in a window; %llu calls not counted",
@@ -137,6 +151,6 @@ class PoseGapStats {
   Key keys_[kPoseGapKeys]{};
   unsigned used_=0;
   uint64_t dropped_=0,waits_=0,startMs_=0;
-  bool started_=false;
+  bool started_=false,frameMode_=false;
 };
 }

@@ -14,8 +14,78 @@
 namespace head_pose_time_cases {
 using namespace edvr::openxr;
 
+// The on-foot marker pose probe (on-foot-marker-pose): the measured step, its history, the answer with the step, and the probe's log lines.
+template<class Check>
+void runMarkerPoseCases(Check&& check) {
+  constexpr int64_t P=11111111;   // 90 Hz
+  {
+    int64_t ones[16],twos[16],mixed[16];
+    for(int i=0;i<16;++i){ones[i]=P;twos[i]=2*P;mixed[i]=(i%2)?2*P:P;}
+    check(frameStepNs(ones,16,P)==P,"STEP: an even one period a frame is one period");
+    check(frameStepNs(twos,16,P)==2*P,"...an even two periods (45 fps at 90 Hz) is two");
+    check(frameStepNs(mixed,16,P)==2*P&&frameStepNs(mixed,15,P)==P,"...a 1/2 mix is the median: the upper middle of an even count");
+    int64_t spike[16];for(int i=0;i<16;++i)spike[i]=2*P;spike[7]=40*P;spike[3]=1;
+    check(frameStepNs(spike,16,P)==2*P,"...a single outlier either way does not move it");
+    check(frameStepNs(nullptr,0,P)==P&&frameStepNs(ones,0,P)==P,"...no history is one period (the 0.1.5 answer)");
+    check(frameStepNs(ones,16,0)==0&&frameStepNs(ones,16,-5)==0,"...no period is 0: no instant is formed, the call falls back as before");
+    int64_t slow[16];for(int i=0;i<16;++i)slow[i]=7*P;
+    check(frameStepNs(slow,16,P)==4*P,"CEILING: at most four periods (44.4 ms at 90 Hz)");
+    constexpr int64_t P60=16666667;int64_t slow60[16];for(int i=0;i<16;++i)slow60[i]=4*P60;
+    check(frameStepNs(slow60,16,P60)==50000000,"...and at most 50 ms (four 60 Hz periods would be 66.7)");
+    int64_t tiny[16];for(int i=0;i<16;++i)tiny[i]=P/3;
+    check(frameStepNs(tiny,16,P)==P,"FLOOR: at least one period");
+    const int64_t huge=std::numeric_limits<int64_t>::max()/2;int64_t big[16];for(int i=0;i<16;++i)big[i]=huge;
+    check(frameStepNs(big,16,huge)==huge,"...a period past the ceiling is its own floor, without overflow");
+  }
+  {
+    FrameStepHistory h;
+    check(h.step(P)==P&&h.count()==0,"HISTORY: empty is one period");
+    h.note(1000);
+    check(h.count()==0,"...the first time is only a base");
+    int64_t t=1000;for(int i=0;i<20;++i){t+=2*P;h.note(t);}
+    check(h.count()==16&&h.step(P)==2*P,"...twenty frames two periods apart keep sixteen differences and read two periods");
+    h.note(t);h.note(0);h.note(-5);
+    check(h.count()==16&&h.step(P)==2*P,"...a time that does not move forward, or is not positive, adds nothing");
+    for(int i=0;i<16;++i){t+=P;h.note(t);}
+    check(h.step(P)==P,"...the window slides: sixteen one-period frames later it reads one period");
+    h.reset();
+    check(h.count()==0&&h.step(P)==P,"...reset() empties it");
+  }
+  {
+    const auto add=[](int64_t shown,int64_t period,int64_t& out){return nextPredictionTime(shown,period,out);};
+    const auto never=[](int64_t,int64_t){return false;};
+    const int64_t D=1000000000;int64_t out=0;
+    check(answerTime(D,P,D-5000000,add,never,&out)&&out==D+P,"ANSWER, next: display + one period (the 0.1.5 answer)");
+    check(answerTime(D,2*P,D-5000000,add,never,&out)&&out==D+2*P,"...frame at two periods: display + 2P");
+    check(answerTime(D,2*P,D+2*P,add,never,&out)&&!answerTime(D,P,D+2*P,add,never,&out),
+          "...and the freshness tolerance is the step: a frame 2P old is still good at step 2P, not at step P");
+  }
+  {
+    std::vector<std::string> lines;
+    const auto sink=[&](const char* s){lines.emplace_back(s);};
+    MarkerPoseLog log;
+    check(!log.frame(true,9,0,P,1000,sink)&&lines.empty()&&!log.active(),"LOG: next from the start writes nothing");
+    check(log.frame(true,9,1,2*P,2000,sink)&&log.active()&&lines.size()==1&&lines[0]=="marker pose: frame (on foot, measured frame step)",
+          "...a change to frame writes `marker pose: frame (on foot, measured frame step)` and says it changed");
+    log.noteAnswered();log.noteAnswered();log.noteAnswered();
+    check(!log.frame(true,9,1,2*P,31999,sink)&&lines.size()==1,"...nothing more before 30 s");
+    log.frame(true,9,1,3*P,32000,sink);
+    check(lines.size()==2&&lines[1]=="marker pose: frame, step p50 22.22 ms max 33.33 ms, answered 3","...at 30 s: the step median and max in ms and the answers");
+    check(log.frame(true,9,2,P,33000,sink)&&!log.active()&&lines.size()==4&&lines[2]=="marker pose: frame, step n/a, answered 0"&&lines[3]=="marker pose: next (not on foot)",
+          "...leaving foot writes the partial window (here empty: answered 0, which is how a probe that never acted reads) and `marker pose: next (not on foot)`");
+    log.noteAnswered();
+    log.frame(true,9,1,2*P,34000,sink);log.frame(true,9,0,2*P,35000,sink);
+    check(lines.size()==7&&lines[5]=="marker pose: frame, step p50 22.22 ms max 22.22 ms, answered 0"&&lines[6]=="marker pose: next (key next)",
+          "...an answer noted while next is not counted, and the key back to next says `key next`");
+    log.frame(true,9,1,2*P,36000,sink);log.frame(true,8,1,2*P,37000,sink);log.frame(true,9,1,2*P,38000,sink);log.frame(false,9,1,2*P,39000,sink);
+    check(lines.size()==13&&lines[9]=="marker pose: next (d3d11.dll without the field)"&&lines[12]=="marker pose: next (no d3d11 half)",
+          "...an older d3d11.dll or none reads next, and says why");
+  }
+}
+
 template<class Check>
 void runHeadPoseTimeCases(Check&& check) {
+  runMarkerPoseCases(check);
   // ---- what "now" is ---------------------------------------------------------------------------------------------------------------------
   {
     check(kNowPredictionLimitSeconds==0.005f,"the bound is 5 ms");
