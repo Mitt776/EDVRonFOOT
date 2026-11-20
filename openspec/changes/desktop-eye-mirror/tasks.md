@@ -53,12 +53,12 @@
 
 ## 6. Подгонка zoom и строка в F8 (после облёта 21.11)
 
-- [ ] 6.1 `desktop_view_core.h`: подгонка `zoom` — наименьшее увеличение обрезки, при котором ни один треугольник маски
+- [x] 6.1 `desktop_view_core.h`: подгонка `zoom` — наименьшее увеличение обрезки, при котором ни один треугольник маски
   линз не попадает в окно (без маски = `crop`); стенд: маска-углы, маска пустая, маска «на всё», текст строки лога с
   `zoom`. Проверка: стенд проходит.
-- [ ] 6.2 Таблица: `noteMask(eye, треугольники)` из рантайма — та же маска, что `GetHiddenAreaMesh` отдаёт игре (та же
+- [x] 6.2 Таблица: `noteMask(eye, треугольники)` из рантайма — та же маска, что `GetHiddenAreaMesh` отдаёт игре (та же
   проекция `projectHiddenMask`), только при её смене. Проверка: сборка; трасса `native_desktop_view,mask_eye=…`.
-- [ ] 6.3 `edvr.ini`: строка `# ui: Desktop eye fit | choices crop, zoom, whole | live | menu on_foot` (восьмая на
+- [x] 6.3 `edvr.ini`: строка `# ui: Desktop eye fit | choices crop, zoom, whole | live | menu on_foot` (восьмая на
   странице On foot), README. Проверка: полный `build.bat` зелёный.
 - [ ] 6.4 Облёт: в F8 `Desktop eye fit` → `zoom` (углов нет) → `whole` (полосы) → `crop`.
 
