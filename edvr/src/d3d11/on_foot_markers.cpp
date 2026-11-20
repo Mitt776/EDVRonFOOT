@@ -39,6 +39,16 @@ std::atomic<uint64_t> g_skips[ofm::kSkipCount];
 std::atomic<uint64_t> g_cam[ofm::kViews];
 ofm::SampleBox g_sample;
 
+// The frame's turn (ofm::lagStep): the frame number the frame thread raises at every step, the epoch it raises when the correction
+// comes on (the hook then forgets its poses), the counters, the last writes' rows 0-2 for the end-of-frame check and the window's
+// largest angle in micro-degrees.
+std::atomic<uint64_t> g_frame{0}, g_lagEpoch{0};
+std::atomic<uint64_t> g_lagTurned{0}, g_lagNoPrev{0}, g_lagMicroDeg{0}, g_lagMaxMicroDeg{0};
+std::atomic<float> g_lagRows[ofm::kViews][9];
+// Hook side only.
+ofm::LagCam g_lagCams[ofm::kViews];
+uint64_t g_lagSeenEpoch = 0;
+
 // Per thread: how deep in the hooked writers this thread is. The step runs after the outer call only.
 thread_local int t_depth = 0;
 
@@ -85,6 +95,25 @@ void afterWriter(uint64_t mgr) {
     }
     float out[ofm::kViews][ofm::kPoseFloats];
     ofm::correct(p.m, out);
+    {
+        const uint64_t epoch = g_lagEpoch.load(std::memory_order_acquire);
+        if (epoch != g_lagSeenEpoch) {
+            g_lagSeenEpoch = epoch;
+            for (auto& c : g_lagCams) c = ofm::LagCam{};
+        }
+        float degrees = 0.f;
+        const int r = ofm::lagStep(g_lagCams, p.cam, p.m, g_frame.load(std::memory_order_relaxed), out, &degrees);
+        if (r == ofm::kLagTurned) {
+            g_lagTurned.fetch_add(1, std::memory_order_relaxed);
+            const uint64_t micro = static_cast<uint64_t>(degrees * 1e6f);
+            g_lagMicroDeg.fetch_add(micro, std::memory_order_relaxed);
+            uint64_t seen = g_lagMaxMicroDeg.load(std::memory_order_relaxed);
+            while (micro > seen && !g_lagMaxMicroDeg.compare_exchange_weak(seen, micro, std::memory_order_relaxed)) {
+            }
+        } else if (r == ofm::kLagNoPrev) {
+            g_lagNoPrev.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
     if (g_sample.wanted()) g_sample.put(p.m, out);
     for (int i = 0; i < ofm::kViews; ++i) {
         if (!sehWritePose(p.cam[i], out[i])) {
@@ -92,6 +121,10 @@ void afterWriter(uint64_t mgr) {
             return;
         }
     }
+    ofm::lagWritten(g_lagCams, out);
+    for (int i = 0; i < ofm::kViews; ++i)
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) g_lagRows[i][3 * r + c].store(out[i][4 * r + c], std::memory_order_relaxed);
     const uintptr_t commit = g_commit.load(std::memory_order_acquire);
     for (int i = 0; i < ofm::kViews; ++i) {
         if (!sehCommit(commit, p.cam[i], p.size[i])) {
@@ -275,8 +308,19 @@ ofm::Counts onFootMarkersCounts() {
     c.corrected = g_corrected.load(std::memory_order_relaxed);
     c.commitFaults = g_commitFaults.load(std::memory_order_relaxed);
     for (int s = 0; s < ofm::kSkipCount; ++s) c.skips[s] = g_skips[s].load(std::memory_order_relaxed);
+    c.lagTurned = g_lagTurned.load(std::memory_order_relaxed);
+    c.lagNoPrev = g_lagNoPrev.load(std::memory_order_relaxed);
+    c.lagMicroDeg = g_lagMicroDeg.load(std::memory_order_relaxed);
     return c;
 }
+
+namespace {
+// The end-of-frame check's rows: the identity until a step writes its own.
+void publishIdentityRows() {
+    for (int i = 0; i < ofm::kViews; ++i)
+        for (int k = 0; k < 9; ++k) g_lagRows[i][k].store(k % 4 == 0 ? 1.f : 0.f, std::memory_order_relaxed);
+}
+}  // namespace
 
 void onFootMarkersFrameStep(uint64_t nowMs, bool native, int onFoot, uintptr_t base, const ofm::Section* sections, int count,
                             OnFootMarkersSink sink, void* ctx, bool mainMenu) {
@@ -284,6 +328,7 @@ void onFootMarkersFrameStep(uint64_t nowMs, bool native, int onFoot, uintptr_t b
     static ofm::Toggle toggle;
     static ofm::Window window;
     char line[900];
+    g_frame.fetch_add(1, std::memory_order_relaxed);  // the frame's turn's frame number
 
     // The search once, the first frame native VR on foot is on: a pass over the game's code at launch, not a hitch at the disembark.
     if (native && !searched) {
@@ -310,6 +355,9 @@ void onFootMarkersFrameStep(uint64_t nowMs, bool native, int onFoot, uintptr_t b
         say(sink, ctx, ofm::formatToggle(d, line, sizeof(line)), line);
         if (d.on) {
             window.start(nowMs, onFootMarkersCounts());
+            g_lagMaxMicroDeg.store(0, std::memory_order_relaxed);
+            publishIdentityRows();
+            g_lagEpoch.fetch_add(1, std::memory_order_release);  // the poses from before are not the previous frame
             g_sample.reset();  // not a sample left from the last time on foot
             g_sample.want();
         } else {
@@ -323,7 +371,17 @@ void onFootMarkersFrameStep(uint64_t nowMs, bool native, int onFoot, uintptr_t b
     if (cam0 && cam1) {
         float m0[ofm::kPoseFloats], m1[ofm::kPoseFloats];
         const bool readable = sehRead(nullptr, cam0 + ofm::kCamPose, m0, sizeof(m0)) && sehRead(nullptr, cam1 + ofm::kCamPose, m1, sizeof(m1));
-        window.note(readable, readable && ofm::identityRows(m0) && ofm::identityRows(m1));
+        bool ours = false;
+        if (readable) {
+            float w0[ofm::kPoseFloats] = {}, w1[ofm::kPoseFloats] = {};
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c) {
+                    w0[4 * r + c] = g_lagRows[0][3 * r + c].load(std::memory_order_relaxed);
+                    w1[4 * r + c] = g_lagRows[1][3 * r + c].load(std::memory_order_relaxed);
+                }
+            ours = ofm::sameRows(m0, w0) && ofm::sameRows(m1, w1);
+        }
+        window.note(readable, ours);
     }
 
     ofm::Counts delta;
@@ -334,6 +392,11 @@ void onFootMarkersFrameStep(uint64_t nowMs, bool native, int onFoot, uintptr_t b
         const bool sampled = g_sample.take(&s);
         say(sink, ctx, ofm::formatSummary(seconds, delta, check, sampled ? &s : nullptr, line, sizeof(line)), line);
         g_sample.want();
+        const uint64_t maxMicro = g_lagMaxMicroDeg.exchange(0, std::memory_order_relaxed);
+        say(sink, ctx,
+            ofm::formatLagSummary(delta.lagTurned, delta.lagNoPrev, double(delta.lagMicroDeg) * 1e-6, float(double(maxMicro) * 1e-6), line,
+                                  sizeof(line)),
+            line);
     }
 }
 

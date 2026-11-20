@@ -9,6 +9,8 @@
 // camera is the identity, and the layer is made for that: the markers already carry the gaze, so the head's turn in the camera moves
 // them a second time (flights .15, .16). After the game writes that pose, both eyes' PostGUI cameras get the identity rotation, each
 // eye kept at its own offset from the point between the eyes (walk .17: this "stereo" beat both eyes at 0 and the game's own pose).
+// The game places the markers by the previous frame's head pose, so the rotation is the head's turn between that frame and this one
+// rather than the identity (on-foot-marker-lag, flights 20.11; "the frame's turn" below).
 //
 // The game, build 334473 (Ghidra; design.md of openspec changes native-vr-on-foot-postgui-pose and native-vr-on-foot-markers-always):
 //   0x287D660 (mgr, a2), called from 0x287ABA0, and 0x28457F0 (mgr, n, a3), called from 0x287D660 (n = 1) and from the pipeline frame
@@ -326,6 +328,123 @@ inline bool identityRows(const float* m) {
     return true;
 }
 
+// ---- the frame's turn (openspec change on-foot-marker-lag; flights 20.11) ---------------------------------------------------------
+//
+// The game places the markers by the previous frame's head pose, so with the identity alone a head turn leaves them behind for one
+// frame (22 ms at 45 fps): they slide with the gaze and come back. Rows 0-2 = C * P^T (C this frame's game rows 0-2, P the previous
+// frame's) carry them to where the world is now (flights 20.11, station and ground combat: pinned). Row 3 stays correct()'s.
+
+// Rows 0-2 and row 3's x, y, z within 1e-5 of `b`: the step's own last write, not the game's pose.
+constexpr float kOwnEps = 1e-5f;
+inline bool sameWrite(const float* a, const float* b) {
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 3; ++c)
+            if (!(std::fabs(a[4 * r + c] - b[4 * r + c]) <= kOwnEps)) return false;
+    return true;
+}
+
+// Rows 0-2 unit length and at right angles within 1e-3 (NaN fails).
+constexpr float kOrthoEps = 1e-3f;
+inline bool orthonormal(const float* m) {
+    for (int a = 0; a < 3; ++a)
+        for (int b = a; b < 3; ++b) {
+            const float d = m[4 * a] * m[4 * b] + m[4 * a + 1] * m[4 * b + 1] + m[4 * a + 2] * m[4 * b + 2];
+            if (!(std::fabs(d - (a == b ? 1.f : 0.f)) <= kOrthoEps)) return false;
+        }
+    return true;
+}
+
+// The turn C * P^T into rows 0-2 of `out` (their fourth numbers 0); row 3 untouched.
+inline void lagTurn(const float* C, const float* P, float* out) {
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) out[4 * r + c] = C[4 * r] * P[4 * c] + C[4 * r + 1] * P[4 * c + 1] + C[4 * r + 2] * P[4 * c + 2];
+        out[4 * r + 3] = 0.f;
+    }
+}
+
+// The rotation angle of rows 0-2 in degrees, atan2(|axis| / 2, (trace - 1) / 2): exact near 0 where acos is not.
+inline float turnDegrees(const float* m) {
+    const float x = m[9] - m[6], y = m[2] - m[8], z = m[4] - m[1];
+    const float s = 0.5f * std::sqrt(x * x + y * y + z * z);
+    const float c = 0.5f * (m[0] + m[5] + m[10] - 1.f);
+    return std::atan2(s, c) * 57.2957795f;
+}
+
+// One camera's poses for the turn (the hook's thread only): this frame's game rows and the previous frame's, by the frame number, and
+// the step's last write.
+struct LagCam {
+    uint64_t cam = 0;
+    uint64_t curFrame = 0;
+    bool hasCur = false, hasPrev = false, hasLast = false;
+    float cur[kPoseFloats] = {}, prev[kPoseFloats] = {}, last[kPoseFloats] = {};
+};
+enum LagResult : int { kLagRepeat = 0, kLagTurned, kLagNoPrev };
+// One step over both eyes, after correct() put its pose in `out`. `game` is what the cameras hold now, `frame` the frame thread's
+// number. Either camera holding the step's own last write: `out` = the last writes again (the game wrote no new pose; correct() over
+// a turned pose is not a fixed point). Otherwise each camera's game rows become this frame's (the previous ones move to "previous" when
+// the frame number changed), and with both eyes' previous poses and sane rows `out` rows 0-2 get the turn; else they stay the identity.
+// *degrees: eye 0's turn angle when turned. The caller records `out` as the last writes once they are written (lagWritten).
+inline int lagStep(LagCam cams[kViews], const uint64_t camAddr[kViews], const float game[kViews][kPoseFloats], uint64_t frame,
+                   float out[kViews][kPoseFloats], float* degrees) {
+    *degrees = 0.f;
+    for (int i = 0; i < kViews; ++i)
+        if (cams[i].cam != camAddr[i]) {
+            cams[i] = LagCam{};
+            cams[i].cam = camAddr[i];
+        }
+    if ((cams[0].hasLast && sameWrite(game[0], cams[0].last)) || (cams[1].hasLast && sameWrite(game[1], cams[1].last))) {
+        if (cams[0].hasLast && cams[1].hasLast) {
+            std::memcpy(out[0], cams[0].last, sizeof(out[0]));
+            std::memcpy(out[1], cams[1].last, sizeof(out[1]));
+            return kLagRepeat;
+        }
+    }
+    bool turn = true;
+    for (int i = 0; i < kViews; ++i) {
+        LagCam& c = cams[i];
+        if (c.hasCur && c.curFrame != frame) {
+            if (c.curFrame + 1 == frame) {
+                std::memcpy(c.prev, c.cur, sizeof(c.prev));
+                c.hasPrev = true;
+            } else {
+                c.hasPrev = false;  // a gap: no previous frame
+            }
+        }
+        std::memcpy(c.cur, game[i], sizeof(c.cur));
+        c.curFrame = frame;
+        c.hasCur = true;
+        if (!c.hasPrev || !orthonormal(c.cur) || !orthonormal(c.prev)) turn = false;
+    }
+    if (!turn) return kLagNoPrev;
+    for (int i = 0; i < kViews; ++i) lagTurn(cams[i].cur, cams[i].prev, out[i]);
+    *degrees = turnDegrees(out[0]);
+    return kLagTurned;
+}
+inline void lagWritten(LagCam cams[kViews], const float out[kViews][kPoseFloats]) {
+    for (int i = 0; i < kViews; ++i) {
+        std::memcpy(cams[i].last, out[i], sizeof(cams[i].last));
+        cams[i].hasLast = true;
+    }
+}
+
+// Rows 0-2 within 1e-4 of `want`'s (the frame thread's end-of-frame check against the last write).
+inline bool sameRows(const float* m, const float* want) {
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            if (!(std::fabs(m[4 * r + c] - want[4 * r + c]) <= kIdentityEps)) return false;
+    return true;
+}
+
+// The 30-second turn line. turned 0: no step got a turn.
+inline int formatLagSummary(uint64_t turned, uint64_t noPrev, double degreeSum, float degreeMax, char* out, size_t cap) {
+    if (!turned)
+        return std::snprintf(out, cap, "on-foot marker lag: turned 0, no prev %llu: no step got a turn",
+                             static_cast<unsigned long long>(noPrev));
+    return std::snprintf(out, cap, "on-foot marker lag: turned %llu, no prev %llu, angle mean %.3f max %.3f deg",
+                         static_cast<unsigned long long>(turned), static_cast<unsigned long long>(noPrev), degreeSum / double(turned),
+                         static_cast<double>(degreeMax));
+}
+
 // ---- the counters, the sample, the window ---------------------------------------------------------------------------------------
 
 // The hook side's, cumulative. poseCalls: the pose writer; eyesOne / eyesOther: the eye writer with n = 1 / another n. steps:
@@ -334,6 +453,8 @@ inline bool identityRows(const float* m) {
 struct Counts {
     uint64_t poseCalls = 0, eyesOne = 0, eyesOther = 0, steps = 0, corrected = 0, commitFaults = 0;
     uint64_t skips[kSkipCount] = {};
+    // The frame's turn: steps turned, steps with no previous pose, the turned steps' angles in micro-degrees.
+    uint64_t lagTurned = 0, lagNoPrev = 0, lagMicroDeg = 0;
 };
 inline Counts minus(const Counts& a, const Counts& b) {
     Counts d;
@@ -344,6 +465,9 @@ inline Counts minus(const Counts& a, const Counts& b) {
     d.corrected = a.corrected - b.corrected;
     d.commitFaults = a.commitFaults - b.commitFaults;
     for (int s = 0; s < kSkipCount; ++s) d.skips[s] = a.skips[s] - b.skips[s];
+    d.lagTurned = a.lagTurned - b.lagTurned;
+    d.lagNoPrev = a.lagNoPrev - b.lagNoPrev;
+    d.lagMicroDeg = a.lagMicroDeg - b.lagMicroDeg;
     return d;
 }
 constexpr uint64_t kFaultsToDisable = 3;
