@@ -244,6 +244,32 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // EDVRonFOOT desktop eye view: each finished eye offered to d3d11.dll for the game's window (native_desktop_view_client.h).
   NativeDesktopViewClient desktopView;
   uint64_t desktopViewHeld=0,desktopViewFailures=0;
+  // The lens mask last sent per eye (the zoom fit keeps it out of the window): the same projection GetHiddenAreaMesh gives the game
+  // (openvr_system.cpp eyeMesh), checked at most once a second for the eye the view holds, and sent only when it changed.
+  struct DesktopViewMaskSent {
+    bool sent=false;const NativeHiddenMasks* masks=nullptr;uint64_t revision=0;RawFov fov{};uint64_t checkedMs=0;
+  } desktopViewMasks[2];
+  void desktopViewMask(unsigned eye) {
+    if(eye>1)return;
+    auto& last=desktopViewMasks[eye];const uint64_t now=GetTickCount64();
+    if(last.sent&&now-last.checkedMs<1000)return;
+    last.checkedMs=now;
+    const auto s=geometry.read();
+    const bool live=s.connected&&s.generation;
+    const bool geometryOk=live&&s.geometryValid&&s.geometry.native.generation==s.generation;
+    const bool opticsOk=geometryOk||(live&&s.opticsValid&&s.optics.generation==s.generation&&s.optics.sequence);
+    const NativeHiddenMasks* masks=(opticsOk&&s.hiddenMasksCompatible&&s.hiddenMasks&&s.hiddenMasks->generation==s.generation)?
+        s.hiddenMasks.get():nullptr;
+    const RawFov fov=masks?(geometryOk?s.geometry.raw[eye]:s.optics.raw[eye]):RawFov{};
+    const uint64_t revision=masks?masks->revision:0;
+    if(last.sent&&last.masks==masks&&last.revision==revision&&std::memcmp(&last.fov,&fov,sizeof(fov))==0)return;
+    std::vector<vr::HmdVector2_t> vertices;
+    if(masks&&!projectHiddenMask(masks->eyes[eye],fov,masks->guard[eye][0],masks->guard[eye][1],vertices))vertices.clear();
+    static_assert(sizeof(vr::HmdVector2_t)==2*sizeof(float),"xy pairs");
+    const auto r=desktopView.noteMask(eye,vertices.empty()?nullptr:&vertices[0].v[0],uint32_t(vertices.size()));
+    nativeTracePrintf("native_desktop_view,mask_eye=%u,triangles=%u,result=%08lx\n",eye,unsigned(vertices.size()/3),(unsigned long)r);
+    last.sent=SUCCEEDED(r);last.masks=masks;last.revision=revision;last.fov=fov;
+  }
   NativeTimingClient timing;
   DeviceGpuTiming deviceTiming;
   bool deviceTimingReady=false;
@@ -1802,6 +1828,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // deferred FSS eye passes here too, when its donor's submit finishes it.
     if(desktopView.acquired()) {
       const auto noted=desktopView.note(sequence,unsigned(eye),selected.Get(),selectedBounds);
+      if(noted==S_OK)desktopViewMask(unsigned(eye));
       if(noted==S_OK&&desktopViewHeld++==0)
         nativeTracePrintf("native_desktop_view,first_held_eye=%u,sequence=%llu\n",unsigned(eye),(unsigned long long)sequence);
       else if(FAILED(noted)&&desktopViewFailures++<8)
@@ -2637,7 +2664,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       const auto viewClosed=desktopView.close(); // CPU only: drops the reference d3d11.dll held
       if(tracing)nativeTracePrintf("native_desktop_view_summary,held=%llu,failures=%llu,close=%08lx\n",
         (unsigned long long)desktopViewHeld,(unsigned long long)desktopViewFailures,(unsigned long)viewClosed);
-      desktopViewHeld=desktopViewFailures=0;
+      desktopViewHeld=desktopViewFailures=0;desktopViewMasks[0]={};desktopViewMasks[1]={};
     }
     if(FAILED(fss.close())||FAILED(features.close()))return clean=false;
     if(tracing)nativeTracePrintf("native_features_summary,changes=%llu,fss_healed=%llu/%llu,fss_deferred=%llu,withheld=%llu,replayed=%llu,empty=%llu,trim_stage=%u\n",

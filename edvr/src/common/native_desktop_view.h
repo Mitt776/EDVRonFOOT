@@ -20,10 +20,15 @@ struct EdvrNativeDesktopViewRequest {
 // close is CPU-only, may run on the XR owner, and drops any reference held.
 typedef HRESULT(WINAPI *EdvrNativeDesktopViewNoteEye)(void*, uint64_t, uint32_t, ID3D11Texture2D*, const float*);
 typedef HRESULT(WINAPI *EdvrNativeDesktopViewClose)(void*);
+// noteMask: the lens mask of one eye, the same hidden area mesh the game is given (GetHiddenAreaMesh): vertexCount vertices (a multiple
+// of three; zero for no mask), xy pairs in fractions of the eye's picture (x right, y down). Copied; sent only when it changes. Producer
+// thread, like noteEye. Only the zoom fit reads it.
+typedef HRESULT(WINAPI *EdvrNativeDesktopViewNoteMask)(void*, uint32_t, const float*, uint32_t);
 struct EdvrNativeDesktopViewTable {
   uint32_t size, version;
   void* context;
   EdvrNativeDesktopViewNoteEye noteEye;
+  EdvrNativeDesktopViewNoteMask noteMask;
   EdvrNativeDesktopViewClose close;
 };
 extern "C" HRESULT WINAPI edvrAcquireNativeDesktopView(const EdvrNativeDesktopViewRequest*, EdvrNativeDesktopViewTable*);

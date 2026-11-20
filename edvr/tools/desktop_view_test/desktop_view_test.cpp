@@ -152,6 +152,60 @@ void partVerdict() {
     check(drawn == 3 && noEye == 1 && stale == 1, "a run with a missing eye and a repeated frame");
 }
 
+// Four corner triangles x + y < c (and their mirrors): the shape of a lens mask's corners.
+void cornerMask(float c, float out[24]) {
+    const float tri[4][6] = {{0, 0, c, 0, 0, c}, {1, 0, 1 - c, 0, 1, c}, {0, 1, c, 1, 0, 1 - c}, {1, 1, 1 - c, 1, 1, 1 - c}};
+    std::memcpy(out, tri, sizeof(tri));
+}
+
+void partZoom() {
+    check(parseFit("zoom") == Fit::Zoom && !std::strcmp(fitName(Fit::Zoom), "zoom"), "zoom reads and names");
+    // Dima's eye 2448x2672 in 1920x1080: crop keeps y 0.5 +- 0.2577; the corner x + y < 0.3 reaches its corners.
+    float mask[24];
+    cornerMask(0.3f, mask);
+    double share = 0;
+    const Placement crop = place(Fit::Crop, 1920, 1080, 2448, 2672);
+    Placement z = zoomPlacement(1920, 1080, 2448, 2672, mask, 12, &share);
+    const double hh = (crop.src[3] - crop.src[1]) / 2;
+    const double exact = 0.7 / (0.5 + hh);   // the corner (0.5 - 0.5 s, 0.5 - hh s) on the line x + y = 0.3
+    check(z.ok && share < 1 && share <= exact + 1e-9 && share > exact - 1.0 / 512, "zoom: just enough to clear the corners");
+    check(z.dst[0] == 0 && z.dst[2] == 1920 && z.dst[3] == 1080 && !z.clear, "zoom fills the window");
+    check(near((z.src[0] + z.src[2]) / 2, 0.5) && near((z.src[1] + z.src[3]) / 2, 0.5), "zoom: centred");
+    check(near((z.src[2] - z.src[0]) * 2448.0 / ((z.src[3] - z.src[1]) * 2672.0), 1920.0 / 1080.0, 1e-3), "zoom: no stretch");
+    const double kept[4] = {z.src[0], z.src[1], z.src[2], z.src[3]};
+    check(!rectHitsMask(kept, mask, 12), "zoom: no mask triangle in the window");
+    const double grown = 1.01;
+    const double cx = 0.5, cy = 0.5, hw2 = (z.src[2] - z.src[0]) / 2 * grown, hh2 = (z.src[3] - z.src[1]) / 2 * grown;
+    const double bigger[4] = {cx - hw2, cy - hh2, cx + hw2, cy + hh2};
+    check(rectHitsMask(bigger, mask, 12), "zoom: one per cent more would show a corner");
+    // No mask, or a mask that misses crop's rectangle: zoom is crop.
+    z = zoomPlacement(1920, 1080, 2448, 2672, nullptr, 0, &share);
+    check(share == 1 && z.src[1] == crop.src[1] && z.src[3] == crop.src[3], "no mask: zoom is crop");
+    cornerMask(0.1f, mask);
+    z = zoomPlacement(1920, 1080, 2448, 2672, mask, 12, &share);
+    check(share == 1, "small corners outside crop: no zoom");
+    // A mask over the centre: no more than twice.
+    const float centre[6] = {0.4f, 0.4f, 0.6f, 0.4f, 0.5f, 0.6f};
+    z = zoomPlacement(1920, 1080, 2448, 2672, centre, 3, &share);
+    check(share == kZoomMinShare, "a mask over the centre: zoom stops at x2");
+    // A triangle touching the rectangle at an edge only does not count.
+    const double r[4] = {0.2, 0.2, 0.8, 0.8};
+    const float touching[6] = {0.8f, 0.3f, 0.9f, 0.3f, 0.9f, 0.5f};
+    const float inside[6] = {0.7f, 0.3f, 0.9f, 0.3f, 0.9f, 0.5f};
+    const float degenerate[6] = {0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f};
+    check(!rectHitsTriangle(r, touching) && rectHitsTriangle(r, inside) && !rectHitsTriangle(r, degenerate), "edge, overlap, degenerate");
+    // The diagonal case the bounding boxes alone would call a hit.
+    const float diagonal[6] = {0.0f, 0.0f, 0.35f, 0.0f, 0.0f, 0.35f};
+    check(!rectHitsTriangle(r, diagonal), "a corner triangle beside the rectangle's corner misses it");
+    char line[512];
+    Window w;
+    w.presents = 10; w.drawn = 10; w.windowW = 1920; w.windowH = 1080; w.eyeW = 2448; w.eyeH = 2672; w.path = ColorPath::Copy;
+    w.zoomShare = 0.8; w.maskTriangles = 64;
+    formatLine(line, sizeof(line), View::Right, Fit::Zoom, true, w);
+    check(!std::strcmp(line, "desktop view: right zoom x1.250 (mask 64 triangles), presents 10, drawn 10, skipped no-eye 0 / stale 0 / "
+                             "failed 0 (last none), window 1920x1080, eye 2448x2672, colour copy, gpu n/a."), "the zoom line");
+}
+
 void partLine() {
     char line[512];
     Window w;
@@ -183,6 +237,7 @@ int main(int argc, char** argv) {
     partUv();
     partColor();
     partVerdict();
+    partZoom();
     partLine();
     std::printf("%s: desktop_view_test, %d checks, %d failed\n", g_failures ? "FAIL" : "PASS", g_checks, g_failures);
     return g_failures ? 1 : 0;

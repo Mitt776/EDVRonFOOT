@@ -14,8 +14,9 @@ namespace edvr::dv {
 
 // experimental.native_vr_desktop_view: off (the default; also empty or unknown), right, left.
 enum class View { Off, Right, Left };
-// experimental.native_vr_desktop_view_fit: crop (the default; also empty or unknown), whole.
-enum class Fit { Crop, Whole };
+// experimental.native_vr_desktop_view_fit: crop (the default; also empty or unknown), zoom (crop enlarged just enough that no triangle
+// of the lens mask -- the corners the game does not draw -- is in the window), whole.
+enum class Fit { Crop, Whole, Zoom };
 
 inline bool equalsWord(const char* raw, const char* word) {
     if (!raw) return false;
@@ -45,12 +46,13 @@ inline View parseView(const char* raw, bool* valid = nullptr) {
 inline Fit parseFit(const char* raw, bool* valid = nullptr) {
     if (valid) *valid = true;
     if (equalsWord(raw, "whole")) return Fit::Whole;
+    if (equalsWord(raw, "zoom")) return Fit::Zoom;
     if (equalsWord(raw, "crop") || blank(raw)) return Fit::Crop;
     if (valid) *valid = false;
     return Fit::Crop;
 }
 inline const char* viewName(View v) { return v == View::Right ? "right" : v == View::Left ? "left" : "off"; }
-inline const char* fitName(Fit f) { return f == Fit::Whole ? "whole" : "crop"; }
+inline const char* fitName(Fit f) { return f == Fit::Whole ? "whole" : f == Fit::Zoom ? "zoom" : "crop"; }
 // The OpenVR eye index the view wants (0 left, 1 right); -1 for off.
 inline int viewEye(View v) { return v == View::Right ? 1 : v == View::Left ? 0 : -1; }
 
@@ -67,8 +69,8 @@ inline Placement place(Fit fit, double windowW, double windowH, double eyeW, dou
     Placement p;
     if (!(windowW >= 1 && windowH >= 1 && eyeW >= 1 && eyeH >= 1) || !std::isfinite(windowW + windowH + eyeW + eyeH)) return p;
     const double windowAspect = windowW / windowH, eyeAspect = eyeW / eyeH;
-    if (fit == Fit::Crop) {
-        // The window is filled; the eye is cut to the window's shape around its centre.
+    if (fit != Fit::Whole) {
+        // The window is filled; the eye is cut to the window's shape around its centre (zoom starts here: zoomPlacement).
         p.dst[0] = 0; p.dst[1] = 0; p.dst[2] = float(windowW); p.dst[3] = float(windowH);
         if (eyeAspect > windowAspect) {   // the eye is wider: cut its sides
             const double keep = windowAspect / eyeAspect;
@@ -90,6 +92,75 @@ inline Placement place(Fit fit, double windowW, double windowH, double eyeW, dou
         p.clear = w < windowW || h < windowH;
     }
     p.ok = true;
+    return p;
+}
+
+// The lens mask (zoom). Triangles in fractions of the eye's picture (x right, y down, 0..1: the hidden area mesh the runtime gives the
+// game, which the game leaves black), three vertices each, xy pairs. rectHitsTriangle: the rectangle (x0, y0, x1, y1) and the triangle
+// share more than an edge (separating axes: the rectangle's two and the triangle's three edge normals, a hair of tolerance).
+inline bool rectHitsTriangle(const double r[4], const float* t) {
+    constexpr double eps = 1e-7;
+    double minX = t[0], maxX = t[0], minY = t[1], maxY = t[1];
+    for (int i = 1; i < 3; ++i) {
+        minX = t[2 * i] < minX ? t[2 * i] : minX; maxX = t[2 * i] > maxX ? t[2 * i] : maxX;
+        minY = t[2 * i + 1] < minY ? t[2 * i + 1] : minY; maxY = t[2 * i + 1] > maxY ? t[2 * i + 1] : maxY;
+    }
+    if (maxX <= r[0] + eps || minX >= r[2] - eps || maxY <= r[1] + eps || minY >= r[3] - eps) return false;
+    for (int i = 0; i < 3; ++i) {
+        const int j = (i + 1) % 3;
+        const double nx = -(double(t[2 * j + 1]) - t[2 * i + 1]), ny = double(t[2 * j]) - t[2 * i];
+        if (nx == 0 && ny == 0) return false;   // a degenerate triangle covers nothing
+        double tMin = 1e300, tMax = -1e300;
+        for (int k = 0; k < 3; ++k) {
+            const double d = nx * t[2 * k] + ny * t[2 * k + 1];
+            tMin = d < tMin ? d : tMin; tMax = d > tMax ? d : tMax;
+        }
+        const double corners[4][2] = {{r[0], r[1]}, {r[2], r[1]}, {r[0], r[3]}, {r[2], r[3]}};
+        double rMin = 1e300, rMax = -1e300;
+        for (const auto& c : corners) {
+            const double d = nx * c[0] + ny * c[1];
+            rMin = d < rMin ? d : rMin; rMax = d > rMax ? d : rMax;
+        }
+        const double tol = eps * std::sqrt(nx * nx + ny * ny);
+        if (tMax <= rMin + tol || rMax <= tMin + tol) return false;
+    }
+    return true;
+}
+inline bool rectHitsMask(const double r[4], const float* triangles, uint32_t vertexCount) {
+    for (uint32_t i = 0; i + 2 < vertexCount; i += 3)
+        if (rectHitsTriangle(r, triangles + 2 * i)) return true;
+    return false;
+}
+// The share of crop's rectangle zoom keeps around its centre: 1 with no mask in it, else the largest share (to 1/1024) whose rectangle
+// meets no triangle, at least kZoomMinShare (a mask over the centre, which no real lens has, gives that and no more).
+constexpr double kZoomMinShare = 0.5;
+inline double zoomShare(const float src[4], const float* triangles, uint32_t vertexCount) {
+    const double cx = (double(src[0]) + src[2]) / 2, cy = (double(src[1]) + src[3]) / 2;
+    const double hw = (double(src[2]) - src[0]) / 2, hh = (double(src[3]) - src[1]) / 2;
+    auto rect = [&](double s, double r[4]) { r[0] = cx - hw * s; r[1] = cy - hh * s; r[2] = cx + hw * s; r[3] = cy + hh * s; };
+    double r[4];
+    rect(1, r);
+    if (!triangles || vertexCount < 3 || !rectHitsMask(r, triangles, vertexCount)) return 1;
+    double lo = kZoomMinShare, hi = 1;
+    rect(lo, r);
+    if (rectHitsMask(r, triangles, vertexCount)) return lo;
+    for (int i = 0; i < 10; ++i) {
+        const double mid = (lo + hi) / 2;
+        rect(mid, r);
+        if (rectHitsMask(r, triangles, vertexCount)) hi = mid; else lo = mid;
+    }
+    return lo;
+}
+// zoom's placement: crop's, its picture part shrunk around the centre to the share above. share: out, what was kept (1 = crop's).
+inline Placement zoomPlacement(double windowW, double windowH, double eyeW, double eyeH, const float* triangles, uint32_t vertexCount,
+                               double* share = nullptr) {
+    Placement p = place(Fit::Crop, windowW, windowH, eyeW, eyeH);
+    const double s = p.ok ? zoomShare(p.src, triangles, vertexCount) : 1;
+    if (share) *share = s;
+    if (!p.ok || s >= 1) return p;
+    const double cx = (double(p.src[0]) + p.src[2]) / 2, cy = (double(p.src[1]) + p.src[3]) / 2;
+    const double hw = (double(p.src[2]) - p.src[0]) / 2 * s, hh = (double(p.src[3]) - p.src[1]) / 2 * s;
+    p.src[0] = float(cx - hw); p.src[1] = float(cy - hh); p.src[2] = float(cx + hw); p.src[3] = float(cy + hh);
     return p;
 }
 
@@ -186,6 +257,8 @@ struct Window {
     ColorPath path = ColorPath::Unsupported;
     double gpuSumMs = 0, gpuMaxMs = 0;
     uint64_t gpuSamples = 0;
+    double zoomShare = 1;          // zoom: the share of crop kept (the last draw's)
+    uint32_t maskTriangles = 0;    // zoom: the lens mask's triangles for the drawn eye
     void noteGpu(double ms) {
         if (!(ms >= 0) || !std::isfinite(ms)) return;
         gpuSumMs += ms; ++gpuSamples;
@@ -201,10 +274,15 @@ inline int formatLine(char* out, size_t size, View view, Fit fit, bool runtime, 
     char gpu[64];
     if (w.gpuSamples) std::snprintf(gpu, sizeof(gpu), "gpu mean %.3f ms max %.3f ms", w.gpuSumMs / double(w.gpuSamples), w.gpuMaxMs);
     else std::snprintf(gpu, sizeof(gpu), "gpu n/a");
+    char fitText[96];
+    if (fit == Fit::Zoom)
+        std::snprintf(fitText, sizeof(fitText), "zoom x%.3f (mask %u triangles)", w.zoomShare > 0 ? 1.0 / w.zoomShare : 1.0,
+                      w.maskTriangles);
+    else std::snprintf(fitText, sizeof(fitText), "%s", fitName(fit));
     return std::snprintf(out, size,
         "desktop view: %s %s%s, presents %llu, drawn %llu, skipped no-eye %llu / stale %llu / failed %llu (last %s), window %ux%u, "
         "eye %ux%u, colour %s, %s.",
-        viewName(view), fitName(fit), runtime ? "" : ", no runtime", (unsigned long long)w.presents, (unsigned long long)w.drawn,
+        viewName(view), fitText, runtime ? "" : ", no runtime", (unsigned long long)w.presents, (unsigned long long)w.drawn,
         (unsigned long long)w.noEye, (unsigned long long)w.stale, (unsigned long long)w.failed, failureName(w.lastFailure),
         w.windowW, w.windowH, w.eyeW, w.eyeH, colorPathName(w.path), gpu);
 }

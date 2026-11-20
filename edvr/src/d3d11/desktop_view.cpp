@@ -16,6 +16,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <vector>
 
 using Microsoft::WRL::ComPtr;
 
@@ -42,7 +43,11 @@ struct Held {
     ComPtr<ID3D11Texture2D> texture;
     float bounds[4]{};
     uint64_t sequence = 0, presentIndex = 0;
+    uint32_t eye = 0;
 };
+// The lens masks the runtime sent (noteMask), per eye, with a revision the render side compares.
+std::vector<float> g_masks[2];
+uint64_t g_maskRevision[2]{};
 Held g_held;
 uint64_t g_presentIndex = 0;   // non-TEST Presents counted so far (under g_mutex)
 
@@ -70,6 +75,16 @@ struct Render {
     } timers[4];
     unsigned nextTimer = 0;
     bool timersFailed = false;
+    // The render side's copy of each eye's mask (taken at a Present when its revision moved), and zoom's last placement.
+    std::vector<float> mask[2];
+    uint64_t maskRevision[2]{};
+    struct ZoomCache {
+        bool valid = false;
+        uint32_t eye = 0, windowW = 0, windowH = 0, eyeW = 0, eyeH = 0;
+        uint64_t maskRevision = 0;
+        dv::Placement place;
+        double share = 1;
+    } zoom;
 };
 Render g_r;
 FaultBudget g_budget("desktop view", 3);
@@ -240,7 +255,7 @@ Render::Timer* beginTimer(ID3D11Device* device, ID3D11DeviceContext* ctx) {
 }
 
 // Draws the held eye into the back buffer; Failure::None when it did.
-dv::Failure draw(IDXGISwapChain* swapChain, ID3D11Device* device, ID3D11Texture2D* eye, const float bounds[4]) {
+dv::Failure draw(IDXGISwapChain* swapChain, ID3D11Device* device, ID3D11Texture2D* eye, const float bounds[4], uint32_t eyeIndex) {
     if (!sameDevice(device, eye)) return dv::Failure::Device;
     ComPtr<ID3D11Texture2D> back;
     if (FAILED(swapChain->GetBuffer(0, IID_PPV_ARGS(&back))) || !back) return dv::Failure::Window;
@@ -255,7 +270,22 @@ dv::Failure draw(IDXGISwapChain* swapChain, ID3D11Device* device, ID3D11Texture2
     g_r.window.path = plan.path;
     if (plan.path == dv::ColorPath::Unsupported || ed.SampleDesc.Count != 1 || ed.ArraySize != 1) return dv::Failure::Format;
     if (!(ed.BindFlags & D3D11_BIND_SHADER_RESOURCE) || !(bd.BindFlags & D3D11_BIND_RENDER_TARGET)) return dv::Failure::Bind;
-    const dv::Placement place = dv::place(g_r.fit, bd.Width, bd.Height, eyeW, eyeH);
+    dv::Placement place;
+    if (g_r.fit == dv::Fit::Zoom) {
+        // The search over the mask runs only when an input changed (the eye, its mask, a size).
+        auto& z = g_r.zoom;
+        const uint32_t e = eyeIndex & 1;
+        if (!z.valid || z.eye != e || z.maskRevision != g_r.maskRevision[e] || z.windowW != bd.Width || z.windowH != bd.Height ||
+            z.eyeW != eyeW || z.eyeH != eyeH) {
+            const auto& m = g_r.mask[e];
+            z.place = dv::zoomPlacement(bd.Width, bd.Height, eyeW, eyeH, m.empty() ? nullptr : m.data(), uint32_t(m.size() / 2), &z.share);
+            z.valid = true; z.eye = e; z.maskRevision = g_r.maskRevision[e];
+            z.windowW = bd.Width; z.windowH = bd.Height; z.eyeW = eyeW; z.eyeH = eyeH;
+        }
+        place = z.place;
+        g_r.window.zoomShare = z.share;
+        g_r.window.maskTriangles = uint32_t(g_r.mask[e].size() / 6);
+    } else place = dv::place(g_r.fit, bd.Width, bd.Height, eyeW, eyeH);
     if (!place.ok) return dv::Failure::Window;
 
     ComPtr<ID3D11DeviceContext> ctx;
@@ -346,6 +376,20 @@ HRESULT WINAPI noteEye(void* context, uint64_t sequence, uint32_t eye, ID3D11Tex
     std::memcpy(g_held.bounds, bounds, sizeof(g_held.bounds));
     g_held.sequence = sequence;
     g_held.presentIndex = g_presentIndex;
+    g_held.eye = eye;
+    return S_OK;
+}
+
+HRESULT WINAPI noteMask(void* context, uint32_t eye, const float* xy, uint32_t vertexCount) {
+    if (context != &g_session || eye > 1 || vertexCount % 3 || vertexCount > 65536 || (vertexCount && !xy)) return E_INVALIDARG;
+    for (uint32_t i = 0; i < 2 * vertexCount; ++i)
+        if (!std::isfinite(xy[i])) return E_INVALIDARG;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_session.active) return E_INVALIDARG;
+    g_masks[eye].assign(xy, xy + 2 * size_t(vertexCount));
+    ++g_maskRevision[eye];
+    Log::get().note("desktop view: lens mask for eye %u, %u triangles (revision %llu).", eye, vertexCount / 3,
+                    (unsigned long long)g_maskRevision[eye]);
     return S_OK;
 }
 
@@ -371,6 +415,10 @@ void desktopViewBeforePresent(IDXGISwapChain* swapChain, ID3D11Device* device, U
         held = std::move(g_held);
         g_held = {};
         index = g_presentIndex++;
+        if (held.texture) {
+            const uint32_t e = held.eye & 1;
+            if (g_maskRevision[e] != g_r.maskRevision[e]) { g_r.mask[e] = g_masks[e]; g_r.maskRevision[e] = g_maskRevision[e]; }
+        }
     }
     ++g_r.window.presents;
     const uint64_t now = nowMs();
@@ -380,7 +428,7 @@ void desktopViewBeforePresent(IDXGISwapChain* swapChain, ID3D11Device* device, U
         else if (verdict == dv::Verdict::Stale) ++g_r.window.stale;
         else {
             dv::Failure failure = dv::Failure::Shaders;
-            if (!guardedBudget(g_budget, [&] { failure = draw(swapChain, device, held.texture.Get(), held.bounds); }))
+            if (!guardedBudget(g_budget, [&] { failure = draw(swapChain, device, held.texture.Get(), held.bounds, held.eye); }))
                 failure = dv::Failure::Shaders;
             if (failure == dv::Failure::None) {
                 ++g_r.window.drawn;
@@ -408,9 +456,11 @@ extern "C" HRESULT WINAPI edvrAcquireNativeDesktopView(const EdvrNativeDesktopVi
     edvr::g_session.active = true;
     edvr::g_session.generation = r->generation;
     edvr::g_held = {};
+    for (unsigned e = 0; e < 2; ++e) { edvr::g_masks[e].clear(); ++edvr::g_maskRevision[e]; }   // the new session sends its own
     edvr::g_everAcquired.store(true);
     t->context = &edvr::g_session;
     t->noteEye = edvr::noteEye;
+    t->noteMask = edvr::noteMask;
     t->close = edvr::closeTable;
     edvr::Log::get().note("desktop view: the runtime acquired the eye table (generation %llu).", (unsigned long long)r->generation);
     return S_OK;

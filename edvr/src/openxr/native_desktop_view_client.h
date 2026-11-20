@@ -21,7 +21,8 @@ class NativeDesktopViewClient final {
     const auto result = reinterpret_cast<decltype(&edvrAcquireNativeDesktopView)>(entry)(&request, &candidate);
     if (result != S_OK) return FAILED(result) ? result : E_NOINTERFACE;
     if (candidate.size != sizeof(candidate) || candidate.version != EDVR_NATIVE_DESKTOP_VIEW_VERSION_1 ||
-        !candidate.context || !owned(provider, candidate.noteEye) || !owned(provider, candidate.close)) return E_NOINTERFACE;
+        !candidate.context || !owned(provider, candidate.noteEye) || !owned(provider, candidate.noteMask) ||
+        !owned(provider, candidate.close)) return E_NOINTERFACE;
     table_ = candidate;
     return S_OK;
   }
@@ -31,6 +32,11 @@ class NativeDesktopViewClient final {
     if (!acquired() || !texture) return S_FALSE;
     const float box[4] = {bounds.uMin, bounds.vMin, bounds.uMax, bounds.vMax};
     return table_.noteEye(table_.context, sequence, eye, texture, box);
+  }
+  // The eye's lens mask in fractions of its picture (xy pairs; vertexCount a multiple of three, zero for none).
+  HRESULT noteMask(unsigned eye, const float* xy, uint32_t vertexCount) {
+    if (!acquired()) return S_FALSE;
+    return table_.noteMask(table_.context, eye, xy, vertexCount);
   }
   HRESULT close() {
     if (!acquired()) return S_FALSE;
