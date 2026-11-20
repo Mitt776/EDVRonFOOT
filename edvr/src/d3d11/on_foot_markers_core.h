@@ -9,6 +9,8 @@
 // camera is the identity, and the layer is made for that: the markers already carry the gaze, so the head's turn in the camera moves
 // them a second time (flights .15, .16). After the game writes that pose, both eyes' PostGUI cameras get the identity rotation, each
 // eye kept at its own offset from the point between the eyes (walk .17: this "stereo" beat both eyes at 0 and the game's own pose).
+// The game places the markers by the previous frame's head pose, so the rotation is the head's turn between that frame and this one
+// rather than the identity (on-foot-marker-lag, flights 20.11; "the frame's turn" below).
 //
 // The game, build 334473 (Ghidra; design.md of openspec changes native-vr-on-foot-postgui-pose and native-vr-on-foot-markers-always):
 //   0x287D660 (mgr, a2), called from 0x287ABA0, and 0x28457F0 (mgr, n, a3), called from 0x287D660 (n = 1) and from the pipeline frame
@@ -326,40 +328,11 @@ inline bool identityRows(const float* m) {
     return true;
 }
 
-// ---- the marker lag probe (TEMPORARY; openspec change on-foot-marker-lag) ---------------------------------------------------------
+// ---- the frame's turn (openspec change on-foot-marker-lag; flights 20.11) ---------------------------------------------------------
 //
-// experimental.native_vr_on_foot_marker_lag: off (as above, the identity rotation), prev (rows 0-2 = C * P^T, C this frame's game rows
-// 0-2, P the previous frame's) or prev_flip (P * C^T). The guess: the game places the markers by the previous frame's head pose, so a
-// head turn leaves them behind for one frame; one of the two turns carries them to where the world is now. Row 3 stays correct()'s.
-
-enum Lag : int { kLagOff = 0, kLagPrev, kLagPrevFlip };
-inline const char* lagName(int m) {
-    switch (m) {
-        case kLagPrev: return "prev";
-        case kLagPrevFlip: return "prev_flip";
-        default: return "off";
-    }
-}
-// The key's value, case and surrounding blanks ignored; empty is off. Anything else is off with *unknown set.
-inline int parseLag(const char* raw, bool* unknown) {
-    *unknown = false;
-    char v[32] = {};
-    size_t n = 0;
-    const char* p = raw ? raw : "";
-    while (*p == ' ' || *p == '\t') ++p;
-    size_t len = std::strlen(p);
-    while (len && (p[len - 1] == ' ' || p[len - 1] == '\t' || p[len - 1] == '\r' || p[len - 1] == '\n')) --len;
-    if (len >= sizeof(v)) {
-        *unknown = true;
-        return kLagOff;
-    }
-    for (; n < len; ++n) v[n] = (p[n] >= 'A' && p[n] <= 'Z') ? static_cast<char>(p[n] - 'A' + 'a') : p[n];
-    if (!n || !std::strcmp(v, "off")) return kLagOff;
-    if (!std::strcmp(v, "prev")) return kLagPrev;
-    if (!std::strcmp(v, "prev_flip")) return kLagPrevFlip;
-    *unknown = true;
-    return kLagOff;
-}
+// The game places the markers by the previous frame's head pose, so with the identity alone a head turn leaves them behind for one
+// frame (22 ms at 45 fps): they slide with the gaze and come back. Rows 0-2 = C * P^T (C this frame's game rows 0-2, P the previous
+// frame's) carry them to where the world is now (flights 20.11, station and ground combat: pinned). Row 3 stays correct()'s.
 
 // Rows 0-2 and row 3's x, y, z within 1e-5 of `b`: the step's own last write, not the game's pose.
 constexpr float kOwnEps = 1e-5f;
@@ -381,12 +354,10 @@ inline bool orthonormal(const float* m) {
     return true;
 }
 
-// The turn into rows 0-2 of `out` (their fourth numbers 0); row 3 untouched. prev: C * P^T; prev_flip: P * C^T.
-inline void lagTurn(const float* C, const float* P, bool flip, float* out) {
-    const float* A = flip ? P : C;
-    const float* B = flip ? C : P;
+// The turn C * P^T into rows 0-2 of `out` (their fourth numbers 0); row 3 untouched.
+inline void lagTurn(const float* C, const float* P, float* out) {
     for (int r = 0; r < 3; ++r) {
-        for (int c = 0; c < 3; ++c) out[4 * r + c] = A[4 * r] * B[4 * c] + A[4 * r + 1] * B[4 * c + 1] + A[4 * r + 2] * B[4 * c + 2];
+        for (int c = 0; c < 3; ++c) out[4 * r + c] = C[4 * r] * P[4 * c] + C[4 * r + 1] * P[4 * c + 1] + C[4 * r + 2] * P[4 * c + 2];
         out[4 * r + 3] = 0.f;
     }
 }
@@ -399,7 +370,7 @@ inline float turnDegrees(const float* m) {
     return std::atan2(s, c) * 57.2957795f;
 }
 
-// One camera's poses for the probe (the hook's thread only): this frame's game rows and the previous frame's, by the frame number, and
+// One camera's poses for the turn (the hook's thread only): this frame's game rows and the previous frame's, by the frame number, and
 // the step's last write.
 struct LagCam {
     uint64_t cam = 0;
@@ -413,7 +384,7 @@ enum LagResult : int { kLagRepeat = 0, kLagTurned, kLagNoPrev };
 // a turned pose is not a fixed point). Otherwise each camera's game rows become this frame's (the previous ones move to "previous" when
 // the frame number changed), and with both eyes' previous poses and sane rows `out` rows 0-2 get the turn; else they stay the identity.
 // *degrees: eye 0's turn angle when turned. The caller records `out` as the last writes once they are written (lagWritten).
-inline int lagStep(LagCam cams[kViews], const uint64_t camAddr[kViews], const float game[kViews][kPoseFloats], uint64_t frame, int mode,
+inline int lagStep(LagCam cams[kViews], const uint64_t camAddr[kViews], const float game[kViews][kPoseFloats], uint64_t frame,
                    float out[kViews][kPoseFloats], float* degrees) {
     *degrees = 0.f;
     for (int i = 0; i < kViews; ++i)
@@ -444,8 +415,8 @@ inline int lagStep(LagCam cams[kViews], const uint64_t camAddr[kViews], const fl
         c.hasCur = true;
         if (!c.hasPrev || !orthonormal(c.cur) || !orthonormal(c.prev)) turn = false;
     }
-    if (!turn || mode == kLagOff) return kLagNoPrev;
-    for (int i = 0; i < kViews; ++i) lagTurn(cams[i].cur, cams[i].prev, mode == kLagPrevFlip, out[i]);
+    if (!turn) return kLagNoPrev;
+    for (int i = 0; i < kViews; ++i) lagTurn(cams[i].cur, cams[i].prev, out[i]);
     *degrees = turnDegrees(out[0]);
     return kLagTurned;
 }
@@ -456,7 +427,7 @@ inline void lagWritten(LagCam cams[kViews], const float out[kViews][kPoseFloats]
     }
 }
 
-// Rows 0-2 within 1e-4 of `want`'s (the frame thread's end-of-frame check under prev / prev_flip).
+// Rows 0-2 within 1e-4 of `want`'s (the frame thread's end-of-frame check against the last write).
 inline bool sameRows(const float* m, const float* want) {
     for (int r = 0; r < 3; ++r)
         for (int c = 0; c < 3; ++c)
@@ -464,16 +435,12 @@ inline bool sameRows(const float* m, const float* want) {
     return true;
 }
 
-inline int formatLagMode(int mode, char* out, size_t cap) { return std::snprintf(out, cap, "on-foot marker lag: %s", lagName(mode)); }
-inline int formatLagUnknown(const char* raw, char* out, size_t cap) {
-    return std::snprintf(out, cap, "on-foot marker lag: '%.40s' is not off, prev or prev_flip: read as off", raw ? raw : "");
-}
-// The 30-second line under prev / prev_flip. turned 0: the probe did not act.
-inline int formatLagSummary(int mode, uint64_t turned, uint64_t noPrev, double degreeSum, float degreeMax, char* out, size_t cap) {
+// The 30-second turn line. turned 0: no step got a turn.
+inline int formatLagSummary(uint64_t turned, uint64_t noPrev, double degreeSum, float degreeMax, char* out, size_t cap) {
     if (!turned)
-        return std::snprintf(out, cap, "on-foot marker lag: %s, turned 0, no prev %llu: no step got a turn", lagName(mode),
+        return std::snprintf(out, cap, "on-foot marker lag: turned 0, no prev %llu: no step got a turn",
                              static_cast<unsigned long long>(noPrev));
-    return std::snprintf(out, cap, "on-foot marker lag: %s, turned %llu, no prev %llu, angle mean %.3f max %.3f deg", lagName(mode),
+    return std::snprintf(out, cap, "on-foot marker lag: turned %llu, no prev %llu, angle mean %.3f max %.3f deg",
                          static_cast<unsigned long long>(turned), static_cast<unsigned long long>(noPrev), degreeSum / double(turned),
                          static_cast<double>(degreeMax));
 }
@@ -486,7 +453,7 @@ inline int formatLagSummary(int mode, uint64_t turned, uint64_t noPrev, double d
 struct Counts {
     uint64_t poseCalls = 0, eyesOne = 0, eyesOther = 0, steps = 0, corrected = 0, commitFaults = 0;
     uint64_t skips[kSkipCount] = {};
-    // The marker lag probe's: steps turned, steps with no previous pose, the turned steps' angles in micro-degrees.
+    // The frame's turn: steps turned, steps with no previous pose, the turned steps' angles in micro-degrees.
     uint64_t lagTurned = 0, lagNoPrev = 0, lagMicroDeg = 0;
 };
 inline Counts minus(const Counts& a, const Counts& b) {

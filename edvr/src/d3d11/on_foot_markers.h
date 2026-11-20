@@ -5,7 +5,8 @@
 // On foot in headset stereo the game's "over the world" layer -- the crosshair, the prompts over doors, terminals and people -- slides
 // off its objects as the head turns: the game gives that layer's camera (the PostGUI pass's, one per eye) the head's pose every frame,
 // as in the ship, while the layer is made for the cinema's identity camera. This lets the game write the pose and then, at once, gives
-// both eyes' PostGUI cameras the identity rotation and commits it with the game's own call, as the game does in the cinema. The world's
+// both eyes' PostGUI cameras the identity rotation and commits it with the game's own call, as the game does in the cinema -- turned by
+// the head's turn since the game's previous frame, because the game places the markers by that frame's pose (on-foot-marker-lag). The world's
 // camera, the ship's and the cinema are not touched. No key of its own: on whenever experimental.native_vr_on_foot is and the journal
 // says on foot.
 //
@@ -15,7 +16,7 @@
 // entry the first time the correction comes on. A hook calls the original with every argument register and, after the OUTER call on
 // its thread (a per-thread depth: the eye writer called from inside the pose writer gives one step, not two), runs the step while the
 // frame thread says so: the chain to both cameras, the checks (each pass's view id, the camera against the pass's own +0x50), the new
-// matrix (rows 0-2 the identity, each eye at its offset from the point between the eyes in the head's axes), the block's flags |= 0xF,
+// matrix (rows 0-2 the frame's turn C * P^T -- the identity with no previous frame --, each eye at its offset from the point between the eyes in the head's axes), the block's flags |= 0xF,
 // the commit (cam, size, cam+0x20) under SEH. A frame that cannot be read is not corrected for either eye and is counted by its
 // reason; three commit faults turn the correction off until the game restarts.
 //
@@ -51,10 +52,6 @@ void onFootMarkersSetOn(bool on);
 // The hooks' counters, cumulative.
 ofm::Counts onFootMarkersCounts();
 bool onFootMarkersDisabled();
-// The marker lag probe (TEMPORARY, openspec change on-foot-marker-lag): experimental.native_vr_on_foot_marker_lag's raw value, read by
-// the frame boundary when the config's generation changes. A changed mode says one line and makes the hook forget its poses; an unknown
-// value is off and said once per value. Frame thread.
-void onFootMarkersSetLag(const char* raw, OnFootMarkersSink sink, void* ctx);
 // The frame step: the search the first time `native` is on, the decision, one install attempt per process the first time the decision
 // is on, whether to correct published, the on and off lines, the disabled line once, the end-of-frame check and the 30-second summary.
 // `onFoot` is the journal's answer (-1 unknown, 0, 1); `base`, `sections` and `count` as onFootMarkersFind takes them; `mainMenu`

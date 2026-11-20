@@ -446,7 +446,7 @@ void partA() {
           "line: the summary's sample");
 }
 
-// ---- Part A, the marker lag probe (TEMPORARY, openspec change on-foot-marker-lag) --------------------------------------------------
+// ---- Part A, the frame's turn (openspec change on-foot-marker-lag) --------------------------------------------------
 
 void eyePoses(float yawDeg, float pitchDeg, float out[ofm::kViews][ofm::kPoseFloats]) {
     const float head[3] = {1.5f, 1.7f, -3.f};
@@ -462,21 +462,12 @@ bool rowsNear(const float* a, const float* b, float eps) {
 }
 
 void partALag() {
-    bool unknown = true;
-    check(ofm::parseLag("off", &unknown) == ofm::kLagOff && !unknown && ofm::parseLag("PREV", &unknown) == ofm::kLagPrev && !unknown &&
-              ofm::parseLag(" prev_flip \r\n", &unknown) == ofm::kLagPrevFlip && !unknown && ofm::parseLag("", &unknown) == ofm::kLagOff &&
-              !unknown && ofm::parseLag(nullptr, &unknown) == ofm::kLagOff && !unknown,
-          "lag: off, prev, prev_flip, empty parsed");
-    check(ofm::parseLag("foo", &unknown) == ofm::kLagOff && unknown && ofm::parseLag("prevprevprevprevprevprevprevprevprev", &unknown) == ofm::kLagOff &&
-              unknown,
-          "lag: an unknown value is off, flagged");
-
     // A pure turn of 1 degree by yaw, and one by pitch: 1 degree both ways, the two turns each other's inverse, both orthonormal.
     float c[ofm::kViews][ofm::kPoseFloats], p[ofm::kViews][ofm::kPoseFloats], a[16] = {}, b[16] = {};
     eyePoses(41.f, 5.f, c);
     eyePoses(40.f, 5.f, p);
-    ofm::lagTurn(c[0], p[0], false, a);
-    ofm::lagTurn(c[0], p[0], true, b);
+    ofm::lagTurn(c[0], p[0], a);
+    ofm::lagTurn(p[0], c[0], b);  // P * C^T, the turn back
     float ab[16] = {};
     for (int r = 0; r < 3; ++r)
         for (int k = 0; k < 3; ++k) ab[4 * r + k] = a[4 * r] * b[k] + a[4 * r + 1] * b[4 + k] + a[4 * r + 2] * b[8 + k];
@@ -484,9 +475,9 @@ void partALag() {
               ofm::orthonormal(b) && !ofm::identityRows(a),
           "lag: 1 degree by yaw, 1 both ways, the turns inverse");
     eyePoses(40.f, 6.f, c);
-    ofm::lagTurn(c[0], p[0], false, a);
+    ofm::lagTurn(c[0], p[0], a);
     check(within(ofm::turnDegrees(a), 1.f, 1e-3f), "lag: 1 degree by pitch");
-    ofm::lagTurn(p[0], p[0], false, a);
+    ofm::lagTurn(p[0], p[0], a);
     check(ofm::identityRows(a) && within(ofm::turnDegrees(a), 0.f, 1e-3f), "lag: no turn, the identity, 0 degrees");
     float bad[16];
     std::memcpy(bad, p[0], sizeof(bad));
@@ -501,54 +492,48 @@ void partALag() {
     eyePoses(40.f, 5.f, game);
     ofm::correct(game, out);
     std::memcpy(plain, out, sizeof(out));
-    check(ofm::lagStep(cams, camAddr, game, 1, ofm::kLagOff, out, &deg) == ofm::kLagNoPrev && !std::memcmp(out, plain, sizeof(out)),
-          "lag: off leaves correct()'s pose byte for byte");
     for (auto& k : cams) k = ofm::LagCam{};
-    check(ofm::lagStep(cams, camAddr, game, 1, ofm::kLagPrev, out, &deg) == ofm::kLagNoPrev && !std::memcmp(out, plain, sizeof(out)) && deg == 0.f,
+    check(ofm::lagStep(cams, camAddr, game, 1, out, &deg) == ofm::kLagNoPrev && !std::memcmp(out, plain, sizeof(out)) && deg == 0.f,
           "lag: frame 1, no previous pose, correct()'s identity");
     ofm::lagWritten(cams, out);
     float again[ofm::kViews][ofm::kPoseFloats];
     std::memcpy(again, out, sizeof(again));
     std::memset(out, 0, sizeof(out));
-    check(ofm::lagStep(cams, camAddr, again, 1, ofm::kLagPrev, out, &deg) == ofm::kLagRepeat && !std::memcmp(out, again, sizeof(out)) &&
+    check(ofm::lagStep(cams, camAddr, again, 1, out, &deg) == ofm::kLagRepeat && !std::memcmp(out, again, sizeof(out)) &&
               rowsNear(cams[0].cur, game[0], 0.f),
           "lag: its own write read back, repeated, not taken as the game's pose");
     eyePoses(41.f, 5.f, game);
     ofm::correct(game, out);
-    check(ofm::lagStep(cams, camAddr, game, 2, ofm::kLagPrev, out, &deg) == ofm::kLagTurned && within(deg, 1.f, 1e-3f) &&
+    check(ofm::lagStep(cams, camAddr, game, 2, out, &deg) == ofm::kLagTurned && within(deg, 1.f, 1e-3f) &&
               within(out[0][12], -0.032f, 1e-4f) && within(out[1][12], 0.032f, 1e-4f) && !ofm::identityRows(out[0]),
           "lag: frame 2 turned 1 degree, the eyes' offsets kept");
     ofm::lagWritten(cams, out);
     float turned[ofm::kViews][ofm::kPoseFloats];
     std::memcpy(turned, out, sizeof(turned));
     ofm::correct(game, out);
-    check(ofm::lagStep(cams, camAddr, game, 2, ofm::kLagPrev, out, &deg) == ofm::kLagTurned && rowsNear(out[0], turned[0], 1e-6f),
+    check(ofm::lagStep(cams, camAddr, game, 2, out, &deg) == ofm::kLagTurned && rowsNear(out[0], turned[0], 1e-6f),
           "lag: a second game write in the same frame, the same turn");
     ofm::lagWritten(cams, out);
     eyePoses(42.f, 5.f, game);
     ofm::correct(game, out);
-    check(ofm::lagStep(cams, camAddr, game, 4, ofm::kLagPrev, out, &deg) == ofm::kLagNoPrev && ofm::identityRows(out[0]),
+    check(ofm::lagStep(cams, camAddr, game, 4, out, &deg) == ofm::kLagNoPrev && ofm::identityRows(out[0]),
           "lag: a skipped frame, no previous pose");
     eyePoses(43.f, 5.f, game);
     for (int k = 0; k < 3; ++k) game[0][k] *= 1.01f;
     ofm::correct(game, out);
-    check(ofm::lagStep(cams, camAddr, game, 5, ofm::kLagPrevFlip, out, &deg) == ofm::kLagNoPrev && ofm::identityRows(out[0]),
+    check(ofm::lagStep(cams, camAddr, game, 5, out, &deg) == ofm::kLagNoPrev && ofm::identityRows(out[0]),
           "lag: stretched rows, the identity");
     const uint64_t otherAddr[ofm::kViews] = {0x3000, 0x2000};
     eyePoses(44.f, 5.f, game);
     ofm::correct(game, out);
-    check(ofm::lagStep(cams, otherAddr, game, 6, ofm::kLagPrev, out, &deg) == ofm::kLagNoPrev && cams[0].cam == 0x3000,
+    check(ofm::lagStep(cams, otherAddr, game, 6, out, &deg) == ofm::kLagNoPrev && cams[0].cam == 0x3000,
           "lag: another camera, its poses forgotten");
 
     char line[300];
-    ofm::formatLagMode(ofm::kLagPrevFlip, line, sizeof(line));
-    check(!std::strcmp(line, "on-foot marker lag: prev_flip"), "lag line: the mode");
-    ofm::formatLagUnknown("foo", line, sizeof(line));
-    check(!std::strcmp(line, "on-foot marker lag: 'foo' is not off, prev or prev_flip: read as off"), "lag line: an unknown value");
-    ofm::formatLagSummary(ofm::kLagPrev, 1300, 4, 520.0, 2.5f, line, sizeof(line));
-    check(!std::strcmp(line, "on-foot marker lag: prev, turned 1300, no prev 4, angle mean 0.400 max 2.500 deg"), "lag line: the summary");
-    ofm::formatLagSummary(ofm::kLagPrev, 0, 7, 0.0, 0.f, line, sizeof(line));
-    check(!std::strcmp(line, "on-foot marker lag: prev, turned 0, no prev 7: no step got a turn"), "lag line: turned 0");
+    ofm::formatLagSummary(1300, 4, 520.0, 2.5f, line, sizeof(line));
+    check(!std::strcmp(line, "on-foot marker lag: turned 1300, no prev 4, angle mean 0.400 max 2.500 deg"), "lag line: the summary");
+    ofm::formatLagSummary(0, 7, 0.0, 0.f, line, sizeof(line));
+    check(!std::strcmp(line, "on-foot marker lag: turned 0, no prev 7: no step got a turn"), "lag line: turned 0");
 }
 
 // ---- Part B: the real glue on synthetic writers ----------------------------------------------------------------------------------
@@ -800,19 +785,15 @@ void partB() {
     if (g_failures) dumpLines();
     g_yaw = 40.f;
 
-    // The marker lag probe (TEMPORARY). On foot since 1302000, the window due again at 1362000. prev: the mode said once; the first
-    // step after it no previous pose (the identity); the next frame turned by 1 degree, the eyes kept; the step's own write read back a
-    // repeat; the pipeline's write in the same frame turned again; a nested writer one step.
-    g_lines.clear();
-    onFootMarkersSetLag("prev", &sink, nullptr);
-    onFootMarkersSetLag(" prev ", &sink, nullptr);
-    check(g_lines.size() == 1 && anyLine("on-foot marker lag: prev"), "lag step: prev said once");
+    // The frame's turn. On foot since 1302000, the window due again at 1362000. The first step after a gap in the frames no previous
+    // pose (the identity); the next frame turned C * P^T by 1 degree, the eyes kept; the step's own write read back a repeat; the
+    // pipeline's write in the same frame turned again; a nested writer one step.
     const ofm::Counts lag0 = onFootMarkersCounts();
     onFootMarkersFrameStep(1340000, true, 1, base, kSections, 2, &sink, nullptr);
     g_yaw = 40.f;
     g_poseFn(mgr, 7, 0, 0);
     check(ofm::identityRows(g_game.pose(0)) && ofm::identityRows(g_game.pose(1)) && onFootMarkersCounts().lagNoPrev == lag0.lagNoPrev + 1,
-          "lag step: the first step after the mode, no previous pose, the identity");
+          "turn: the first step after a gap, no previous pose, the identity");
     onFootMarkersFrameStep(1340022, true, 1, base, kSections, 2, &sink, nullptr);
     g_yaw = 41.f;
     g_poseFn(mgr, 7, 0, 0);
@@ -820,11 +801,11 @@ void partB() {
         float c[ofm::kViews][ofm::kPoseFloats], p[ofm::kViews][ofm::kPoseFloats], want[16] = {};
         eyePoses(41.f, 5.f, c);
         eyePoses(40.f, 5.f, p);
-        ofm::lagTurn(c[0], p[0], false, want);
+        ofm::lagTurn(c[0], p[0], want);
         check(rowsNear(g_game.pose(0), want, 1e-5f) && within(ofm::turnDegrees(g_game.pose(0)), 1.f, 1e-3f) &&
                   within(g_game.pose(0)[12], -0.032f, 1e-4f) && within(g_game.pose(1)[12], 0.032f, 1e-4f) &&
                   onFootMarkersCounts().lagTurned == lag0.lagTurned + 1,
-              "lag step: the next frame turned C * P^T by 1 degree, the eyes kept");
+              "turn: the next frame turned C * P^T by 1 degree, the eyes kept");
     }
     float written[ofm::kPoseFloats];
     std::memcpy(written, g_game.pose(0), sizeof(written));
@@ -834,16 +815,16 @@ void partB() {
     g_eyesNoWrite = false;
     check(!std::memcmp(written, g_game.pose(0), sizeof(written)) && g_commitCalls == commitsBefore + 2 &&
               onFootMarkersCounts().lagTurned == lag0.lagTurned + 1 && onFootMarkersCounts().lagNoPrev == lag0.lagNoPrev + 1,
-          "lag step: its own write read back, repeated as it was, not counted");
+          "turn: its own write read back, repeated as it was, not counted");
     g_eyesFn(mgr, 2, 0, 0);
     check(rowsNear(g_game.pose(0), written, 1e-5f) && onFootMarkersCounts().lagTurned == lag0.lagTurned + 2,
-          "lag step: the pipeline's write in the same frame, the same turn");
+          "turn: the pipeline's write in the same frame, the same turn");
     onFootMarkersFrameStep(1340044, true, 1, base, kSections, 2, &sink, nullptr);
     g_yaw = 42.f;
     g_nest = true;
     g_poseFn(mgr, 7, 0, 0);
     g_nest = false;
-    check(onFootMarkersCounts().lagTurned == lag0.lagTurned + 3 && within(ofm::turnDegrees(g_game.pose(0)), 1.f, 1e-3f), "lag step: a nested writer, one turn");
+    check(onFootMarkersCounts().lagTurned == lag0.lagTurned + 3 && within(ofm::turnDegrees(g_game.pose(0)), 1.f, 1e-3f), "turn: a nested writer, one turn");
     onFootMarkersFrameStep(1340066, true, 1, base, kSections, 2, &sink, nullptr);
     g_lines.clear();
     onFootMarkersFrameStep(1362000, true, 1, base, kSections, 2, &sink, nullptr);
@@ -852,58 +833,37 @@ void partB() {
         for (const auto& l : g_lines) {
             unsigned long long turnedN = 0, noPrevN = 0;
             float mean = 0.f, mx = 0.f;
-            if (std::sscanf(l.c_str(), "on-foot marker lag: prev, turned %llu, no prev %llu, angle mean %f max %f deg", &turnedN, &noPrevN, &mean,
-                            &mx) == 4)
+            if (std::sscanf(l.c_str(), "on-foot marker lag: turned %llu, no prev %llu, angle mean %f max %f deg", &turnedN, &noPrevN, &mean, &mx) == 4)
                 found = turnedN == 3 && noPrevN == 1 && within(mean, 1.f, 2e-3f) && within(mx, 1.f, 2e-3f);
         }
-        check(found && anyLine("/ game's 0;"),"lag step: the 30-second line, 3 turned, 1 without, 1 degree; the check ours");
+        check(found && anyLine("/ game's 0;"), "turn: the 30-second line, 3 turned, 1 without, 1 degree; the check ours");
         if (!found) dumpLines();
-    }
-
-    // prev_flip: the poses forgotten (the first step the identity), then P * C^T; a window with no writer call says turned 0.
-    g_lines.clear();
-    onFootMarkersSetLag("prev_flip", &sink, nullptr);
-    check(g_lines.size() == 1 && anyLine("on-foot marker lag: prev_flip"), "lag step: prev_flip said");
-    onFootMarkersFrameStep(1362100, true, 1, base, kSections, 2, &sink, nullptr);
-    g_yaw = 40.f;
-    g_poseFn(mgr, 7, 0, 0);
-    check(ofm::identityRows(g_game.pose(0)), "lag step: a new mode, no previous pose");
-    onFootMarkersFrameStep(1362122, true, 1, base, kSections, 2, &sink, nullptr);
-    g_yaw = 41.f;
-    g_poseFn(mgr, 7, 0, 0);
-    {
-        float c[ofm::kViews][ofm::kPoseFloats], p[ofm::kViews][ofm::kPoseFloats], want[16] = {};
-        eyePoses(41.f, 5.f, c);
-        eyePoses(40.f, 5.f, p);
-        ofm::lagTurn(c[0], p[0], true, want);
-        check(rowsNear(g_game.pose(0), want, 1e-5f) && !rowsNear(g_game.pose(0), written, 1e-4f), "lag step: prev_flip turns P * C^T");
     }
     g_lines.clear();
     onFootMarkersFrameStep(1392000, true, 1, base, kSections, 2, &sink, nullptr);
-    onFootMarkersFrameStep(1422000, true, 1, base, kSections, 2, &sink, nullptr);
-    check(anyLine("on-foot marker lag: prev_flip, turned 1, no prev 1, angle mean") &&
-              anyLine("on-foot marker lag: prev_flip, turned 0, no prev 0: no step got a turn"),
-          "lag step: the windows' lines, turned 0 when no step turned");
+    check(anyLine("on-foot marker lag: turned 0, no prev 0: no step got a turn"), "turn: a window with no step says turned 0");
 
-    // In the ship the cameras are not touched under prev either; an unknown value is off, said once; off is the identity again.
-    onFootMarkersFrameStep(1422100, true, 0, base, kSections, 2, &sink, nullptr);
+    // The main menu, then on foot again: the poses from before are forgotten (the first step the identity, though the frames ran on).
+    onFootMarkersFrameStep(1392100, true, 1, base, kSections, 2, &sink, nullptr, true);
+    onFootMarkersFrameStep(1392122, true, 1, base, kSections, 2, &sink, nullptr);
+    g_yaw = 45.f;
     g_poseFn(mgr, 7, 0, 0);
-    check(!ofm::identityRows(g_game.pose(0)) && within(g_game.pose(0)[0], std::cos(41.f * kRad), 1e-5f), "lag step: the ship, hands off");
-    onFootMarkersFrameStep(1422200, true, 1, base, kSections, 2, &sink, nullptr);
-    g_lines.clear();
-    onFootMarkersSetLag("foo", &sink, nullptr);
-    onFootMarkersSetLag("foo", &sink, nullptr);
-    check(g_lines.size() == 2 && anyLine("on-foot marker lag: 'foo' is not off, prev or prev_flip: read as off") && anyLine("on-foot marker lag: off"),
-          "lag step: an unknown value said once, off");
-    onFootMarkersFrameStep(1422300, true, 1, base, kSections, 2, &sink, nullptr);
+    onFootMarkersFrameStep(1392144, true, 1, base, kSections, 2, &sink, nullptr);
+    g_yaw = 46.f;
     g_poseFn(mgr, 7, 0, 0);
-    onFootMarkersFrameStep(1422322, true, 1, base, kSections, 2, &sink, nullptr);
-    g_yaw = 42.f;
+    check(within(ofm::turnDegrees(g_game.pose(0)), 1.f, 1e-3f), "turn: on foot again, turned from its own previous frame");
+    onFootMarkersFrameStep(1392166, true, 1, base, kSections, 2, &sink, nullptr, true);
+    onFootMarkersFrameStep(1392188, true, 1, base, kSections, 2, &sink, nullptr);
+    g_yaw = 60.f;
     g_poseFn(mgr, 7, 0, 0);
-    check(ofm::identityRows(g_game.pose(0)) && ofm::identityRows(g_game.pose(1)), "lag step: off, the identity every frame");
-    g_lines.clear();
-    onFootMarkersFrameStep(1452300, true, 1, base, kSections, 2, &sink, nullptr);
-    check(!anyLine("on-foot marker lag:") && anyLine("on-foot markers: 30 s:"), "lag step: off, no lag line in the summary");
+    check(ofm::identityRows(g_game.pose(0)), "turn: after the menu, not turned from the pose before it");
+
+    // In the ship the cameras are not touched.
+    onFootMarkersFrameStep(1392200, true, 0, base, kSections, 2, &sink, nullptr);
+    g_yaw = 41.f;
+    g_poseFn(mgr, 7, 0, 0);
+    check(!ofm::identityRows(g_game.pose(0)) && within(g_game.pose(0)[0], std::cos(41.f * kRad), 1e-5f), "turn: the ship, hands off");
+    onFootMarkersFrameStep(1392300, true, 1, base, kSections, 2, &sink, nullptr);
     g_yaw = 40.f;
 
     // Three commit faults: the correction off for good, one line, the writers only forwarded.
