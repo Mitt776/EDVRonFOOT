@@ -34,7 +34,7 @@
 - [x] 4.1 `docs/research/native-vr-on-foot.md`: в Ruled out — ASW (по памяти Димы 20.11, без отдельного полёта); раздел
   «Отставание подписей на кадр» (гипотеза, зонд, строки, план полёта) и строка в `## Status` (временный ключ); ROADMAP —
   пункт «Стабилизация подсказок»: зонд `on-foot-marker-lag`. Проверка: `check_status_blocks.py`.
-- [ ] 4.2 Полная сборка `build.bat --jobs 8` по полному пути → «all gates passed»; коммит; `build.bat --dll-only`;
+- [x] 4.2 Полная сборка `build.bat --jobs 8` по полному пути → «all gates passed»; коммит; `build.bat --dll-only`;
   `install_edvr.py --target steam --dry-run`, установка, `--verify-only`, хеш `edvr.ini` не изменился.
 
 ## 5. Полёт и разбор
