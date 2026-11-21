@@ -43,12 +43,12 @@
 
 ## 5. Облёт (Дима)
 
-- [ ] 5.1 Сборка, коммит, `build.bat --dll-only`, `python tools\install_edvr.py --target steam`, `--verify-only`
+- [x] 5.1 Сборка, коммит, `build.bat --dll-only`, `python tools\install_edvr.py --target steam`, `--verify-only`
   зелёный; в `edvr.ini` игры `native_vr_desktop_view = right`.
-- [ ] 5.2 Полёт: OBS «Захват игры» → `EliteDangerous64.exe`, 90 кадров/с. Минута в кабине, минута на ногах на
+- [x] 5.2 Полёт: OBS «Захват игры» → `EliteDangerous64.exe`, 90 кадров/с. Минута в кабине, минута на ногах на
   станции, минута боя. В F8 переключить `right` → `left` → `off` → `right` на ходу; один раз `fit = whole` в
   `edvr.ini`. Проверка руками: в окне вид из глаза с панелями и голограммами, без замираний; в шлеме ничего не изменилось.
-- [ ] 5.3 Разбор: `tools\edvr_log.py --target steam --expect-build HEAD --grep "desktop view"` — `drawn` близко к
+- [x] 5.3 Разбор: `tools\edvr_log.py --target steam --expect-build HEAD --grep "desktop view"` — `drawn` близко к
   кадрам игры, цена < 1 мс; ffmpeg `mpdecimate` по ролику — новых кадров на станции не меньше 90 % кадров игры.
 
 ## 6. Подгонка zoom и строка в F8 (после облёта 21.11)
@@ -60,7 +60,7 @@
   проекция `projectHiddenMask`), только при её смене. Проверка: сборка; трасса `native_desktop_view,mask_eye=…`.
 - [x] 6.3 `edvr.ini`: строка `# ui: Desktop eye fit | choices crop, zoom, whole | live | menu on_foot` (восьмая на
   странице On foot), README. Проверка: полный `build.bat` зелёный.
-- [ ] 6.4 Облёт: в F8 `Desktop eye fit` → `zoom` (углов нет) → `whole` (полосы) → `crop`.
+- [x] 6.4 Облёт: в F8 `Desktop eye fit` → `zoom` (углов нет) → `whole` (полосы) → `crop`.
 
 ## Workflow follow-up
 
