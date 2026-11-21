@@ -42,6 +42,7 @@ std::mutex g_mutex;
 struct Held {
     ComPtr<ID3D11Texture2D> texture;
     float bounds[4]{};
+    EdvrNativeDesktopViewPose pose{};   // desktop-eye-steady: the picture's orientation and angles (valid 0: none)
     uint64_t sequence = 0, presentIndex = 0;
     uint32_t eye = 0;
 };
@@ -56,8 +57,14 @@ struct Render {
     uint32_t generation = UINT32_MAX;
     dv::View view = dv::View::Off;
     dv::Fit fit = dv::Fit::Crop;
+    bool steady = true;
     bool saidKey = false;
-    std::string rawView, rawFit;
+    std::string rawView, rawFit, rawSteady;
+    // desktop-eye-steady: the smoothed orientation, for the eye it follows.
+    dv::SteadyFilter filter;
+    dv::SwayMeter headSway, windowSway;   // the log's measure: the head's jitter and what of it reaches the window
+    void resetSteady() { filter.reset(); headSway.reset(); windowSway.reset(); }
+    uint32_t filterEye = UINT32_MAX;
     uint64_t lastDrawnSequence = 0;
     uint64_t windowStartMs = 0;
     dv::Window window;
@@ -68,6 +75,12 @@ struct Render {
     ComPtr<ID3D11SamplerState> sampler;
     ComPtr<ID3D11Buffer> constants;
     bool madeFailed = false;
+    // The copy of the last drawn picture (saveCopy, repeatCopy) and when it was taken (0: none usable).
+    ComPtr<ID3D11Texture2D> copy;
+    ID3D11Device* copyDevice = nullptr;
+    D3D11_TEXTURE2D_DESC copyDesc{};
+    uint64_t copyMs = 0;
+    bool saidCopyFailed = false;
     // A ring of timestamp pairs, read back a few frames later without a flush.
     struct Timer {
         ComPtr<ID3D11Query> disjoint, begin, end;
@@ -78,13 +91,17 @@ struct Render {
     // The render side's copy of each eye's mask (taken at a Present when its revision moved), and zoom's last placement.
     std::vector<float> mask[2];
     uint64_t maskRevision[2]{};
-    struct ZoomCache {
-        bool valid = false;
+    // The placement, made again only when an input changed (the fit, steady, the eye, its mask, a size, the picture's angles beyond
+    // a hair: a refused temporal pass shifts them by a jitter each frame).
+    struct PlaceCache {
+        bool valid = false, steady = false, hasFov = false;
+        dv::Fit fit = dv::Fit::Crop;
         uint32_t eye = 0, windowW = 0, windowH = 0, eyeW = 0, eyeH = 0;
         uint64_t maskRevision = 0;
+        double fov[4]{};
         dv::Placement place;
         double share = 1;
-    } zoom;
+    } cache;
 };
 Render g_r;
 FaultBudget g_budget("desktop view", 3);
@@ -106,19 +123,24 @@ void readKeys() {
     g_r.generation = cfg.generation();
     const std::string rawView = cfg.getString("experimental.native_vr_desktop_view", "off");
     const std::string rawFit = cfg.getString("experimental.native_vr_desktop_view_fit", "crop");
-    bool viewValid = true, fitValid = true;
+    const std::string rawSteady = cfg.getString("experimental.native_vr_desktop_view_steady", "on");
+    bool viewValid = true, fitValid = true, steadyValid = true;
     const dv::View view = dv::parseView(rawView.c_str(), &viewValid);
     const dv::Fit fit = dv::parseFit(rawFit.c_str(), &fitValid);
+    const bool steady = dv::parseSteady(rawSteady.c_str(), &steadyValid);
+    if (!steadyValid && rawSteady != g_r.rawSteady)
+        Log::get().note("desktop view: experimental.native_vr_desktop_view_steady = '%s' is not on or off; read as on.", rawSteady.c_str());
     if (!viewValid && rawView != g_r.rawView)
         Log::get().note("desktop view: experimental.native_vr_desktop_view = '%s' is not off, right or left; read as off.", rawView.c_str());
     if (!fitValid && rawFit != g_r.rawFit)
         Log::get().note("desktop view: experimental.native_vr_desktop_view_fit = '%s' is not crop or whole; read as crop.", rawFit.c_str());
-    if (!g_r.saidKey || view != g_r.view || fit != g_r.fit)
-        Log::get().note("desktop view: key %s, fit %s%s.", dv::viewName(view), dv::fitName(fit),
+    if (!g_r.saidKey || view != g_r.view || fit != g_r.fit || steady != g_r.steady)
+        Log::get().note("desktop view: key %s, fit %s, steady %s%s.", dv::viewName(view), dv::fitName(fit), steady ? "on" : "off",
                         g_everAcquired.load() ? "" : " (the runtime has not handed over an eye table yet)");
+    if (steady != g_r.steady || fit != g_r.fit || view != g_r.view) g_r.resetSteady();
     g_r.saidKey = true;
-    g_r.rawView = rawView; g_r.rawFit = rawFit;
-    g_r.view = view; g_r.fit = fit;
+    g_r.rawView = rawView; g_r.rawFit = rawFit; g_r.rawSteady = rawSteady;
+    g_r.view = view; g_r.fit = fit; g_r.steady = steady;
     g_view.store(int(view), std::memory_order_release);
 }
 
@@ -140,7 +162,7 @@ bool makeObjects(ID3D11Device* device, ID3D11DeviceContext* ctx) {
     s.ComparisonFunc = D3D11_COMPARISON_NEVER;
     if (FAILED(device->CreateSamplerState(&s, g_r.sampler.GetAddressOf()))) g_r.sampler.Reset();
     D3D11_BUFFER_DESC b{};
-    b.ByteWidth = 32;
+    b.ByteWidth = 112;   // desktop_view_shader.h: m0..m2, win, frame, bounds, mode
     b.Usage = D3D11_USAGE_DYNAMIC;
     b.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     b.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -255,7 +277,8 @@ Render::Timer* beginTimer(ID3D11Device* device, ID3D11DeviceContext* ctx) {
 }
 
 // Draws the held eye into the back buffer; Failure::None when it did.
-dv::Failure draw(IDXGISwapChain* swapChain, ID3D11Device* device, ID3D11Texture2D* eye, const float bounds[4], uint32_t eyeIndex) {
+dv::Failure draw(IDXGISwapChain* swapChain, ID3D11Device* device, ID3D11Texture2D* eye, const float bounds[4], uint32_t eyeIndex,
+                 const EdvrNativeDesktopViewPose& pose) {
     if (!sameDevice(device, eye)) return dv::Failure::Device;
     ComPtr<ID3D11Texture2D> back;
     if (FAILED(swapChain->GetBuffer(0, IID_PPV_ARGS(&back))) || !back) return dv::Failure::Window;
@@ -270,23 +293,52 @@ dv::Failure draw(IDXGISwapChain* swapChain, ID3D11Device* device, ID3D11Texture2
     g_r.window.path = plan.path;
     if (plan.path == dv::ColorPath::Unsupported || ed.SampleDesc.Count != 1 || ed.ArraySize != 1) return dv::Failure::Format;
     if (!(ed.BindFlags & D3D11_BIND_SHADER_RESOURCE) || !(bd.BindFlags & D3D11_BIND_RENDER_TARGET)) return dv::Failure::Bind;
-    dv::Placement place;
-    if (g_r.fit == dv::Fit::Zoom) {
-        // The search over the mask runs only when an input changed (the eye, its mask, a size).
-        auto& z = g_r.zoom;
-        const uint32_t e = eyeIndex & 1;
-        if (!z.valid || z.eye != e || z.maskRevision != g_r.maskRevision[e] || z.windowW != bd.Width || z.windowH != bd.Height ||
-            z.eyeW != eyeW || z.eyeH != eyeH) {
-            const auto& m = g_r.mask[e];
-            z.place = dv::zoomPlacement(bd.Width, bd.Height, eyeW, eyeH, m.empty() ? nullptr : m.data(), uint32_t(m.size() / 2), &z.share);
-            z.valid = true; z.eye = e; z.maskRevision = g_r.maskRevision[e];
-            z.windowW = bd.Width; z.windowH = bd.Height; z.eyeW = eyeW; z.eyeH = eyeH;
-        }
-        place = z.place;
-        g_r.window.zoomShare = z.share;
-        g_r.window.maskTriangles = uint32_t(g_r.mask[e].size() / 6);
-    } else place = dv::place(g_r.fit, bd.Width, bd.Height, eyeW, eyeH);
+    // desktop-eye-steady: the picture's angles (a frame without a pose keeps the last ones: unturned, the mapping does not depend on
+    // them, and the window keeps its size).
+    const uint32_t e = eyeIndex & 1;
+    auto& pc = g_r.cache;
+    double fov[4]{};
+    const bool posed = pose.valid && dv::fovTangents(pose.fov, fov);
+    bool hasFov = posed;
+    if (!posed && pc.valid && pc.hasFov && pc.eye == e) { std::memcpy(fov, pc.fov, sizeof(fov)); hasFov = true; }
+    bool fovMoved = hasFov != pc.hasFov;
+    for (int i = 0; i < 4 && !fovMoved; ++i) fovMoved = std::fabs(fov[i] - pc.fov[i]) > 2e-3;
+    if (!pc.valid || pc.fit != g_r.fit || pc.steady != g_r.steady || pc.eye != e || pc.maskRevision != g_r.maskRevision[e] ||
+        pc.windowW != bd.Width || pc.windowH != bd.Height || pc.eyeW != eyeW || pc.eyeH != eyeH || (g_r.steady && fovMoved)) {
+        const auto& m = g_r.mask[e];
+        pc.place = dv::fitPlacement(g_r.fit, g_r.steady, bd.Width, bd.Height, eyeW, eyeH, m.empty() ? nullptr : m.data(),
+                                    uint32_t(m.size() / 2), hasFov ? fov : nullptr, &pc.share);
+        pc.valid = true; pc.fit = g_r.fit; pc.steady = g_r.steady; pc.eye = e; pc.maskRevision = g_r.maskRevision[e];
+        pc.windowW = bd.Width; pc.windowH = bd.Height; pc.eyeW = eyeW; pc.eyeH = eyeH;
+        pc.hasFov = hasFov; std::memcpy(pc.fov, fov, sizeof(fov));
+    }
+    const dv::Placement place = pc.place;
+    g_r.window.zoomShare = pc.share;
+    if (g_r.fit == dv::Fit::Zoom) g_r.window.maskTriangles = uint32_t(g_r.mask[e].size() / 6);
     if (!place.ok) return dv::Failure::Window;
+    // The smoothed orientation: once per drawn frame (draw runs only for a newer sequence). Off, whole and a frame without a pose draw
+    // the picture unturned; a frame without a pose also restarts the filter.
+    const dv::Quat p{pose.orientation[0], pose.orientation[1], pose.orientation[2], pose.orientation[3]};
+    dv::Quat s = p;
+    bool turn = false;
+    if (g_r.steady && g_r.fit != dv::Fit::Whole) {
+        if (g_r.filterEye != e) { g_r.resetSteady(); g_r.filterEye = e; }
+        if (posed) {
+            LARGE_INTEGER now{}, freq{};
+            QueryPerformanceCounter(&now); QueryPerformanceFrequency(&freq);
+            double lag = 0;
+            bool clamped = false;
+            const double seconds = double(now.QuadPart) / double(freq.QuadPart);
+            s = g_r.filter.update(p, seconds, &lag, &clamped);
+            g_r.window.noteLag(lag * 180 / dv::kPi, clamped);
+            g_r.window.noteSway(g_r.headSway.update(p, seconds), g_r.windowSway.update(s, seconds));
+            turn = true;
+        } else {
+            g_r.resetSteady();
+            ++g_r.window.unposed;
+        }
+    }
+    const dv::Projection projection = dv::projection(place.src, hasFov ? fov : nullptr, turn, p, s);
 
     ComPtr<ID3D11DeviceContext> ctx;
     device->GetImmediateContext(ctx.GetAddressOf());
@@ -309,9 +361,12 @@ dv::Failure draw(IDXGISwapChain* swapChain, ID3D11Device* device, ID3D11Texture2
 
     D3D11_MAPPED_SUBRESOURCE mapped{};
     if (FAILED(ctx->Map(g_r.constants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return dv::Failure::Views;
-    float data[8]{};
-    dv::sourceUv(place.src, bounds, data);
-    data[4] = float(int(plan.path));
+    float data[28]{};
+    std::memcpy(data, projection.m, sizeof(projection.m));
+    std::memcpy(data + 12, projection.win, sizeof(projection.win));
+    std::memcpy(data + 16, projection.frame, sizeof(projection.frame));
+    std::memcpy(data + 20, bounds, 4 * sizeof(float));
+    data[24] = float(int(plan.path));
     std::memcpy(mapped.pData, data, sizeof(data));
     ctx->Unmap(g_r.constants.Get(), 0);
 
@@ -354,26 +409,78 @@ dv::Failure draw(IDXGISwapChain* swapChain, ID3D11Device* device, ID3D11Texture2
     return dv::Failure::None;
 }
 
+// The copy of the window's last drawn picture (shouldRepeat): taken right after a draw, put back on a Present without a new eye. Our
+// own texture, so nothing else writes it between the two.
+bool sameShape(const D3D11_TEXTURE2D_DESC& a, const D3D11_TEXTURE2D_DESC& b) {
+    return a.Width == b.Width && a.Height == b.Height && a.Format == b.Format && a.ArraySize == b.ArraySize &&
+           a.SampleDesc.Count == b.SampleDesc.Count && a.SampleDesc.Quality == b.SampleDesc.Quality;
+}
+bool saveCopy(IDXGISwapChain* swapChain, ID3D11Device* device) {
+    ComPtr<ID3D11Texture2D> back;
+    if (FAILED(swapChain->GetBuffer(0, IID_PPV_ARGS(&back))) || !back) return false;
+    D3D11_TEXTURE2D_DESC bd{};
+    back->GetDesc(&bd);
+    if (!g_r.copy || g_r.copyDevice != device || !sameShape(g_r.copyDesc, bd)) {
+        g_r.copy.Reset();
+        D3D11_TEXTURE2D_DESC cd = bd;
+        cd.MipLevels = 1;
+        cd.Usage = D3D11_USAGE_DEFAULT;
+        cd.BindFlags = D3D11_BIND_RENDER_TARGET;
+        cd.CPUAccessFlags = 0;
+        cd.MiscFlags = 0;
+        if (FAILED(device->CreateTexture2D(&cd, nullptr, g_r.copy.GetAddressOf()))) {
+            g_r.copy.Reset();
+            if (!g_r.saidCopyFailed) {
+                g_r.saidCopyFailed = true;
+                Log::get().note("desktop view: could not make the copy of the window's picture; a frame without an eye shows the game's.");
+            }
+            return false;
+        }
+        g_r.copyDevice = device;
+        g_r.copyDesc = bd;
+    }
+    ComPtr<ID3D11DeviceContext> ctx;
+    device->GetImmediateContext(ctx.GetAddressOf());
+    if (!ctx) return false;
+    ctx->CopyResource(g_r.copy.Get(), back.Get());
+    return true;
+}
+bool repeatCopy(IDXGISwapChain* swapChain, ID3D11Device* device) {
+    if (!g_r.copy || g_r.copyDevice != device) return false;
+    ComPtr<ID3D11Texture2D> back;
+    if (FAILED(swapChain->GetBuffer(0, IID_PPV_ARGS(&back))) || !back) return false;
+    D3D11_TEXTURE2D_DESC bd{};
+    back->GetDesc(&bd);
+    if (!sameShape(g_r.copyDesc, bd)) return false;   // the window was resized: the game's picture this once
+    ComPtr<ID3D11DeviceContext> ctx;
+    device->GetImmediateContext(ctx.GetAddressOf());
+    if (!ctx) return false;
+    ctx->CopyResource(back.Get(), g_r.copy.Get());
+    return true;
+}
+
 void maybeLine(uint64_t now) {
     if (!g_r.windowStartMs) g_r.windowStartMs = now;
     if (now - g_r.windowStartMs < kLineMs) return;
-    char line[512];
-    dv::formatLine(line, sizeof(line), g_r.view, g_r.fit, g_everAcquired.load(), g_r.window);
+    char line[640];
+    dv::formatLine(line, sizeof(line), g_r.view, g_r.fit, g_everAcquired.load(), g_r.window, g_r.steady);
     Log::get().note("%s", line);
     g_r.window = {};
     g_r.windowStartMs = now;
 }
 
 // The table.
-HRESULT WINAPI noteEye(void* context, uint64_t sequence, uint32_t eye, ID3D11Texture2D* texture, const float* bounds) {
+HRESULT WINAPI noteEye(void* context, uint64_t sequence, uint32_t eye, ID3D11Texture2D* texture, const float* bounds,
+                       const EdvrNativeDesktopViewPose* pose) {
     if (context != &g_session) return E_INVALIDARG;
     const int want = dv::viewEye(dv::View(g_view.load(std::memory_order_acquire)));
     if (want < 0 || eye != uint32_t(want)) return S_FALSE;
-    if (!texture || !bounds || !sequence || !dv::validBounds(bounds)) return E_INVALIDARG;
+    if (!texture || !bounds || !pose || !sequence || !dv::validBounds(bounds)) return E_INVALIDARG;
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!g_session.active) return E_INVALIDARG;
     g_held.texture = texture;
     std::memcpy(g_held.bounds, bounds, sizeof(g_held.bounds));
+    g_held.pose = *pose;
     g_held.sequence = sequence;
     g_held.presentIndex = g_presentIndex;
     g_held.eye = eye;
@@ -424,15 +531,23 @@ void desktopViewBeforePresent(IDXGISwapChain* swapChain, ID3D11Device* device, U
     const uint64_t now = nowMs();
     if (g_r.view != dv::View::Off) {
         const dv::Verdict verdict = dv::decide(held.texture != nullptr, held.presentIndex, index, held.sequence, g_r.lastDrawnSequence);
-        if (verdict == dv::Verdict::NoEye) ++g_r.window.noEye;
-        else if (verdict == dv::Verdict::Stale) ++g_r.window.stale;
-        else {
+        if (verdict != dv::Verdict::Draw) {
+            if (verdict == dv::Verdict::NoEye) ++g_r.window.noEye;
+            else ++g_r.window.stale;
+            bool repeated = false;
+            if (dv::shouldRepeat(verdict, g_r.copy != nullptr, g_r.copyMs, now))
+                guardedBudget(g_budget, [&] { repeated = repeatCopy(swapChain, device); });
+            if (repeated) ++g_r.window.repeated;
+        } else {
             dv::Failure failure = dv::Failure::Shaders;
-            if (!guardedBudget(g_budget, [&] { failure = draw(swapChain, device, held.texture.Get(), held.bounds, held.eye); }))
+            if (!guardedBudget(g_budget, [&] { failure = draw(swapChain, device, held.texture.Get(), held.bounds, held.eye, held.pose); }))
                 failure = dv::Failure::Shaders;
             if (failure == dv::Failure::None) {
                 ++g_r.window.drawn;
                 g_r.lastDrawnSequence = held.sequence;
+                bool saved = false;
+                guardedBudget(g_budget, [&] { saved = saveCopy(swapChain, device); });
+                g_r.copyMs = saved ? now : 0;
             } else {
                 ++g_r.window.failed;
                 g_r.window.lastFailure = failure;
@@ -446,9 +561,9 @@ void desktopViewBeforePresent(IDXGISwapChain* swapChain, ID3D11Device* device, U
 }  // namespace edvr
 
 extern "C" HRESULT WINAPI edvrAcquireNativeDesktopView(const EdvrNativeDesktopViewRequest* r, EdvrNativeDesktopViewTable* t) {
-    if (!t || t->size != sizeof(*t) || t->version != EDVR_NATIVE_DESKTOP_VIEW_VERSION_1) return E_INVALIDARG;
-    *t = {sizeof(*t), EDVR_NATIVE_DESKTOP_VIEW_VERSION_1};
-    if (!r || r->size != sizeof(*r) || r->version != EDVR_NATIVE_DESKTOP_VIEW_VERSION_1 || !r->gameDevice || !r->generation)
+    if (!t || t->size != sizeof(*t) || t->version != EDVR_NATIVE_DESKTOP_VIEW_VERSION_2) return E_INVALIDARG;
+    *t = {sizeof(*t), EDVR_NATIVE_DESKTOP_VIEW_VERSION_2};
+    if (!r || r->size != sizeof(*r) || r->version != EDVR_NATIVE_DESKTOP_VIEW_VERSION_2 || !r->gameDevice || !r->generation)
         return E_INVALIDARG;
     std::lock_guard<std::mutex> lock(edvr::g_mutex);
     if (edvr::g_session.active) return E_PENDING;

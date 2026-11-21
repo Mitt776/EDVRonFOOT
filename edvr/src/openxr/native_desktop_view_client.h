@@ -16,11 +16,11 @@ class NativeDesktopViewClient final {
     if (!provider || !device || !generation) return E_INVALIDARG;
     const auto entry = GetProcAddress(provider, "edvrAcquireNativeDesktopView");
     if (!owned(provider, entry)) return E_NOINTERFACE;
-    EdvrNativeDesktopViewRequest request{sizeof(request), EDVR_NATIVE_DESKTOP_VIEW_VERSION_1, device, generation};
-    EdvrNativeDesktopViewTable candidate{sizeof(candidate), EDVR_NATIVE_DESKTOP_VIEW_VERSION_1};
+    EdvrNativeDesktopViewRequest request{sizeof(request), EDVR_NATIVE_DESKTOP_VIEW_VERSION_2, device, generation};
+    EdvrNativeDesktopViewTable candidate{sizeof(candidate), EDVR_NATIVE_DESKTOP_VIEW_VERSION_2};
     const auto result = reinterpret_cast<decltype(&edvrAcquireNativeDesktopView)>(entry)(&request, &candidate);
     if (result != S_OK) return FAILED(result) ? result : E_NOINTERFACE;
-    if (candidate.size != sizeof(candidate) || candidate.version != EDVR_NATIVE_DESKTOP_VIEW_VERSION_1 ||
+    if (candidate.size != sizeof(candidate) || candidate.version != EDVR_NATIVE_DESKTOP_VIEW_VERSION_2 ||
         !candidate.context || !owned(provider, candidate.noteEye) || !owned(provider, candidate.noteMask) ||
         !owned(provider, candidate.close)) return E_NOINTERFACE;
     table_ = candidate;
@@ -28,10 +28,12 @@ class NativeDesktopViewClient final {
   }
   bool acquired() const { return table_.context != nullptr; }
   // S_OK held, S_FALSE not wanted, a failure counted by the caller and otherwise ignored.
-  HRESULT note(uint64_t sequence, unsigned eye, ID3D11Texture2D* texture, const vr::VRTextureBounds_t& bounds) {
+  // pose: the picture's projection (desktop-eye-steady), valid 0 when the frame has none.
+  HRESULT note(uint64_t sequence, unsigned eye, ID3D11Texture2D* texture, const vr::VRTextureBounds_t& bounds,
+               const EdvrNativeDesktopViewPose& pose) {
     if (!acquired() || !texture) return S_FALSE;
     const float box[4] = {bounds.uMin, bounds.vMin, bounds.uMax, bounds.vMax};
-    return table_.noteEye(table_.context, sequence, eye, texture, box);
+    return table_.noteEye(table_.context, sequence, eye, texture, box, &pose);
   }
   // The eye's lens mask in fractions of its picture (xy pairs; vertexCount a multiple of three, zero for none).
   HRESULT noteMask(unsigned eye, const float* xy, uint32_t vertexCount) {
