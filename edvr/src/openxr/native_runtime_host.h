@@ -1826,8 +1826,17 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // EDVRonFOOT desktop eye view: the eye's final picture, exactly what the capture below copies to the headset, offered to d3d11.dll
     // for the game's window. It only keeps a reference (and only to the eye the player chose); a refusal never fails the eye. A
     // deferred FSS eye passes here too, when its donor's submit finishes it.
+    // desktop-eye-steady: the pose and the angles these pixels hold (frameContentViews: the trim's content field, the refused
+    // temporal pass's jitter shift; the menu above is drawn by the same angles).
     if(desktopView.acquired()) {
-      const auto noted=desktopView.note(sequence,unsigned(eye),selected.Get(),selectedBounds);
+      const auto& cv=frameContentViews[unsigned(eye)];
+      const auto& q=cv.pose.orientation;
+      EdvrNativeDesktopViewPose pose{{q.x,q.y,q.z,q.w},{cv.fov.angleLeft,cv.fov.angleRight,cv.fov.angleUp,cv.fov.angleDown},0u};
+      const float qq=q.x*q.x+q.y*q.y+q.z*q.z+q.w*q.w;
+      pose.valid=(frameGeometryAvailable&&std::isfinite(qq)&&qq>0.5f&&qq<2.f&&
+        std::isfinite(cv.fov.angleLeft+cv.fov.angleRight+cv.fov.angleUp+cv.fov.angleDown)&&
+        cv.fov.angleRight>cv.fov.angleLeft&&cv.fov.angleUp>cv.fov.angleDown)?1u:0u;
+      const auto noted=desktopView.note(sequence,unsigned(eye),selected.Get(),selectedBounds,pose);
       if(noted==S_OK)desktopViewMask(unsigned(eye));
       if(noted==S_OK&&desktopViewHeld++==0)
         nativeTracePrintf("native_desktop_view,first_held_eye=%u,sequence=%llu\n",unsigned(eye),(unsigned long long)sequence);
