@@ -221,7 +221,7 @@ inline void rotationMatrix(const Quat& q, double m[9]) {
 constexpr double kSteadyMinCutoffHz = 0.4;
 constexpr double kSteadyBeta = 3.0;          // per rad/s
 constexpr double kSteadyDerivCutoffHz = 1.0;
-constexpr double kSteadyLimitDeg = 2.0;
+constexpr double kSteadyLimitDeg = 1.5;   // flight 1 (21.11): 2 deg cost zoom x1.257; 1.5 with the per-side margin ~x1.18
 constexpr double kSteadyResetGapS = 0.25;
 constexpr double kPi = 3.14159265358979323846;
 inline double steadyLimitRad() { return kSteadyLimitDeg * kPi / 180; }
@@ -268,6 +268,38 @@ private:
     double speed_ = 0, lastT_ = 0;
 };
 
+// The sway meter (the log's measure of what steady removes): each frame's turning speed (an angular velocity in the tracking space)
+// minus its own 1 Hz low-pass; what is left is jitter, and a steady turn leaves none. Fed the head (P) and the window (S) on the same
+// frames, the two RMS values say how much of the head's sway reaches the window. A gap longer than kSteadyResetGapS restarts it.
+constexpr double kSwayCutoffHz = 1.0;
+class SwayMeter {
+public:
+    void reset() { valid_ = false; seeded_ = false; }
+    // The jitter of this frame (rad/s), or a negative value while the meter starts.
+    double update(const Quat& raw, double t) {
+        const Quat q = normalized(raw);
+        const double dt = t - t_;
+        if (!valid_ || !(dt > 0) || dt > kSteadyResetGapS || !std::isfinite(dt)) {
+            valid_ = true; seeded_ = false; prev_ = q; t_ = t;
+            return -1;
+        }
+        Quat d = multiply(q, conjugate(prev_));
+        if (d.w < 0) d = {-d.x, -d.y, -d.z, -d.w};
+        const double s = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+        const double k = s > 1e-12 ? 2 * std::atan2(s, d.w) / s / dt : 2 / dt;
+        const double w[3] = {d.x * k, d.y * k, d.z * k};
+        prev_ = q; t_ = t;
+        if (!seeded_) { std::memcpy(low_, w, sizeof(low_)); seeded_ = true; return -1; }
+        const double a = 1 / (1 + 1 / (2 * kPi * kSwayCutoffHz * dt));
+        double r2 = 0;
+        for (int i = 0; i < 3; ++i) { low_[i] += (w[i] - low_[i]) * a; r2 += (w[i] - low_[i]) * (w[i] - low_[i]); }
+        return std::sqrt(r2);
+    }
+private:
+    bool valid_ = false, seeded_ = false;
+    Quat prev_;
+    double t_ = 0, low_[3]{};
+};
 // The picture's angles as tangents (left, right, up, down: left and down negative). false: not a usable field.
 inline bool fovTangents(const float fov[4], double t[4]) {
     for (int i = 0; i < 4; ++i) {
@@ -276,22 +308,31 @@ inline bool fovTangents(const float fov[4], double t[4]) {
     }
     return t[1] - t[0] > 1e-4 && t[2] - t[3] > 1e-4;
 }
-// The steady margin (design.md decision 3) for a box of window tangents (tx0, ty0, tx1, ty1): a turn by up to L moves a point at radius
-// rho no further than tan(L)*(1+rho^2) in tangents (first order; kMarginSafety for the second), so the box widened by that on every side
-// holds every point the window can show. rho: the widened box's farthest corner (a fixed point, three rounds).
+// The steady margin (design.md decision 3) for a box of window tangents (tx0, ty0, tx1, ty1), per side. A turn by a small angle a about
+// any axis moves the point (tx, ty) in tangents by at most a*sqrt((1+tx^2)(1+tx^2+ty^2)) along x and a*sqrt((1+ty^2)(1+tx^2+ty^2))
+// along y (first order: the x shift is (axis x ray) . (1, 0, tx), whose largest value over unit axes is |ray x (1, 0, tx)|; tan(a) and
+// kMarginSafety cover the second order). Each side is widened by the largest shift of its own two corners, taken at the widened box
+// (a fixed point, three rounds), so the widened box holds every point the window can show. out: left, top, right, bottom (>= 0).
 constexpr double kMarginSafety = 1.05;
-inline double steadyMargin(const double box[4]) {
-    const double k = std::tan(steadyLimitRad()) * kMarginSafety;
-    double m = 0;
+inline void steadyMargins(const double box[4], double out[4], double limitRad = steadyLimitRad()) {
+    const double k = std::tan(limitRad) * kMarginSafety;
+    double m[4]{};
     for (int i = 0; i < 3; ++i) {
-        double rho2 = 0;
-        for (int c = 0; c < 4; ++c) {
-            const double x = std::fabs(box[c & 1 ? 2 : 0]) + m, y = std::fabs(box[c & 2 ? 3 : 1]) + m;
-            rho2 = x * x + y * y > rho2 ? x * x + y * y : rho2;
-        }
-        m = k * (1 + rho2);
+        const double x0 = box[0] - m[0], y0 = box[1] + m[1], x1 = box[2] + m[2], y1 = box[3] - m[3];
+        double next[4]{};
+        const double cx[2] = {x0, x1}, cy[2] = {y0, y1};
+        for (int a = 0; a < 2; ++a)
+            for (int b = 0; b < 2; ++b) {
+                const double tx = cx[a], ty = cy[b], r = 1 + tx * tx + ty * ty;
+                const double sx = k * std::sqrt((1 + tx * tx) * r), sy = k * std::sqrt((1 + ty * ty) * r);
+                double& side = next[a ? 2 : 0];
+                side = sx > side ? sx : side;
+                double& vside = next[b ? 3 : 1];
+                vside = sy > vside ? sy : vside;
+            }
+        std::memcpy(m, next, sizeof(m));
     }
-    return m;
+    std::memcpy(out, m, sizeof(m));
 }
 // A rectangle of picture fractions (x0, y0, x1, y1; y down) as tangents (tx0, ty0, tx1, ty1; y up: ty0 is the top).
 inline void fractionToTangent(const double f[4], const double fov[4], double t[4]) {
@@ -299,16 +340,18 @@ inline void fractionToTangent(const double f[4], const double fov[4], double t[4
     t[2] = fov[0] + f[2] * (fov[1] - fov[0]); t[3] = fov[2] - f[3] * (fov[2] - fov[3]);
 }
 // The fraction rectangle r widened by the steady margin of its own tangents.
-inline void widened(const double r[4], const double fov[4], double out[4]) {
-    double t[4];
+inline void widened(const double r[4], const double fov[4], double out[4], double limitRad = steadyLimitRad()) {
+    double t[4], m[4];
     fractionToTangent(r, fov, t);
-    const double m = steadyMargin(t), mx = m / (fov[1] - fov[0]), my = m / (fov[2] - fov[3]);
-    out[0] = r[0] - mx; out[1] = r[1] - my; out[2] = r[2] + mx; out[3] = r[3] + my;
+    steadyMargins(t, m, limitRad);
+    const double sx = fov[1] - fov[0], sy = fov[2] - fov[3];
+    out[0] = r[0] - m[0] / sx; out[1] = r[1] - m[1] / sy; out[2] = r[2] + m[2] / sx; out[3] = r[3] + m[3] / sy;
 }
 // crop and zoom with steady on: crop's rectangle shrunk around its centre to the largest share (to 1/4096) whose widened rectangle stays
 // inside the picture and, for zoom, meets no triangle of the mask; at least kZoomMinShare. whole, or no usable field: as without steady.
 inline Placement steadyPlacement(Fit fit, double windowW, double windowH, double eyeW, double eyeH, const float* triangles,
-                                 uint32_t vertexCount, const double fov[4], double* share = nullptr) {
+                                 uint32_t vertexCount, const double fov[4], double* share = nullptr,
+                                 double limitRad = steadyLimitRad()) {
     if (fit == Fit::Whole) { if (share) *share = 1; return place(fit, windowW, windowH, eyeW, eyeH); }
     Placement p = place(Fit::Crop, windowW, windowH, eyeW, eyeH);
     if (share) *share = 1;
@@ -319,7 +362,7 @@ inline Placement steadyPlacement(Fit fit, double windowW, double windowH, double
     auto fits = [&](double s) {
         const double r[4] = {cx - hw * s, cy - hh * s, cx + hw * s, cy + hh * s};
         double w[4];
-        widened(r, fov, w);
+        widened(r, fov, w, limitRad);
         if (w[0] < 0 || w[1] < 0 || w[2] > 1 || w[3] > 1) return false;
         return !mask || !rectHitsMask(w, triangles, vertexCount);
     };
@@ -489,6 +532,13 @@ struct Window {
     // steady: the lag of S behind P per turned frame (degrees), the frames pulled to the limit, the frames drawn without a pose.
     double lagSumDeg = 0, lagMaxDeg = 0;
     uint64_t lagSamples = 0, clamped = 0, unposed = 0;
+    // steady: the sway meter's jitter of the head and of the window (rad/s, squared and summed over the same frames).
+    double swayHeadSq = 0, swayWindowSq = 0;
+    uint64_t swaySamples = 0;
+    void noteSway(double head, double window) {
+        if (!(head >= 0) || !(window >= 0) || !std::isfinite(head + window)) return;
+        swayHeadSq += head * head; swayWindowSq += window * window; ++swaySamples;
+    }
     void noteGpu(double ms) {
         if (!(ms >= 0) || !std::isfinite(ms)) return;
         gpuSumMs += ms; ++gpuSamples;
@@ -509,8 +559,15 @@ inline int formatSteady(char* out, size_t size, bool steady, Fit fit, const Wind
     if (fit == Fit::Whole) return std::snprintf(out, size, "steady off (whole)");
     char pose[48] = "";
     if (w.unposed) std::snprintf(pose, sizeof(pose), ", no pose %llu", (unsigned long long)w.unposed);
-    return std::snprintf(out, size, "steady on, lag mean %.2f max %.2f deg, clamped %llu%s",
-                         w.lagSamples ? w.lagSumDeg / double(w.lagSamples) : 0.0, w.lagMaxDeg, (unsigned long long)w.clamped, pose);
+    char sway[96] = "";
+    if (w.swaySamples) {
+        const double head = std::sqrt(w.swayHeadSq / double(w.swaySamples)) * 180 / kPi;
+        const double window = std::sqrt(w.swayWindowSq / double(w.swaySamples)) * 180 / kPi;
+        if (window > 1e-9) std::snprintf(sway, sizeof(sway), ", sway head %.2f window %.2f deg/s (x%.1f)", head, window, head / window);
+        else std::snprintf(sway, sizeof(sway), ", sway head %.2f window %.2f deg/s", head, window);
+    }
+    return std::snprintf(out, size, "steady on, lag mean %.2f max %.2f deg, clamped %llu%s%s",
+                         w.lagSamples ? w.lagSumDeg / double(w.lagSamples) : 0.0, w.lagMaxDeg, (unsigned long long)w.clamped, sway, pose);
 }
 // runtime: the runtime acquired the table (false: an openvr_api.dll from another build, the view cannot run).
 inline int formatLine(char* out, size_t size, View view, Fit fit, bool runtime, const Window& w, bool steady = false) {
@@ -528,7 +585,7 @@ inline int formatLine(char* out, size_t size, View view, Fit fit, bool runtime, 
     else if (fit == Fit::Crop && w.zoomShare < 1 && w.zoomShare > 0)
         std::snprintf(fitText, sizeof(fitText), "crop x%.3f", 1.0 / w.zoomShare);   // steady's margin
     else std::snprintf(fitText, sizeof(fitText), "%s", fitName(fit));
-    char steadyText[128];
+    char steadyText[192];
     formatSteady(steadyText, sizeof(steadyText), steady, fit, w);
     return std::snprintf(out, size,
         "desktop view: %s %s%s, presents %llu, drawn %llu, skipped no-eye %llu / stale %llu / failed %llu (last %s), window %ux%u, "

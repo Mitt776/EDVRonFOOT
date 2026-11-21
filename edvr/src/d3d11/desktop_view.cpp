@@ -62,6 +62,8 @@ struct Render {
     std::string rawView, rawFit, rawSteady;
     // desktop-eye-steady: the smoothed orientation, for the eye it follows.
     dv::SteadyFilter filter;
+    dv::SwayMeter headSway, windowSway;   // the log's measure: the head's jitter and what of it reaches the window
+    void resetSteady() { filter.reset(); headSway.reset(); windowSway.reset(); }
     uint32_t filterEye = UINT32_MAX;
     uint64_t lastDrawnSequence = 0;
     uint64_t windowStartMs = 0;
@@ -129,7 +131,7 @@ void readKeys() {
     if (!g_r.saidKey || view != g_r.view || fit != g_r.fit || steady != g_r.steady)
         Log::get().note("desktop view: key %s, fit %s, steady %s%s.", dv::viewName(view), dv::fitName(fit), steady ? "on" : "off",
                         g_everAcquired.load() ? "" : " (the runtime has not handed over an eye table yet)");
-    if (steady != g_r.steady || fit != g_r.fit || view != g_r.view) g_r.filter.reset();
+    if (steady != g_r.steady || fit != g_r.fit || view != g_r.view) g_r.resetSteady();
     g_r.saidKey = true;
     g_r.rawView = rawView; g_r.rawFit = rawFit; g_r.rawSteady = rawSteady;
     g_r.view = view; g_r.fit = fit; g_r.steady = steady;
@@ -314,17 +316,19 @@ dv::Failure draw(IDXGISwapChain* swapChain, ID3D11Device* device, ID3D11Texture2
     dv::Quat s = p;
     bool turn = false;
     if (g_r.steady && g_r.fit != dv::Fit::Whole) {
-        if (g_r.filterEye != e) { g_r.filter.reset(); g_r.filterEye = e; }
+        if (g_r.filterEye != e) { g_r.resetSteady(); g_r.filterEye = e; }
         if (posed) {
             LARGE_INTEGER now{}, freq{};
             QueryPerformanceCounter(&now); QueryPerformanceFrequency(&freq);
             double lag = 0;
             bool clamped = false;
-            s = g_r.filter.update(p, double(now.QuadPart) / double(freq.QuadPart), &lag, &clamped);
+            const double seconds = double(now.QuadPart) / double(freq.QuadPart);
+            s = g_r.filter.update(p, seconds, &lag, &clamped);
             g_r.window.noteLag(lag * 180 / dv::kPi, clamped);
+            g_r.window.noteSway(g_r.headSway.update(p, seconds), g_r.windowSway.update(s, seconds));
             turn = true;
         } else {
-            g_r.filter.reset();
+            g_r.resetSteady();
             ++g_r.window.unposed;
         }
     }

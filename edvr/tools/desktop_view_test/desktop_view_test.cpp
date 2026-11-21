@@ -294,6 +294,42 @@ void partSteadyFilter() {
     check(deg(lag) < 0.05, "a held tilt: the window tilts too");
 }
 
+// The sway meter: a steady turn is not jitter; sway is, and steady removes most of it from the window.
+void partSway() {
+    const double dt = 1.0 / 45;
+    const Quat base = axisAngle(0.2, 1, 0.1, 0.7);
+    SwayMeter turn;
+    double worst = 0;
+    for (int i = 0; i < 4 * 45; ++i) {
+        const double j = turn.update(multiply(base, axisAngle(0, 1, 0, rad(60) * i * dt)), i * dt);
+        if (i * dt > 2) worst = j > worst ? j : worst;
+    }
+    check(deg(worst) < 0.05, "a steady 60 deg/s turn has no sway");
+    SteadyFilter f;
+    SwayMeter head, window;
+    double headSq = 0, windowSq = 0;
+    int n = 0;
+    for (int i = 0; i < 6 * 45; ++i) {
+        const double t = i * dt;
+        const Quat p = multiply(base, axisAngle(1, 0, 0, rad(0.5) * std::sin(2 * kPi * 2 * t)));
+        const Quat s = f.update(p, t);
+        const double h = head.update(p, t), w = window.update(s, t);
+        if (t > 2 && h >= 0 && w >= 0) { headSq += h * h; windowSq += w * w; ++n; }
+    }
+    const double hr = deg(std::sqrt(headSq / n)), wr = deg(std::sqrt(windowSq / n));
+    // +-0.5 deg at 2 Hz is 6.3 deg/s at its peak, 4.4 RMS; the 1 Hz high-pass keeps about nine tenths of it.
+    check(hr > 3.5 && hr < 4.6, "the head's sway is measured");
+    check(wr < hr / 3, "the window's sway is less than a third of the head's");
+    check(head.update(base, 100) < 0, "a gap restarts the meter");
+    Window line;
+    line.noteSway(rad(4), rad(1)); line.noteSway(rad(4), rad(1)); line.noteSway(-1, rad(1));
+    line.noteLag(0.5, false);
+    char tail[192];
+    formatSteady(tail, sizeof(tail), true, Fit::Zoom, line);
+    check(!std::strcmp(tail, "steady on, lag mean 0.50 max 0.50 deg, clamped 0, sway head 4.00 window 1.00 deg/s (x4.0)"),
+          "the sway in the line");
+}
+
 bool pointInTriangle(double x, double y, const float* t) {
     auto side = [&](int i, int j) { return (t[2 * j] - t[2 * i]) * (y - t[2 * i + 1]) - (t[2 * j + 1] - t[2 * i + 1]) * (x - t[2 * i]); };
     const double a = side(0, 1), b = side(1, 2), c = side(2, 0);
@@ -440,6 +476,7 @@ int main(int argc, char** argv) {
     partLine();
     partSteadyKey();
     partSteadyFilter();
+    partSway();
     partSteadyMargin();
     partSteadyMap();
     partSteadyLine();
