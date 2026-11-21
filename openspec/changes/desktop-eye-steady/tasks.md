@@ -39,7 +39,7 @@
 
 ## 5. Облёт (Дима)
 
-- [ ] 5.1 Сборка, коммит, `build.bat --dll-only`, `python tools\install_edvr.py --target steam`, `--verify-only`.
+- [x] 5.1 Сборка, коммит, `build.bat --dll-only`, `python tools\install_edvr.py --target steam`, `--verify-only`.
 - [ ] 5.2 Полёт: вид `right`, подгонка `zoom`, OBS «Захват игры». Минута ходьбы по станции со steady `on`, затем в F8
   `off`, ещё полминуты, снова `on`. Пара резких поворотов к NPC. Проверка руками: в ролике при `on` нет мелкой тряски,
   резкие повороты не тянутся, чёрных краёв нет; в шлеме ничего не изменилось.
