@@ -505,6 +505,15 @@ inline Verdict decide(bool held, uint64_t heldPresentIndex, uint64_t presentInde
     return Verdict::Draw;
 }
 
+// A Present with no new eye (NoEye or Stale) shows a copy of the window's last drawn picture instead of the game's own picture, when
+// that copy exists and was drawn no longer than kRepeatMaxMs ago (flight 2, 22.11: in the ship and in battle the game presents a lone
+// frame without an eye now and then, and its own picture flashed in the recording). A longer gap -- loading, the menu without the
+// eye -- leaves the game's picture, as before.
+constexpr uint64_t kRepeatMaxMs = 250;
+inline bool shouldRepeat(Verdict v, bool haveCopy, uint64_t lastDrawnMs, uint64_t nowMs) {
+    return v != Verdict::Draw && haveCopy && lastDrawnMs && nowMs >= lastDrawnMs && nowMs - lastDrawnMs <= kRepeatMaxMs;
+}
+
 // Why a held eye could not be drawn, the last one named in the log line.
 enum class Failure { None, Device, Format, Bind, Views, Shaders, Window };
 inline const char* failureName(Failure f) {
@@ -522,6 +531,7 @@ inline const char* failureName(Failure f) {
 // The 30 s window's counts, and the line made of them.
 struct Window {
     uint64_t presents = 0, drawn = 0, noEye = 0, stale = 0, failed = 0;
+    uint64_t repeated = 0;   // of the no-eye and stale ones: covered by the copy of the last drawn picture
     Failure lastFailure = Failure::None;
     uint32_t windowW = 0, windowH = 0, eyeW = 0, eyeH = 0;
     ColorPath path = ColorPath::Unsupported;
@@ -588,10 +598,11 @@ inline int formatLine(char* out, size_t size, View view, Fit fit, bool runtime, 
     char steadyText[192];
     formatSteady(steadyText, sizeof(steadyText), steady, fit, w);
     return std::snprintf(out, size,
-        "desktop view: %s %s%s, presents %llu, drawn %llu, skipped no-eye %llu / stale %llu / failed %llu (last %s), window %ux%u, "
-        "eye %ux%u, colour %s, %s, %s.",
+        "desktop view: %s %s%s, presents %llu, drawn %llu, skipped no-eye %llu / stale %llu / failed %llu (last %s), repeated %llu, "
+        "window %ux%u, eye %ux%u, colour %s, %s, %s.",
         viewName(view), fitText, runtime ? "" : ", no runtime", (unsigned long long)w.presents, (unsigned long long)w.drawn,
         (unsigned long long)w.noEye, (unsigned long long)w.stale, (unsigned long long)w.failed, failureName(w.lastFailure),
+        (unsigned long long)w.repeated,
         w.windowW, w.windowH, w.eyeW, w.eyeH, colorPathName(w.path), gpu, steadyText);
 }
 

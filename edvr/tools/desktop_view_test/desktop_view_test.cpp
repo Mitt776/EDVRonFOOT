@@ -150,6 +150,18 @@ void partVerdict() {
         else ++stale;
     }
     check(drawn == 3 && noEye == 1 && stale == 1, "a run with a missing eye and a repeated frame");
+    // A Present without a new eye repeats the last drawn picture while it is fresh (desktop-eye-steady, flight 2's flashes).
+    check(shouldRepeat(Verdict::NoEye, true, 1000, 1022), "a lone frame without an eye repeats the last picture");
+    check(shouldRepeat(Verdict::Stale, true, 1000, 1000 + kRepeatMaxMs), "a stale frame repeats it up to the limit");
+    check(!shouldRepeat(Verdict::NoEye, true, 1000, 1001 + kRepeatMaxMs), "a longer gap (loading) shows the game's picture");
+    check(!shouldRepeat(Verdict::NoEye, false, 1000, 1010), "no copy: the game's picture");
+    check(!shouldRepeat(Verdict::NoEye, true, 0, 10), "nothing drawn yet: the game's picture");
+    check(!shouldRepeat(Verdict::Draw, true, 1000, 1010), "a new eye is drawn, not repeated");
+    Window w;
+    w.presents = 5; w.drawn = 3; w.noEye = 2; w.repeated = 2;
+    char line[640];
+    formatLine(line, sizeof(line), View::Right, Fit::Crop, true, w, false);
+    check(std::strstr(line, "skipped no-eye 2 / stale 0 / failed 0 (last none), repeated 2, window") != nullptr, "the line counts the repeats");
 }
 
 // Four corner triangles x + y < c (and their mirrors): the shape of a lens mask's corners.
@@ -203,7 +215,7 @@ void partZoom() {
     w.zoomShare = 0.8; w.maskTriangles = 64;
     formatLine(line, sizeof(line), View::Right, Fit::Zoom, true, w);
     check(!std::strcmp(line, "desktop view: right zoom x1.250 (mask 64 triangles), presents 10, drawn 10, skipped no-eye 0 / stale 0 / "
-                             "failed 0 (last none), window 1920x1080, eye 2448x2672, colour copy, gpu n/a, steady off."), "the zoom line");
+                             "failed 0 (last none), repeated 0, window 1920x1080, eye 2448x2672, colour copy, gpu n/a, steady off."), "the zoom line");
 }
 
 void partLine() {
@@ -216,12 +228,12 @@ void partLine() {
     w.windowW = 1920; w.windowH = 1080; w.eyeW = 2688; w.eyeH = 2944; w.path = ColorPath::Copy;
     w.noteGpu(0.1); w.noteGpu(0.3); w.noteGpu(NAN);
     formatLine(line, sizeof(line), View::Right, Fit::Crop, true, w);
-    check(!std::strcmp(line, "desktop view: right crop, presents 1350, drawn 1340, skipped no-eye 8 / stale 1 / failed 1 (last format), "
+    check(!std::strcmp(line, "desktop view: right crop, presents 1350, drawn 1340, skipped no-eye 8 / stale 1 / failed 1 (last format), repeated 0, "
                              "window 1920x1080, eye 2688x2944, colour copy, gpu mean 0.200 ms max 0.300 ms, steady off."), "the right crop line");
     Window none;
     none.presents = 900;
     formatLine(line, sizeof(line), View::Left, Fit::Whole, false, none);
-    check(!std::strcmp(line, "desktop view: left whole, no runtime, presents 900, drawn 0, skipped no-eye 0 / stale 0 / failed 0 (last none), "
+    check(!std::strcmp(line, "desktop view: left whole, no runtime, presents 900, drawn 0, skipped no-eye 0 / stale 0 / failed 0 (last none), repeated 0, "
                              "window 0x0, eye 0x0, colour unsupported, gpu n/a, steady off."), "the no-runtime line says drawn 0");
     check(std::strstr(line, "desktop view") == line, "the grep word starts the line");
 }
@@ -445,7 +457,7 @@ void partSteadyLine() {
     w.noteLag(0.5, false); w.noteLag(2.0, true); w.noteLag(NAN, true);
     formatLine(line, sizeof(line), View::Right, Fit::Zoom, true, w, true);
     check(!std::strcmp(line, "desktop view: right zoom x1.250 (mask 29 triangles), presents 2700, drawn 2690, skipped no-eye 0 / stale 0 / "
-                             "failed 0 (last none), window 1920x1080, eye 2448x2672, colour copy, gpu n/a, "
+                             "failed 0 (last none), repeated 0, window 1920x1080, eye 2448x2672, colour copy, gpu n/a, "
                              "steady on, lag mean 1.25 max 2.00 deg, clamped 1."), "the steady on line");
     w.unposed = 3;
     char tail[128];

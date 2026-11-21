@@ -75,6 +75,12 @@ struct Render {
     ComPtr<ID3D11SamplerState> sampler;
     ComPtr<ID3D11Buffer> constants;
     bool madeFailed = false;
+    // The copy of the last drawn picture (saveCopy, repeatCopy) and when it was taken (0: none usable).
+    ComPtr<ID3D11Texture2D> copy;
+    ID3D11Device* copyDevice = nullptr;
+    D3D11_TEXTURE2D_DESC copyDesc{};
+    uint64_t copyMs = 0;
+    bool saidCopyFailed = false;
     // A ring of timestamp pairs, read back a few frames later without a flush.
     struct Timer {
         ComPtr<ID3D11Query> disjoint, begin, end;
@@ -403,6 +409,56 @@ dv::Failure draw(IDXGISwapChain* swapChain, ID3D11Device* device, ID3D11Texture2
     return dv::Failure::None;
 }
 
+// The copy of the window's last drawn picture (shouldRepeat): taken right after a draw, put back on a Present without a new eye. Our
+// own texture, so nothing else writes it between the two.
+bool sameShape(const D3D11_TEXTURE2D_DESC& a, const D3D11_TEXTURE2D_DESC& b) {
+    return a.Width == b.Width && a.Height == b.Height && a.Format == b.Format && a.ArraySize == b.ArraySize &&
+           a.SampleDesc.Count == b.SampleDesc.Count && a.SampleDesc.Quality == b.SampleDesc.Quality;
+}
+bool saveCopy(IDXGISwapChain* swapChain, ID3D11Device* device) {
+    ComPtr<ID3D11Texture2D> back;
+    if (FAILED(swapChain->GetBuffer(0, IID_PPV_ARGS(&back))) || !back) return false;
+    D3D11_TEXTURE2D_DESC bd{};
+    back->GetDesc(&bd);
+    if (!g_r.copy || g_r.copyDevice != device || !sameShape(g_r.copyDesc, bd)) {
+        g_r.copy.Reset();
+        D3D11_TEXTURE2D_DESC cd = bd;
+        cd.MipLevels = 1;
+        cd.Usage = D3D11_USAGE_DEFAULT;
+        cd.BindFlags = D3D11_BIND_RENDER_TARGET;
+        cd.CPUAccessFlags = 0;
+        cd.MiscFlags = 0;
+        if (FAILED(device->CreateTexture2D(&cd, nullptr, g_r.copy.GetAddressOf()))) {
+            g_r.copy.Reset();
+            if (!g_r.saidCopyFailed) {
+                g_r.saidCopyFailed = true;
+                Log::get().note("desktop view: could not make the copy of the window's picture; a frame without an eye shows the game's.");
+            }
+            return false;
+        }
+        g_r.copyDevice = device;
+        g_r.copyDesc = bd;
+    }
+    ComPtr<ID3D11DeviceContext> ctx;
+    device->GetImmediateContext(ctx.GetAddressOf());
+    if (!ctx) return false;
+    ctx->CopyResource(g_r.copy.Get(), back.Get());
+    return true;
+}
+bool repeatCopy(IDXGISwapChain* swapChain, ID3D11Device* device) {
+    if (!g_r.copy || g_r.copyDevice != device) return false;
+    ComPtr<ID3D11Texture2D> back;
+    if (FAILED(swapChain->GetBuffer(0, IID_PPV_ARGS(&back))) || !back) return false;
+    D3D11_TEXTURE2D_DESC bd{};
+    back->GetDesc(&bd);
+    if (!sameShape(g_r.copyDesc, bd)) return false;   // the window was resized: the game's picture this once
+    ComPtr<ID3D11DeviceContext> ctx;
+    device->GetImmediateContext(ctx.GetAddressOf());
+    if (!ctx) return false;
+    ctx->CopyResource(back.Get(), g_r.copy.Get());
+    return true;
+}
+
 void maybeLine(uint64_t now) {
     if (!g_r.windowStartMs) g_r.windowStartMs = now;
     if (now - g_r.windowStartMs < kLineMs) return;
@@ -475,15 +531,23 @@ void desktopViewBeforePresent(IDXGISwapChain* swapChain, ID3D11Device* device, U
     const uint64_t now = nowMs();
     if (g_r.view != dv::View::Off) {
         const dv::Verdict verdict = dv::decide(held.texture != nullptr, held.presentIndex, index, held.sequence, g_r.lastDrawnSequence);
-        if (verdict == dv::Verdict::NoEye) ++g_r.window.noEye;
-        else if (verdict == dv::Verdict::Stale) ++g_r.window.stale;
-        else {
+        if (verdict != dv::Verdict::Draw) {
+            if (verdict == dv::Verdict::NoEye) ++g_r.window.noEye;
+            else ++g_r.window.stale;
+            bool repeated = false;
+            if (dv::shouldRepeat(verdict, g_r.copy != nullptr, g_r.copyMs, now))
+                guardedBudget(g_budget, [&] { repeated = repeatCopy(swapChain, device); });
+            if (repeated) ++g_r.window.repeated;
+        } else {
             dv::Failure failure = dv::Failure::Shaders;
             if (!guardedBudget(g_budget, [&] { failure = draw(swapChain, device, held.texture.Get(), held.bounds, held.eye, held.pose); }))
                 failure = dv::Failure::Shaders;
             if (failure == dv::Failure::None) {
                 ++g_r.window.drawn;
                 g_r.lastDrawnSequence = held.sequence;
+                bool saved = false;
+                guardedBudget(g_budget, [&] { saved = saveCopy(swapChain, device); });
+                g_r.copyMs = saved ? now : 0;
             } else {
                 ++g_r.window.failed;
                 g_r.window.lastFailure = failure;
