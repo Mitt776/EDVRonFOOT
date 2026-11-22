@@ -16,6 +16,7 @@
 #include "steam_identity_cases.h"
 #include "comfort_fade_cases.h"
 #include "aim_eye_cases.h"
+#include "on_foot_height_cases.h"
 #include "canted_display_cases.h"
 #include "parallel_projection_notice_cases.h"
 #include "head_pose_cases.h"
@@ -687,6 +688,7 @@ int selfTest() {
   edvr::openxr::test::runSteamIdentityCases(check);
   edvr::openxr::test::runComfortFadeCases(check);
   edvr::openxr::test::runAimEyeCases(check);
+  edvr::openxr::test::runOnFootHeightCases(check);
   edvr::openxr::test::runHeadAimCases(check);
   edvr::openxr::test::runCantedDisplayCases(check);
   edvr::openxr::test::runParallelProjectionNoticeCases(check);

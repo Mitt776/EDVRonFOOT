@@ -38,6 +38,7 @@
 #include "native_desktop_view_client.h"   // EDVRonFOOT: the desktop eye view
 #include "native_frame_client.h"
 #include "aim_eye_shift.h"
+#include "on_foot_lift.h"
 #include "native_fss_client.h"
 #include "native_fov_trim.h"
 #include "native_timing_client.h"
@@ -211,7 +212,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   NativeFrameClient features;
   NativeFssClient fss;
   NativeFovTrim fovTrim;
-  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_8};
+  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_9};
   EdvrNativeFrameDecision featureDecision{sizeof(featureDecision),EDVR_NATIVE_FRAME_VERSION_1};
   bool featureFrameKnown=false;
   // The aiming eye (aim_eye_shift.h): this frame's offset of the game's head pose, in head axes and metres, which the frame's render and game poses
@@ -228,6 +229,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // and then its tilt about the seated X axis, which the frame's render and game poses and each "now" answer carry last of all. Lives like aimEyeHead: zero until a frame sets it, dropped with the pose frame.
   double headAimYaw=0,headAimPitch=0;
   HeadAimLog headAimLog;
+  // The on-foot height (on_foot_lift.h): this frame's lift of the game's head pose along the seated vertical, metres, already given way to LT, which
+  // the frame's render and game poses and each "now" answer carry after everything else. Lives like aimEyeHead: zero until a frame sets it, dropped
+  // with the pose frame and on a frame without the channel.
+  double onFootLift=0;
+  OnFootHeightLog onFootHeightLog;
   uint64_t fssHealedEyes[2]{},featureChanges=0;
   uint64_t fssDeferredEyes=0;
   // The heal's target eye, held from its own submit until the donor eye's
@@ -443,7 +449,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   } latestPoseFrame;
   void dropPoseFrame() {
     latestPoseFrame=PoseFrame{};aimEyeHead[0]=aimEyeHead[1]=aimEyeHead[2]=0;aimEyeHeadKnown=false;
-    aimSnapTracking[0]=aimSnapTracking[1]=aimSnapTracking[2]=0;aimSnapTrackingKnown=false;headAimYaw=0;headAimPitch=0;
+    aimSnapTracking[0]=aimSnapTracking[1]=aimSnapTracking[2]=0;aimSnapTrackingKnown=false;headAimYaw=0;headAimPitch=0;onFootLift=0;
   }
   // The clock Elite's "now" pose calls read (a rig substitutes its own so "now" is a number it chooses), and the explicit-time locates the runtime
   // refused with XR_ERROR_TIME_INVALID and that were located at now + prediction instead.
@@ -1205,7 +1211,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       gameGeometry.width[eye]=dims.width;gameGeometry.height[eye]=dims.height;
     }
     if(features.acquired()) {
-      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_8};
+      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_9};
       if(features.begin(located,poses.read().originGeneration,next)!=S_OK) {
         boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);
       }
@@ -1281,7 +1287,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // from this frame's pose, not the press's (AimSnap::frame, follow), so the game's eye stays at the origin the character turns about.
     aimEyeHead[0]=aimEyeHead[1]=aimEyeHead[2]=0;aimEyeHeadKnown=false;
     aimSnapTracking[0]=aimSnapTracking[1]=aimSnapTracking[2]=0;aimSnapTrackingKnown=false;
-    headAimYaw=0;headAimPitch=0;
+    headAimYaw=0;headAimPitch=0;onFootLift=0;
     if(features.acquired()&&featureFrameKnown) {
       const auto& snapFrom=render.pose.bPoseIsValid?render.pose:game.pose;
       aimSnap.frame(featureFrame.aimEye,featureFrame.aimEyeBlend,snapFrom.mDeviceToAbsoluteTracking,snapFrom.bPoseIsValid,featureFrame.headAimFeature==1);
@@ -1309,6 +1315,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         turnAboutHorizontal(pose->mDeviceToAbsoluteTracking,headAimPitch);
       }
       headAimLog.frame(features.providerVersion(),featureFrame.headAimProbe,featureFrame.headAimFeature,headAimYaw,headAimPitch,GetTickCount64(),[](const char* line){nativeTracePuts(line);});
+      // The on-foot height: straight up along the seated vertical, after the turn and the tilt, giving way to LT by the aiming eye's own blend
+      // while its shift acts this frame. Same two places and the answer below. The layer, located.headPose and frameViews stay as located.
+      onFootLift=onFootLiftM(featureFrame.onFootHeightM,aimEyeHeadKnown,featureFrame.aimEyeBlend);
+      if(onFootLift!=0) for(auto* pose:{&render.pose,&game.pose}) if(pose->bPoseIsValid) applyOnFootLift(pose->mDeviceToAbsoluteTracking,onFootLift);
+      onFootHeightLog.frame(features.providerVersion(),featureFrame.onFootHeightM,GetTickCount64(),[](const char* line){nativeTracePuts(line);});
     } else aimSnap.reset();
     if(locatedValid) geometry.recommend(gameGeometry.width,gameGeometry.height);
     // The temporal pass is sized by what the frame it is handed was rendered
@@ -2467,6 +2478,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // The head aim's turn and then tilt of the same frame, last, as the frame's own poses carry them.
     if(pose.bPoseIsValid&&headAimYaw!=0)turnAboutVertical(pose.mDeviceToAbsoluteTracking,headAimYaw);
     if(pose.bPoseIsValid&&headAimPitch!=0)turnAboutHorizontal(pose.mDeviceToAbsoluteTracking,headAimPitch);
+    // The on-foot height of the same frame, after everything else, as the frame's own poses carry it.
+    if(pose.bPoseIsValid&&onFootLift!=0)applyOnFootLift(pose.mDeviceToAbsoluteTracking,onFootLift);
     out=pose;return true;
   }
   bool resetSeated(uint64_t generation) override {

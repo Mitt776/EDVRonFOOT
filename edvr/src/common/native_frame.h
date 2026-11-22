@@ -44,6 +44,12 @@
 // caller never learns of them, and a runtime that asks version 8 of a
 // d3d11.dll that refuses the shape steps down and reads "no tilt" (0).
 #define EDVR_NATIVE_FRAME_VERSION_8 8u
+// Version 9 adds onFootHeightM to the END and nothing else (the on-foot
+// camera height, on_foot_height_signal.h; openspec change on-foot-height),
+// under the same hand-copied-DLLs rule: a version 1 to 8 caller never learns
+// of it, and a runtime that asks version 9 of a d3d11.dll that refuses the
+// shape steps down and reads "no lift" (0).
+#define EDVR_NATIVE_FRAME_VERSION_9 9u
 
 // The game producer owns the device and generation passed at acquire. The
 // methods in the table are CPU-only and are called by the XR owner after the
@@ -127,6 +133,12 @@ struct EdvrNativeFrameOutput {
     // the frame, for the runtime's summary line.
     float headAimPitchRad;
     uint32_t headAimFeature;
+    // Version 9 and later. The on-foot camera height (on_foot_height_core.h):
+    // metres the runtime lifts the head pose it gives the GAME by, along the
+    // seated space's vertical, last, before the LT share; already ramped and
+    // already 0 off foot, in the ship and in the main menu. 0 (no lift, the
+    // only value an older provider can mean) by default.
+    float onFootHeightM;
 };
 
 // The size the fields through resubmitEnabled occupy, which is what a
@@ -160,6 +172,10 @@ struct EdvrNativeFrameOutput {
 // caller's struct is, with no tail padding before headAimPitchRad.
 #define EDVR_NATIVE_FRAME_OUTPUT_SIZE_7 \
     ((uint32_t)offsetof(EdvrNativeFrameOutput, headAimPitchRad))
+// The size the fields through headAimFeature occupy, which is what a version 8
+// caller's struct is, with no tail padding before onFootHeightM.
+#define EDVR_NATIVE_FRAME_OUTPUT_SIZE_8 \
+    ((uint32_t)offsetof(EdvrNativeFrameOutput, onFootHeightM))
 
 struct EdvrNativeFrameDecision {
     uint32_t size, version;
