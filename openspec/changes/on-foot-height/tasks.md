@@ -42,7 +42,7 @@
 
 ## 5. Облёт (Дима)
 
-- [ ] 5.1 Сборка, коммит, `build.bat --dll-only`, `python tools\install_edvr.py --target steam`, `--verify-only`.
+- [x] 5.1 Сборка, коммит, `build.bat --dll-only`, `python tools\install_edvr.py --target steam`, `--verify-only`.
 - [ ] 5.2 Полёт на станции. Метка `PAUSE`. Встать рядом с NPC при 0, recenter. В F8 On foot → On-foot height +5, потом
   +10, +20, −5 и обратно: мир опускается/поднимается плавно, без рывка; подобрать значение, при котором глаза NPC на
   уровне глаз. Покрутить и наклонить головой: мир не плывёт. Метки над дверями не отстают при смене. Метка `PAUSE`.
