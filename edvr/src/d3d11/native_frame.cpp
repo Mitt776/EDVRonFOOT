@@ -3,6 +3,7 @@
 #include "../common/aim_eye_signal.h"
 #include "../common/comfort_fade.h"
 #include "../common/head_aim_signal.h"
+#include "../common/on_foot_height_signal.h"
 #include "../common/config.h"
 #include "../common/frame_flag.h"
 #include "../common/log.h"
@@ -239,15 +240,19 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
                           EdvrNativeFrameOutput* output) {
     std::lock_guard<std::mutex> lock(g_mutex);
     State* state = identify(context);
-    // A version 1 to 7 caller is an openvr_api.dll from before the head aim
-    // feature (or, earlier, the head aim probe, the aiming eye, the comfort
+    // A version 1 to 8 caller is an openvr_api.dll from before the on-foot
+    // height (or, earlier, the head aim feature, the head aim probe, the aiming eye, the comfort
     // fade, the channel probe, turbo pacing or the field-of-view trim)
     // existed. Each gets exactly the fields it knows about, and whatever it
     // cannot carry stays out of its struct entirely. wantsProbe covers version
-    // 7 and 8 (both carry the turn), wantsAim version 6 to 8 (all carry the aim).
-    const bool wantsFeature = output &&
-        output->version == EDVR_NATIVE_FRAME_VERSION_8 &&
+    // 7 to 9 (all carry the turn), wantsAim version 6 to 9 (all carry the aim),
+    // wantsFeature version 8 and 9 (both carry the tilt).
+    const bool wantsHeight = output &&
+        output->version == EDVR_NATIVE_FRAME_VERSION_9 &&
         output->size == sizeof(*output);
+    const bool wantsFeature = output && (wantsHeight ||
+        (output->version == EDVR_NATIVE_FRAME_VERSION_8 &&
+         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_8));
     const bool wantsProbe = output && (wantsFeature ||
         (output->version == EDVR_NATIVE_FRAME_VERSION_7 &&
          output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_7));
@@ -277,7 +282,8 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
         input->valid > 1 || (input->valid && !rigidPose(input->physicalHead))) return E_INVALIDARG;
 
     EdvrNativeFrameOutput result{};
-    result.size = wantsFeature ? sizeof(result)
+    result.size = wantsHeight ? sizeof(result)
+                 : wantsFeature ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_8
                  : wantsProbe ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_7
                  : wantsAim ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_6
                  : wantsFade ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_5
@@ -285,7 +291,8 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
                  : wantsPacing ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_3
                  : wantsTrim  ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_2
                               : EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
-    result.version = wantsFeature ? EDVR_NATIVE_FRAME_VERSION_8
+    result.version = wantsHeight ? EDVR_NATIVE_FRAME_VERSION_9
+                    : wantsFeature ? EDVR_NATIVE_FRAME_VERSION_8
                     : wantsProbe ? EDVR_NATIVE_FRAME_VERSION_7
                     : wantsAim ? EDVR_NATIVE_FRAME_VERSION_6
                     : wantsFade ? EDVR_NATIVE_FRAME_VERSION_5
@@ -314,7 +321,8 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     if (wantsProbe) {
         const edvr::head_aim::Turn turn = edvr::head_aim::latch(
             input->sequence, GetTickCount64(), input->valid ? input->physicalHead : nullptr,
-            wantsFeature ? EDVR_NATIVE_FRAME_VERSION_8 : EDVR_NATIVE_FRAME_VERSION_7);
+            wantsHeight ? EDVR_NATIVE_FRAME_VERSION_9
+            : wantsFeature ? EDVR_NATIVE_FRAME_VERSION_8 : EDVR_NATIVE_FRAME_VERSION_7);
         result.headAimYawRad = turn.yawRad;
         result.headAimProbe = turn.probe;
         if (wantsFeature) {
@@ -322,6 +330,10 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
             result.headAimFeature = turn.feature;
         }
     }
+    // The on-foot camera height (on_foot_height_signal.h): only a version 9
+    // caller has the slot; every older shape never learns of it and its
+    // runtime lifts nothing.
+    if (wantsHeight) result.onFootHeightM = edvr::on_foot_height::read();
     // The old Explorer Cam's headset offset (headOffset, yawRadians,
     // offsetEnabled, offsetGamePoses) is retired: those slots stay zero, so a
     // runtime built before 2026-10-07 reads "no offset" and applies none.

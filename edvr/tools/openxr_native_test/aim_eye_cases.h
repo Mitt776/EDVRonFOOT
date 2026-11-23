@@ -43,7 +43,7 @@ struct Provider {
   uint32_t maxVersion = 6, eye = 2, onFoot = 1; float blend = 1.0f; bool scribble = false;
   HRESULT answer(EdvrNativeFrameOutput& o) {
     if (o.version > maxVersion || o.version < EDVR_NATIVE_FRAME_VERSION_1) return E_INVALIDARG;
-    const uint32_t want = o.version == 8 ? uint32_t(sizeof(o)) : o.version == 7 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_7 : o.version == 6 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_6 : o.version == 5 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_5 : o.version == 4 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_4
+    const uint32_t want = o.version == 9 ? uint32_t(sizeof(o)) : o.version == 8 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_8 : o.version == 7 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_7 : o.version == 6 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_6 : o.version == 5 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_5 : o.version == 4 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_4
       : o.version == 3 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_3 : o.version == 2 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_2 : EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
     if (o.size != want) return E_INVALIDARG;
     if (o.version >= 6 || scribble) { o.aimEye = eye; o.aimEyeBlend = blend; o.aimOnFoot = onFoot; }
@@ -458,7 +458,7 @@ template<class Check> void runHeadAimCases(Check&& check) {
       uint32_t maxVersion = 8; float yaw = 0.2f, pitch = -0.1f; uint32_t probe = 1, feature = 1;
       HRESULT answer(EdvrNativeFrameOutput& o) {
         if (o.version > maxVersion) return E_INVALIDARG;
-        const uint32_t want = o.version == 8 ? uint32_t(sizeof(o)) : o.version == 7 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_7 : o.version == 6 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_6 : 0u;
+        const uint32_t want = o.version == 9 ? uint32_t(sizeof(o)) : o.version == 8 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_8 : o.version == 7 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_7 : o.version == 6 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_6 : 0u;
         if (o.size != want) return E_INVALIDARG;
         o.aimEye = 2; o.aimEyeBlend = 1.0f; o.aimOnFoot = 1;
         if (o.version >= 7) { o.headAimYawRad = yaw; o.headAimProbe = probe; }

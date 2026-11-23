@@ -44,6 +44,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "explorer_cam.h"   // explorerCamFrameBoundary (the frame tick) and explorerCamShutdown (the avatar dither-fade global goes back at an unload)
 #include "native_vr_on_foot.h" // EDVRonFOOT: nativeVrOnFootFrameBoundary (the frame tick: the key, the two switches)
 #include "on_foot_aim_eye.h"   // EDVRonFOOT: onFootAimEyeFrameBoundary
+#include "on_foot_height.h"    // EDVRonFOOT: onFootHeightFrameBoundary
 #include "on_foot_hud.h"       // EDVRonFOOT: onFootHudFrameBoundary
 #include "on_foot_markers.h"   // EDVRonFOOT: onFootMarkersFrameBoundary
 #include "ui_surfaces.h"   // the glyph atlas and sizing chain instruments
@@ -1221,6 +1222,7 @@ EDVR_BOUNDARY_TICK(tkExplorerCam, "explorer_cam");
 // EDVRonFOOT: native VR on foot (native_vr_on_foot.h). Like Explorer Cam it must run on every owned Present.
 EDVR_BOUNDARY_TICK(tkNativeVrOnFoot, "native_vr_on_foot");
 EDVR_BOUNDARY_TICK(tkOnFootAimEye, "on_foot_aim_eye");
+EDVR_BOUNDARY_TICK(tkOnFootHeight, "on_foot_height");
 EDVR_BOUNDARY_TICK(tkHeadAim, "head_aim");
 EDVR_BOUNDARY_TICK(tkScopeZoom, "scope_zoom");
 EDVR_BOUNDARY_TICK(tkOnFootHud, "on_foot_hud");
@@ -1574,6 +1576,9 @@ void presentFrameBoundary() {
     // EDVRonFOOT: the aiming eye (on_foot_aim_eye.h): LT on foot ramps a blend and publishes it for the runtime's head-pose shift. After the
     // journal's tick it reads; published every frame, because a signal 200 ms old reads as no shift.
     tkOnFootAimEye.run([] { onFootAimEyeFrameBoundary(); });
+    // EDVRonFOOT: the on-foot camera height (on_foot_height.h): its key, the journal and the main menu, the ramp, published every frame for
+    // the runtime's lift of the game's head pose. After the journal's tick it reads.
+    tkOnFootHeight.run([] { onFootHeightFrameBoundary(); });
     // EDVRonFOOT: the on-foot head aim (head_aim.h): its key, the journal, who the player is, what the latch may do, the lines.
     tkHeadAim.run([] { headAimFrameBoundary(); });
     // EDVRonFOOT: the scope zoom (scope_zoom.h): after the aiming eye (its dominant eye) and the head aim (the barrel's lag). At off one

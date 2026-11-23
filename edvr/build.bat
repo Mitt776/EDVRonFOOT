@@ -539,6 +539,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\on_foot_hud.cpp" ^
     "src\d3d11\aim_dot.cpp" ^
     "src\d3d11\on_foot_aim_eye.cpp" ^
+    "src\d3d11\on_foot_height.cpp" ^
     "src\d3d11\head_aim.cpp" ^
     "src\d3d11\scope_zoom.cpp" ^
     "src\d3d11\desktop_view.cpp" ^
@@ -3166,6 +3167,20 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     "tools\desktop_view_test\desktop_view_test.cpp" /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: desktop view test build failed & exit /b 1 )
 "%BUILD%\desktop_view_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_on_foot_height_test
+echo [edvr] === on_foot_height_test.exe ===
+REM EDVRonFOOT: build gate for the on-foot camera height (src\d3d11\on_foot_height_core.h, experimental.native_vr_on_foot_height;
+REM openspec change on-foot-height). Drives the pure half: the key as whole cm (in range, clamped at -10 and +20, fractions rounded, not a
+REM number read 0), the target on foot, in the ship, in the main menu and with the journal not knowing, the ramp (0 to +10 cm in about
+REM 0.1 s without overshoot, back to 0, a pause moving one small step) and the key line's text.
+if not exist "%OBJ%\onfootheight" mkdir "%OBJ%\onfootheight"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\onfootheight"\ /Fe"%BUILD%\on_foot_height_test.exe" ^
+    "tools\on_foot_height_test\on_foot_height_test.cpp" /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: on-foot height test build failed & exit /b 1 )
+"%BUILD%\on_foot_height_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_head_aim_test
